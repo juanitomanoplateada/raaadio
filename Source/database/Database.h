@@ -131,6 +131,9 @@ public:
     bool setTrackCategories(int trackId, const std::vector<int>& categoryIds);
     bool addTrackCategory(int trackId, int categoryId);  // sin quitar las que ya tiene
     std::unordered_map<int, std::vector<int>> getAllTrackCategories();  // id de pista → categorías
+    // Pistas que están en alguna categoría del sistema (identificaciones, cuñas, separadores)
+    // con su rol; las que no aparecen son música.
+    std::unordered_map<int, CategoryRole> getSystemRolesByTrack();
 
     // Registro de emisión
     bool addPlayLogEntry(const PlayLogEntry& entry);

@@ -636,6 +636,11 @@ std::unordered_map<int, std::vector<int>> MusicLibrary::getAllTrackCategories() 
     return db.getAllTrackCategories();
 }
 
+std::unordered_map<int, CategoryRole> MusicLibrary::getSystemRolesByTrack() {
+    const juce::ScopedLock sl(dbLock);
+    return db.getSystemRolesByTrack();
+}
+
 bool MusicLibrary::setTrackCategories(int trackId, const std::vector<int>& categoryIds) {
     const juce::ScopedLock sl(dbLock);
     return db.setTrackCategories(trackId, categoryIds);

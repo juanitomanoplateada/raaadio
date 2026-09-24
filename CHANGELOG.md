@@ -22,8 +22,15 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
 - **Pauta automática** (`AdScheduler`): inserta la tanda de cada franja 20 minutos antes,
   donde empieza más cerca de su hora, sin repetirla al reiniciar.
 - **Botonera** de 12 cartuchos con F1–F12, directo al aire (`CartPlayer`).
-- **Transmisión por internet** a Icecast en Ogg Vorbis, con reconexión y título de lo
-  que suena (`StreamEncoder`).
+- **Transmisión por internet** a Icecast y compatibles (Zeno.fm), sin BUTT: **MP3** con LAME
+  (64–320 kbps, `libmp3lame.dll` aparte) u **Ogg Vorbis**, con reconexión (`StreamEncoder`).
+  Datos de la emisora para directorios (género, descripción, sitio web, listado público).
+- **Título para los oyentes**: `Artista - Título` de lo que está al aire, y el nombre de la
+  emisora durante cuñas, identificaciones y separadores. En MP3 va por `/admin/metadata`,
+  en otro hilo y con retardo opcional para que coincida con el audio.
+- **Lo que suena en JSON** (`NowPlaying`, `NowPlayingPublisher`): anterior, actual y
+  siguientes, solo música y con horas; en `/nowplaying.json` y enviado por POST a la página
+  web de la emisora en cada cambio y cada minuto.
 - **Registro de lo emitido**: la salida al aire en archivos de una hora, con retención.
 - **Registro de emisión** (`play_log`) y **cola persistente** (`Config/queue.json`).
 - **Categorías fijas de la emisora**: IDENTIFICACIONES, CUÑAS y SEPARADORES, reconocidas
@@ -37,7 +44,7 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
   espacio y cancelación.
 - **Modo de captura de la interfaz** (`--ui-snapshot`) para revisar cambios visuales y
   generar las imágenes del README sin abrir dispositivos de audio.
-- Pruebas automáticas (`RAAADIO_Tests`, `ctest`): más de 340 comprobaciones.
+- Pruebas automáticas (`RAAADIO_Tests`, `ctest`): más de 500 comprobaciones.
 - Organización del repositorio: licencia, guía de contribución, política de seguridad,
   plantillas de GitHub, integración continua en Windows, `.gitattributes` y `.editorconfig`.
 
@@ -59,9 +66,12 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
 - Terminología de publicidad: "N.º de cuña" en lugar de "Número de Cue"; la pauta se
   adapta a pantallas de 1366 px.
 - Los textos de la interfaz y las imágenes van **dentro del ejecutable**: basta copiar
-  `RAAADIO.exe`.
+  `RAAADIO.exe` (y `libmp3lame.dll` para transmitir en MP3).
 - Toda la SQL usa sentencias preparadas; el generador trabaja sobre datos cargados de
   una vez y su lógica es pura y probada.
+- Lo que se transmite pasa por un **limitador con techo de −1 dBFS**, para que la
+  compresión MP3/Ogg no sature en el reproductor del oyente. La salida al aire no cambia.
+- La pestaña *Emisión* se desplaza y agrupa la transmisión y lo que suena.
 
 ### Corregido
 
@@ -86,6 +96,9 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
 
 - La clave del servidor de streaming se guarda **cifrada con DPAPI** para el usuario de
   Windows; ya no queda en claro en `station.json` ni en los respaldos.
+- Los datos de la emisora que van en las cabeceras del servidor se limpian de saltos de
+  línea (no se pueden inyectar cabeceras). `libmp3lame.dll` solo se carga desde la carpeta
+  del ejecutable.
 
 ## [1.0.0]
 

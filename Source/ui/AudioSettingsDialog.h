@@ -6,11 +6,12 @@
 #include "../helpers/PersistenceManager.h"
 #include "../helpers/StationSettings.h"
 #include "../network/StreamEncoder.h"
+#include "../network/NowPlayingPublisher.h"
 
 class SettingsDialog : public juce::Component {
 public:
     SettingsDialog(juce::AudioDeviceManager& mainDevice, juce::AudioDeviceManager& cueDevice, MusicLibrary& lib, AdvertisingManager& ads,
-                   StationConfig& station, StreamEncoder& streamEncoder, juce::File airLogFolder);
+                   StationConfig& station, StreamEncoder& streamEncoder, NowPlayingPublisher* nowPlaying, juce::File airLogFolder);
     ~SettingsDialog();
     
     void resized() override;
@@ -91,21 +92,25 @@ private:
         std::unique_ptr<juce::FileChooser> fileChooser;
     };
 
-    // Emisión: protección contra silencio, registro de lo emitido y transmisión Icecast.
+    // Emisión: protección contra silencio, registro de lo emitido, transmisión por internet
+    // y publicación de lo que suena. Es más alta que el diálogo: va dentro de un Viewport.
     class BroadcastTab : public juce::Component, private juce::Timer {
     public:
-        BroadcastTab(StationConfig& station, StreamEncoder& streamEncoder, juce::File airLogFolder);
+        BroadcastTab(StationConfig& station, StreamEncoder& streamEncoder, NowPlayingPublisher* nowPlaying, juce::File airLogFolder);
         void resized() override;
         void lookAndFeelChanged() override;
+        static int getIdealHeight();
     private:
-        void timerCallback() override;  // estado de la transmisión
+        void timerCallback() override;  // estado de la transmisión y del último envío
         void apply();                   // guarda lo que dicen los controles
+        void fillQualityOptions();      // según el formato: kbps de MP3 o calidades de Ogg
 
         StationConfig& station;
         StreamEncoder& streamEncoder;
+        NowPlayingPublisher* nowPlaying;
         juce::File airLogFolder;
 
-        juce::GroupComponent deadAirGroup, airLogGroup, streamGroup;
+        juce::GroupComponent deadAirGroup, airLogGroup, streamGroup, nowPlayingGroup;
 
         juce::ToggleButton deadAirToggle;
         juce::Label deadAirSecondsLabel;
@@ -118,11 +123,28 @@ private:
         juce::TextButton openLogFolderButton;
 
         struct Field { juce::Label label; juce::TextEditor editor; };
-        Field host, port, mount, user, password, name;
-        juce::Label qualityLabel;
-        juce::ComboBox quality;
+        struct Choice { juce::Label label; juce::ComboBox combo; };
+        Field host, port, mount, user, password, name, genre, website, description;
+        Choice format, quality;
+        juce::ToggleButton publicToggle;
+        juce::Label metadataDelayLabel;
+        juce::ComboBox metadataDelay;
         juce::ToggleButton streamToggle;
         juce::Label streamStatusLabel;
+
+        juce::Label nowPlayingHint;
+        Field pushUrl;
+        juce::TextButton viewDataButton;
+        juce::Label pushStatusLabel;
+    };
+
+    // Una pestaña más alta que el diálogo, con barra de desplazamiento.
+    class ScrollingTab : public juce::Viewport {
+    public:
+        ScrollingTab(juce::Component& content, int contentHeight);
+        void resized() override;
+    private:
+        int contentHeight;
     };
 
 
@@ -154,6 +176,7 @@ private:
     std::unique_ptr<AudioTab> audioTab;
     std::unique_ptr<LibraryTab> libraryTab;
     std::unique_ptr<BroadcastTab> broadcastTab;
+    std::unique_ptr<ScrollingTab> broadcastScroller;
     std::unique_ptr<LanguageTab> languageTab;
     std::unique_ptr<UpdatesTab> updatesTab;
 

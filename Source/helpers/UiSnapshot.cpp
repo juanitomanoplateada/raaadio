@@ -272,6 +272,17 @@ void UiSnapshotRunner::populateDemoState()
     deckA.setPosition(118.0);
     deckA.play();
 
+    // Emisión: un servidor de ejemplo (en este modo nunca se conecta ni envía nada).
+    auto station = main->stationConfig->get();
+    station.streamHost = "stream.example.org";
+    station.streamMount = "/raaadio";
+    station.streamName = "RAAADIO FM";
+    station.streamGenre = "Tropical";
+    station.streamWebsite = "https://raaadio.example.org";
+    station.streamDescription = juce::String::fromUTF8("Música tropical las 24 horas");
+    station.nowPlayingPushUrl = "https://raaadio.example.org/ahora.php";
+    main->stationConfig->set(station);
+
     // Sin dispositivo de audio, el snapshot alimenta el mezclador a mano para que
     // avancen los decks y se muevan los medidores.
     main->audioEngine.getMixer().prepareToPlay(512, 44100.0);
@@ -310,7 +321,7 @@ juce::Component* UiSnapshotRunner::createView()
         dialogView = std::make_unique<SettingsDialog>(main->audioEngine.getDeviceManager(),
                                                       main->audioEngine.getCueDeviceManager(),
                                                       main->library, main->adsManager, *main->stationConfig,
-                                                      main->streamEncoder, PersistenceManager::getRecordingsFolder().getChildFile("Registro"));
+                                                      main->streamEncoder, main->nowPlaying.get(), PersistenceManager::getRecordingsFolder().getChildFile("Registro"));
         height = 640;
     }
     else if (view == "generator")
@@ -339,8 +350,14 @@ juce::Component* UiSnapshotRunner::createView()
 
     if (view.startsWith("settings-"))
         if (auto* tabs = findFirstChild<juce::TabbedComponent>(dialogView.get()))
-            tabs->setCurrentTabIndex(view == "settings-library" ? 1 : view == "settings-broadcast" ? 2
+            tabs->setCurrentTabIndex(view == "settings-library" ? 1 : view.startsWith("settings-broadcast") ? 2
                                     : view == "settings-about" ? 4 : 3);
+
+    // La pestaña Emisión se desplaza: settings-broadcast-2 muestra su parte de abajo.
+    if (view == "settings-broadcast-2")
+        if (auto* tabs = findFirstChild<juce::TabbedComponent>(dialogView.get()))
+            if (auto* scroller = dynamic_cast<juce::Viewport*>(tabs->getCurrentContentComponent()))
+                scroller->setViewPositionProportionately(0.0, 1.0);
 
     return dialogView.get();
 }

@@ -676,6 +676,19 @@ std::unordered_map<int, std::vector<int>> Database::getAllTrackCategories() {
     return result;
 }
 
+std::unordered_map<int, CategoryRole> Database::getSystemRolesByTrack() {
+    std::unordered_map<int, CategoryRole> result;
+    sqlite3_stmt* stmt;
+    const char* sql = "SELECT tc.track_id, MAX(c.system_role) FROM track_categories tc "
+                      "JOIN categories c ON c.id = tc.category_id WHERE c.system_role > 0 GROUP BY tc.track_id;";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW)
+            result[sqlite3_column_int(stmt, 0)] = (CategoryRole) sqlite3_column_int(stmt, 1);
+        sqlite3_finalize(stmt);
+    }
+    return result;
+}
+
 bool Database::setTrackCategories(int trackId, const std::vector<int>& categoryIds) {
     execute("BEGIN TRANSACTION;");
     run("DELETE FROM track_categories WHERE track_id = ?1;", [trackId](sqlite3_stmt* s) { sqlite3_bind_int(s, 1, trackId); });

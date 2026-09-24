@@ -46,6 +46,45 @@ if(UNIX)
     target_link_libraries(ebur128 PRIVATE m)
 endif()
 
+# LAME 3.100 (LGPL): codificador MP3 para la transmisión por internet. Se compila como
+# biblioteca aparte (libmp3lame.dll, junto al ejecutable) y RAAADIO la carga al transmitir
+# en MP3: así la LGPL se cumple (se puede reemplazar la DLL) y RAAADIO sigue siendo MIT.
+# Sin la DLL, RAAADIO funciona igual y transmite en Ogg Vorbis.
+FetchContent_Declare(
+    lame
+    URL https://deb.debian.org/debian/pool/main/l/lame/lame_3.100.orig.tar.gz
+        https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz
+    URL_HASH SHA256=ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SOURCE_SUBDIR no-cmake
+)
+FetchContent_MakeAvailable(lame)
+
+set(LAME_SOURCES
+    libmp3lame/bitstream.c libmp3lame/encoder.c libmp3lame/fft.c libmp3lame/gain_analysis.c
+    libmp3lame/id3tag.c libmp3lame/lame.c libmp3lame/newmdct.c libmp3lame/psymodel.c
+    libmp3lame/quantize.c libmp3lame/quantize_pvt.c libmp3lame/vector/xmm_quantize_sub.c
+    libmp3lame/set_get.c libmp3lame/vbrquantize.c libmp3lame/reservoir.c libmp3lame/tables.c
+    libmp3lame/takehiro.c libmp3lame/util.c libmp3lame/mpglib_interface.c libmp3lame/VbrTag.c
+    libmp3lame/presets.c libmp3lame/version.c
+    mpglib/common.c mpglib/dct64_i386.c mpglib/decode_i386.c mpglib/layer1.c mpglib/layer2.c
+    mpglib/layer3.c mpglib/tabinit.c mpglib/interface.c
+)
+list(TRANSFORM LAME_SOURCES PREPEND ${lame_SOURCE_DIR}/)
+
+if(MSVC)
+    # La configuración para Visual C++ que trae LAME, como config.h.
+    configure_file(${lame_SOURCE_DIR}/configMS.h ${CMAKE_CURRENT_BINARY_DIR}/lame_config/config.h COPYONLY)
+    add_library(mp3lame SHARED ${LAME_SOURCES} ${lame_SOURCE_DIR}/include/lame.def)
+    target_include_directories(mp3lame PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/lame_config
+        ${lame_SOURCE_DIR}/include ${lame_SOURCE_DIR}/libmp3lame ${lame_SOURCE_DIR}/mpglib)
+    target_compile_definitions(mp3lame PRIVATE
+        HAVE_CONFIG_H HAVE_MPGLIB TAKEHIRO_IEEE754_HACK NDEBUG _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(mp3lame PRIVATE /W0)
+    set_target_properties(mp3lame PROPERTIES OUTPUT_NAME libmp3lame)
+endif()
+
 juce_add_gui_app(RAAADIO
     PRODUCT_NAME "RAAADIO"
     VERSION 1.0.0
@@ -122,6 +161,12 @@ target_sources(RAAADIO PRIVATE
     Source/network/ApiServer.cpp
     Source/network/StreamEncoder.h
     Source/network/StreamEncoder.cpp
+    Source/network/Mp3Encoder.h
+    Source/network/Mp3Encoder.cpp
+    Source/network/NowPlaying.h
+    Source/network/NowPlaying.cpp
+    Source/network/NowPlayingPublisher.h
+    Source/network/NowPlayingPublisher.cpp
     Source/library/MusicLibrary.h
     Source/library/MusicLibrary.cpp
     Source/library/TagReader.h
@@ -200,9 +245,21 @@ target_link_libraries(RAAADIO PRIVATE
 
 juce_generate_juce_header(RAAADIO)
 
+# libmp3lame.dll y su licencia van junto a cada ejecutable que transmite.
+function(raaadio_copy_lame target)
+    if(TARGET mp3lame)
+        add_dependencies(${target} mp3lame)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:mp3lame> $<TARGET_FILE_DIR:${target}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${lame_SOURCE_DIR}/COPYING $<TARGET_FILE_DIR:${target}>/libmp3lame-COPYING.txt)
+    endif()
+endfunction()
+raaadio_copy_lame(RAAADIO)
+
 # Pruebas: persistencia (rutas portables, registro de emisión, cola), mezclador,
 # análisis de audio (LUFS, puntos de entrada y salida), etiquetas, importación, generador,
-# horarios y pauta, protección contra silencio, registro por hora, botonera y transmisión.
+# horarios y pauta, protección contra silencio, registro por hora, botonera, transmisión
+# (Ogg Vorbis y MP3) y los datos de lo que suena.
 # Ejecutar con: ctest -C Release --test-dir build   (o el .exe directamente)
 option(RAAADIO_BUILD_TESTS "Compilar las pruebas de RAAADIO" ON)
 if(RAAADIO_BUILD_TESTS)
@@ -233,6 +290,10 @@ if(RAAADIO_BUILD_TESTS)
         Source/audio/AirLogRecorder.cpp
         Source/audio/CartPlayer.cpp
         Source/network/StreamEncoder.cpp
+        Source/network/Mp3Encoder.cpp
+        Source/network/NowPlaying.cpp
+        Source/network/ApiServer.cpp
+        Source/network/NowPlayingPublisher.cpp
         Source/helpers/StationSettings.cpp
         Source/helpers/SecretStore.cpp
     )
@@ -251,6 +312,8 @@ if(RAAADIO_BUILD_TESTS)
         sqlite3
         ebur128
     )
+
+    raaadio_copy_lame(RAAADIO_Tests)
 
     enable_testing()
     add_test(NAME RAAADIO_Tests COMMAND RAAADIO_Tests)

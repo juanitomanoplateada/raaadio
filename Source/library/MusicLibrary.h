@@ -84,6 +84,7 @@ public:
 
     std::vector<int> getTrackCategories(int trackId);
     std::unordered_map<int, std::vector<int>> getAllTrackCategories();  // una sola consulta
+    std::unordered_map<int, CategoryRole> getSystemRolesByTrack();  // las que no están son música
     bool setTrackCategories(int trackId, const std::vector<int>& categoryIds);
 
     // Registro de emisión (tabla play_log)

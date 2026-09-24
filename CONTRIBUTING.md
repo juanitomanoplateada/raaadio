@@ -57,8 +57,8 @@ build\RAAADIO_artefacts\Release\RAAADIO.exe --ui-snapshot captura.png --size 136
 ```
 
 `--view` acepta `main`, `empty`, `history`, `ads`, `cartwall`, `settings`,
-`settings-library`, `settings-broadcast`, `settings-language`, `settings-about`, `generator`, `track` e
-`import`. Revisa tus cambios en **tema claro y oscuro**, en **español e inglés** y a
+`settings-library`, `settings-broadcast`, `settings-broadcast-2` (la parte de abajo de Emisión),
+`settings-language`, `settings-about`, `generator`, `track` e `import`. Revisa tus cambios en **tema claro y oscuro**, en **español e inglés** y a
 **1366 × 768** (la pantalla más común en cabinas). Las imágenes del README están en
 `docs/screenshots/`; si cambias algo que se ve ahí, vuelve a generarlas.
 

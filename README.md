@@ -175,15 +175,24 @@ nombre: renombrar o traducir la interfaz no rompe la publicidad.
 
 ### Emisión
 
-- **Transmisión por internet** a un servidor Icecast en Ogg Vorbis (64 a 500 kbps), sin otro
-  programa. Reconecta sola y los oyentes ven el título de lo que está al aire, no de lo que se
-  preescucha. En Windows la clave se guarda cifrada (DPAPI).
+- **Transmisión por internet** a Icecast, Zeno.fm y compatibles, sin BUTT ni otro programa: **MP3**
+  (64 a 320 kbps, con LAME; lo abre cualquier reproductor, iPhone incluido) u **Ogg Vorbis**.
+  Reconecta sola; la clave se guarda cifrada en Windows (DPAPI).
+- **Título para los oyentes** limpio (`Artista - Título`) y solo de lo que está al aire, no de
+  lo que se preescucha. Durante cuñas, identificaciones y separadores muestra el nombre de la
+  emisora. En MP3 va por `/admin/metadata` y se puede retrasar unos segundos para que cambie
+  junto con el audio que oye el oyente.
+- **Techo de -1 dBFS** en lo que se transmite, para que los picos que agrega la compresión MP3 u
+  Ogg no saturen en el reproductor del oyente.
+- **Datos de la emisora** para directorios y reproductores: nombre, género, descripción,
+  sitio web y si se lista en directorios públicos.
 - **Registro de lo emitido** (opcional): la salida al aire en archivos de una hora (Ogg Vorbis
   mono, unos 20 MB por hora) con días de retención; sirve como constancia ante el regulador.
 - **Registro de emisión** en la base de datos (`play_log`): cada pista que sale al aire con
   hora, deck, título y artista. La preescucha no cuenta.
 - **Grabadora** del bus maestro en un hilo propio, sin cortes por picos de carga.
-- **API local** de "now playing" para RDS, sitios web o codificadores externos.
+- **Lo que suena en JSON** (anterior, actual y siguientes, con horas): en la API local y, si se
+  configura, enviado a la página web de la emisora en cada cambio. Ver [API local](#api-local).
 
 ### Biblioteca
 
@@ -201,7 +210,7 @@ nombre: renombrar o traducir la interfaz no rompe la publicidad.
 - Temas **claro** y **oscuro**, iconos vectoriales y una distribución que funciona desde
   1366 × 768.
 - **Bilingüe** (español e inglés), conmutable en caliente. Los textos van dentro del
-  ejecutable: basta copiar `RAAADIO.exe`.
+  ejecutable: basta copiar `RAAADIO.exe` (y `libmp3lame.dll` para transmitir en MP3).
 
 ---
 
@@ -226,7 +235,7 @@ Build Tools con la carga de trabajo "Desarrollo de escritorio con C++".
 
 ## Instalación
 
-RAAADIO usa `FetchContent`: CMake descarga JUCE 8.0.3, SQLite y libebur128 por su cuenta.
+RAAADIO usa `FetchContent`: CMake descarga JUCE 8.0.3, SQLite, libebur128 y LAME 3.100 por su cuenta.
 
 ```bash
 git clone https://github.com/juanitomanoplateada/raaadio.git
@@ -236,7 +245,9 @@ cmake --build build --config Release --parallel
 ```
 
 El ejecutable queda en `build/RAAADIO_artefacts/Release/RAAADIO.exe` y es autónomo: para
-instalarlo en la máquina de aire basta copiar ese archivo.
+instalarlo en la máquina de aire basta copiar ese archivo. Al lado quedan `libmp3lame.dll` y su
+licencia (`libmp3lame-COPYING.txt`): cópialos junto al `.exe` para transmitir en MP3. Sin ellos
+RAAADIO funciona igual y transmite en Ogg Vorbis.
 
 <details>
 <summary><b>La primera compilación tarda</b></summary>
@@ -266,7 +277,8 @@ cmake -S . -B build && cmake --build build --config Release
 
 En macOS, con las Xcode Command Line Tools: `cmake -S . -B build -G Xcode`.
 
-Fuera de Windows la clave del streaming se guarda sin cifrar.
+Fuera de Windows la clave del streaming se guarda sin cifrar, y para transmitir en MP3 hace falta
+la biblioteca de LAME del sistema (`libmp3lame`; en Debian y Ubuntu, `sudo apt install libmp3lame0`).
 
 </details>
 
@@ -320,34 +332,97 @@ cambia de letra o se lleva a otro equipo.
 
 ---
 
+## Transmitir por internet
+
+En *Configuración → Emisión → Transmisión por internet*. Los datos son los mismos que pide
+BUTT; por ejemplo, para **Zeno.fm** (su panel muestra los datos para el codificador):
+
+| Zeno.fm / BUTT | RAAADIO | Ejemplo |
+|---|---|---|
+| Dirección | Servidor | `link.zeno.fm` |
+| Puerto | Puerto | `80` |
+| Punto de montaje | Punto de montaje | el que da Zeno (con o sin `/`) |
+| Usuario | Usuario | `source` |
+| Contraseña | Contraseña | la que da Zeno |
+| Formato | Formato y Calidad | **MP3, 128 kbps** (el mismo que elegiste en el panel de Zeno) |
+
+Marca **Transmitir** y el estado pasa a *Transmitiendo*. RAAADIO usa el método `SOURCE` de
+Icecast (el "protocolo anticuado" de BUTT), que acepta Icecast 2 y los servicios compatibles.
+No hay SSL/TLS: la conexión va sin cifrar, igual que en BUTT con el puerto 80.
+
+- **MP3 u Ogg.** MP3 lo abre cualquier reproductor; Ogg Vorbis suena mejor con los mismos
+  kbps, pero Zeno.fm no lo acepta y algunos reproductores (sobre todo en iPhone) no lo abren.
+- **Título.** En MP3 el título se envía aparte, a `/admin/metadata` del mismo servidor. Si en
+  la app de Zeno el título cambia unos segundos antes que la canción, sube *Retrasar el título*.
+- **Anterior y siguiente no viajan en el audio.** El protocolo tiene un solo campo de texto
+  (`StreamTitle`), así que el título es siempre `Artista - Título`, el formato que las apps
+  usan para buscar la carátula. Lo anterior y lo siguiente van en el JSON de abajo.
+
+---
+
 ## API local
 
 RAAADIO expone un servidor HTTP en `127.0.0.1:8080` con lo que está al aire, para alimentar
-codificadores RDS, sitios web o servidores de streaming.
+codificadores RDS, pantallas de cabina, OBS o scripts propios.
 
 | Método | Endpoint | Respuesta | Content-Type |
 |---|---|---|---|
 | `GET` | `/nowplaying` | `Artista - Título` | `text/plain; charset=utf-8` |
+| `GET` | `/nowplaying.json` | anterior, actual y siguientes | `application/json; charset=utf-8` |
 
 ```bash
 curl http://127.0.0.1:8080/nowplaying
 # GRUPO NICHE - UNA AVENTURA
 ```
 
-La respuesta incluye `Access-Control-Allow-Origin: *`, así que se puede leer desde una página
-local:
-
-```js
-const res = await fetch("http://127.0.0.1:8080/nowplaying");
-document.querySelector("#now-playing").textContent = await res.text();
+```jsonc
+// curl http://127.0.0.1:8080/nowplaying.json
+{
+  "station": "RAAADIO FM",
+  "state": "music",                      // "music", "break" (cuña, identificación, separador) u "off"
+  "updated": "2026-09-24T16:59:21.000-05:00",
+  "now": {                               // null durante una tanda o si no suena nada
+    "artist": "GRUPO NICHE", "title": "UNA AVENTURA", "text": "GRUPO NICHE - UNA AVENTURA",
+    "duration": 283, "started": "2026-09-24T16:57:10.000-05:00", "ends": "2026-09-24T17:01:49.000-05:00"
+  },
+  "previous": [                          // la más reciente primero, hasta 5
+    { "artist": "REY RUIZ", "title": "NO ME ACOSTUMBRO", "text": "REY RUIZ - NO ME ACOSTUMBRO",
+      "duration": 291, "played": "2026-09-24T16:52:22.000-05:00" }
+  ],
+  "next": [                              // hasta 3; "eta" es null si no se sabe
+    { "artist": "RICHIE RAY Y BOBBY CRUZ", "title": "SONIDO BESTIAL", "text": "…",
+      "duration": 411, "eta": "2026-09-24T17:01:49.000-05:00" }
+  ]
+}
 ```
 
-Solo cuenta lo que está al aire: una pista en preescucha no cambia la respuesta. Si suenan dos
-decks (una mezcla), gana el que arrancó último; si no suena nada, devuelve el nombre de la
-emisora.
+Solo cuenta la música que está al aire: una pista en preescucha no cambia nada, y las cuñas,
+identificaciones y separadores no aparecen entre las anteriores ni las siguientes. Si suenan
+dos decks (una mezcla), gana el que arrancó último. Las respuestas incluyen
+`Access-Control-Allow-Origin: *`, así que se pueden leer desde una página local:
+
+```js
+const res = await fetch("http://127.0.0.1:8080/nowplaying.json");
+const np = await res.json();
+document.querySelector("#now-playing").textContent = np.now ? np.now.text : np.station;
+```
 
 > El servidor escucha solo en `127.0.0.1`. Exponerlo a la red requiere un proxy inverso, a
 > propósito: la máquina de aire no queda abierta por defecto.
+
+**Para la página web de la emisora**, escribe en *Configuración → Emisión → Enviar a la página
+web* la dirección de un script tuyo: RAAADIO le envía el mismo JSON por `POST` en cada cambio y
+una vez por minuto, y la pestaña muestra si el último envío llegó. RAAADIO no manda
+credenciales; pon una clave larga en la dirección y compruébala en el servidor. Un receptor
+mínimo en PHP que deja el JSON en `ahora.json` para que la página lo lea:
+
+```php
+<?php // ahora.php — en RAAADIO: https://tusitio.com/ahora.php?clave=UNA-CLAVE-LARGA
+if (!hash_equals('UNA-CLAVE-LARGA', $_GET['clave'] ?? '')) { http_response_code(403); exit; }
+$json = file_get_contents('php://input');
+if (json_decode($json) === null) { http_response_code(400); exit; }
+file_put_contents(__DIR__ . '/ahora.json', $json, LOCK_EX);
+```
 
 ---
 
@@ -430,8 +505,11 @@ Source/
 ├── library/                  # Biblioteca, etiquetas, cola, historial y pauta
 ├── database/Database.*       # SQLite: esquema, migraciones y consultas preparadas
 ├── network/
-│   ├── ApiServer.*           # "Now playing" en 127.0.0.1:8080
-│   └── StreamEncoder.*       # Transmisión a Icecast (Ogg Vorbis)
+│   ├── ApiServer.*           # "Now playing" en 127.0.0.1:8080 (texto y JSON)
+│   ├── StreamEncoder.*       # Transmisión a Icecast (MP3 u Ogg Vorbis) y títulos
+│   ├── Mp3Encoder.*          # MP3 con LAME (libmp3lame.dll, cargada al transmitir)
+│   ├── NowPlaying.*          # Anterior, actual y siguientes: armado y JSON
+│   └── NowPlayingPublisher.* # Título del stream, API y envío a la página web
 ├── helpers/                  # Idioma, temas, estilo, carpeta y respaldos, ajustes, claves
 └── ui/                       # Componentes y diálogos
 Tests/RaaadioTests.cpp        # Pruebas automáticas (ctest)
@@ -461,11 +539,11 @@ docs/screenshots/             # Capturas del README (generadas con --ui-snapshot
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Más de 340 comprobaciones cubren la base de datos y sus migraciones, el análisis de audio,
+Más de 500 comprobaciones cubren la base de datos y sus migraciones, el análisis de audio,
 las etiquetas, la importación, los decks, la cola, la pauta, la protección contra silencio,
-la botonera, el streaming, los respaldos y "reproducir ahora". Corren en laboratorios
-temporales, sin tocar la emisora real. La integración continua compila y prueba cada cambio
-en Windows.
+la botonera, el streaming (Ogg, MP3 y títulos), lo que suena, los respaldos y "reproducir
+ahora". Corren en laboratorios temporales, sin tocar la emisora real. La integración continua
+compila y prueba cada cambio en Windows.
 
 El ejecutable también puede renderizar la interfaz a un PNG con datos de demostración, sin
 abrir dispositivos de audio (así se generan las capturas de este README):
@@ -475,7 +553,8 @@ RAAADIO.exe --ui-snapshot captura.png --size 1366x768 --theme dark --lang es --v
 ```
 
 `--view` acepta `main`, `empty`, `history`, `ads`, `cartwall`, `settings`, `settings-library`,
-`settings-broadcast`, `settings-language`, `settings-about`, `generator`, `track` e `import`.
+`settings-broadcast`, `settings-broadcast-2` (la parte de abajo de Emisión), `settings-language`,
+`settings-about`, `generator`, `track` e `import`.
 
 ---
 
@@ -483,11 +562,12 @@ RAAADIO.exe --ui-snapshot captura.png --size 1366x768 --theme dark --lang es --v
 
 - [x] Normalización por LUFS (EBU R 128) y puntos de entrada y salida
 - [x] Pauta de 24 horas con tandas automáticas
-- [x] Streaming integrado (Icecast, Ogg Vorbis)
+- [x] Streaming integrado (Icecast y compatibles; MP3 u Ogg Vorbis)
+- [x] Lo que suena en JSON (anterior, actual y siguientes), local y enviado a la página web
 - [x] Respaldos consistentes y emisora portable
-- [ ] Streaming en MP3 (necesita LAME) para oyentes con iPhone, que no reproducen Ogg
 - [ ] Exportar el registro de emisión para reportes al regulador
-- [ ] Endpoint `/nowplaying.json` con metadatos estructurados
+- [ ] AAC y conexión cifrada (TLS) al servidor de streaming
+- [ ] RadioText (RDS) para el transmisor FM
 - [ ] Instalador y compilaciones firmadas
 
 ---
@@ -504,6 +584,10 @@ seguridad van por [SECURITY.md](SECURITY.md). Los cambios de cada versión está
 ## Licencia
 
 Distribuido bajo licencia MIT. Consulta [LICENSE](LICENSE).
+
+Para transmitir en MP3, RAAADIO carga `libmp3lame.dll`, compilada sin cambios desde
+[LAME 3.100](https://lame.sourceforge.io/) (LGPL 2): va aparte del ejecutable, con su licencia
+(`libmp3lame-COPYING.txt`), y se puede reemplazar por otra compilación de LAME.
 
 ---
 

@@ -22,9 +22,10 @@ void ApiServer::stop() {
     stopThread(2000);
 }
 
-void ApiServer::updateNowPlaying(const juce::String& artist, const juce::String& title) {
+void ApiServer::update(const juce::String& text, const juce::String& json) {
     juce::ScopedLock sl(lock);
-    currentInfo = artist + " - " + title;
+    currentText = text;
+    currentJson = json;
 }
 
 void ApiServer::run() {
@@ -40,46 +41,41 @@ void ApiServer::run() {
 void ApiServer::handleConnection(juce::StreamingSocket* client) {
     if (!client->isConnected()) return;
 
-     
     if (client->waitUntilReady(true, 2000)) {
         char buffer[1024];
         int bytesRead = client->read(buffer, 1024, false);
         
         if (bytesRead > 0) {
-            juce::String request(buffer, bytesRead);
-            juce::String firstLine = request.upToFirstOccurrenceOf("\r\n", false, false);
-            
-            if (firstLine.containsIgnoreCase("GET /nowplaying")) {
-                 
-                 juce::String responseBody;
-                {
-                    juce::ScopedLock sl(lock);
-                    responseBody = currentInfo;
-                }
+            // "GET /ruta?consulta HTTP/1.1": solo cuenta la ruta.
+            const juce::String request(buffer, (size_t) bytesRead);
+            const auto tokens = juce::StringArray::fromTokens(request.upToFirstOccurrenceOf("\r\n", false, false), " ", "");
+            const auto path = tokens.size() >= 2 && tokens[0] == "GET" ? tokens[1].upToFirstOccurrenceOf("?", false, false) : juce::String();
 
-                juce::String response = 
-                    "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: text/plain; charset=utf-8\r\n"
-                    "Access-Control-Allow-Origin: *\r\n"
-                    "Content-Length: " + juce::String(responseBody.getNumBytesAsUTF8()) + "\r\n"
-                    "Connection: close\r\n"
-                    "\r\n" + 
-                    responseBody;
-                    
-                client->write(response.toRawUTF8(), response.getNumBytesAsUTF8());
+            int status = 200;
+            juce::String type = "text/plain", body;
+            if (path == "/nowplaying.json") {
+                juce::ScopedLock sl(lock);
+                type = "application/json";
+                body = currentJson;
+            } else if (path == "/nowplaying") {
+                juce::ScopedLock sl(lock);
+                body = currentText;
             } else {
-                 
-                juce::String responseBody = "Endpoint not found. Use /nowplaying";
-                juce::String response = 
-                    "HTTP/1.1 404 Not Found\r\n"
-                    "Content-Type: text/plain; charset=utf-8\r\n"
-                    "Access-Control-Allow-Origin: *\r\n"
-                    "Content-Length: " + juce::String(responseBody.getNumBytesAsUTF8()) + "\r\n"
-                    "Connection: close\r\n"
-                    "\r\n" + 
-                    responseBody;
-                client->write(response.toRawUTF8(), response.getNumBytesAsUTF8());
+                status = 404;
+                body = "Endpoint not found. Use /nowplaying or /nowplaying.json";
             }
+
+            juce::String response =
+                juce::String("HTTP/1.1 ") + (status == 200 ? "200 OK" : "404 Not Found") + "\r\n"
+                "Content-Type: " + type + "; charset=utf-8\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
+                "Cache-Control: no-store\r\n"
+                "Content-Length: " + juce::String(body.getNumBytesAsUTF8()) + "\r\n"
+                "Connection: close\r\n"
+                "\r\n" +
+                body;
+
+            client->write(response.toRawUTF8(), (int) response.getNumBytesAsUTF8());
         }
     }
     

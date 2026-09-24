@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # JUCE, SQLite y libebur128 se descargan con FetchContent: se guardan entre corridas.
+      # JUCE, SQLite, libebur128 y LAME se descargan con FetchContent: se guardan entre corridas.
       - name: Caché de dependencias
         uses: actions/cache@v4
         with:
@@ -35,5 +35,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: RAAADIO-windows-x64
-          path: build/RAAADIO_artefacts/Release/RAAADIO.exe
+          path: |
+            build/RAAADIO_artefacts/Release/RAAADIO.exe
+            build/RAAADIO_artefacts/Release/libmp3lame.dll
+            build/RAAADIO_artefacts/Release/libmp3lame-COPYING.txt
           if-no-files-found: error

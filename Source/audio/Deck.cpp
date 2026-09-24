@@ -308,7 +308,8 @@ bool Deck::hasFinished() const {
 
     if (loopingState) return false;
     
-    if (transportSource == nullptr) return false;
+    // Sin pista cargada no hay nada que termine (y hasStreamFinished de JUCE no lo revisa).
+    if (transportSource == nullptr || !isLoaded()) return false;
     
     if (transportSource->hasStreamFinished()) return true;
 

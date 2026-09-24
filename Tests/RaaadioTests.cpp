@@ -23,6 +23,10 @@
 #include "../Source/audio/AirLogRecorder.h"
 #include "../Source/audio/CartPlayer.h"
 #include "../Source/network/StreamEncoder.h"
+#include "../Source/network/Mp3Encoder.h"
+#include "../Source/network/NowPlaying.h"
+#include "../Source/network/NowPlayingPublisher.h"
+#include "../Source/network/ApiServer.h"
 #include "../Source/helpers/StationSettings.h"
 #include "../Source/helpers/SecretStore.h"
 #include "../Source/ui/DragFormats.h"
@@ -957,6 +961,7 @@ public:
         Mixer mixer;
         mixer.addDeck(&deck);
         mixer.prepareToPlay(512, 44100.0);
+        expect(!deck.isLoaded() && !deck.hasFinished(), "un deck vacío no ha terminado nada (y no se cae al preguntarle)");
 
         auto import = [&](const juce::String& name, double seconds, Signal signal) {
             const auto file = writeWav(outside.root.getChildFile(name + ".wav"), seconds, std::move(signal));
@@ -2001,35 +2006,65 @@ class StreamingTests : public juce::UnitTest
 public:
     StreamingTests() : juce::UnitTest("Transmisión Icecast", "RAAADIO") {}
 
-    // Servidor Icecast de mentira en 127.0.0.1: lee la petición, responde y guarda lo
-    // que llega hasta ver untilText (o agotar el tiempo).
+    // Servidor Icecast de mentira en 127.0.0.1. Una conexión SOURCE recibe la respuesta
+    // (200 o 401) y, si se aceptó, se guarda lo que llega hasta ver untilText (o agotar el
+    // tiempo). Las peticiones /admin/metadata se anotan y se responden como Icecast.
     struct FakeIcecast {
         explicit FakeIcecast(bool accept, juce::String until = {}) : accepting(accept), untilText(std::move(until)) {
             listening = server.createListener(0, "127.0.0.1");
-            thread = std::thread([this] { serve(); });
+            thread = std::thread([this] { acceptLoop(); });
         }
         ~FakeIcecast() {
             server.close();
             if (thread.joinable()) thread.join();
+            for (auto& t : sources) t.join();
         }
         int port() const { return server.getBoundPort(); }
 
-        void serve() {
-            std::unique_ptr<juce::StreamingSocket> client(server.waitForNextConnection());
-            if (client == nullptr) return;
+        static juce::String readHeaders(juce::StreamingSocket& client) {
+            juce::String headers;
             char c = 0;
-            while (!request.endsWith("\r\n\r\n") && client->waitUntilReady(true, 5000) == 1 && client->read(&c, 1, false) == 1)
-                request += juce::String::charToString((juce::juce_wchar) (juce::uint8) c);
+            while (!headers.endsWith("\r\n\r\n") && headers.length() < 8192
+                   && client.waitUntilReady(true, 5000) == 1 && client.read(&c, 1, false) == 1)
+                headers += juce::String::charToString((juce::juce_wchar) (juce::uint8) c);
+            return headers;
+        }
 
+        void acceptLoop() {
+            for (;;) {
+                std::shared_ptr<juce::StreamingSocket> client(server.waitForNextConnection());
+                if (client == nullptr) return;
+                const auto headers = readHeaders(*client);
+                if (headers.startsWith("GET /admin/metadata")) {
+                    {
+                        const juce::ScopedLock sl(lock);
+                        adminRequests.add(headers);
+                        adminTimes.add(juce::Time::getMillisecondCounter());
+                    }
+                    const char* reply = "HTTP/1.0 200 OK\r\nContent-Type: text/xml\r\n\r\n"
+                                        "<?xml version=\"1.0\"?>\n<iceresponse><message>Metadata update successful</message>"
+                                        "<return>1</return></iceresponse>\n";
+                    client->write(reply, (int) strlen(reply));
+                    continue;
+                }
+                {
+                    const juce::ScopedLock sl(lock);
+                    if (request.isEmpty()) request = headers;
+                }
+                sources.emplace_back([this, client] { serveSource(*client); });
+            }
+        }
+
+        void serveSource(juce::StreamingSocket& client) {
             const char* reply = accepting ? "HTTP/1.0 200 OK\r\n\r\n" : "HTTP/1.0 401 Unauthorized\r\n\r\n";
-            client->write(reply, (int) strlen(reply));
+            client.write(reply, (int) strlen(reply));
             if (!accepting) return;
 
             const auto deadline = juce::Time::getMillisecondCounter() + 8000;
             char buffer[8192];
             while (juce::Time::getMillisecondCounter() < deadline) {
-                if (client->waitUntilReady(true, 200) != 1) continue;
-                const int n = client->read(buffer, (int) sizeof(buffer), false);
+                if (client.waitUntilReady(true, 200) != 1) continue;
+                const int n = client.read(buffer, (int) sizeof(buffer), false);
                 if (n <= 0) break;
                 {
                     const juce::ScopedLock sl(lock);
@@ -2047,14 +2082,37 @@ public:
             return std::search(begin, end, utf8, utf8 + strlen(utf8)) != end;
         }
         size_t size() { const juce::ScopedLock sl(lock); return received.getSize(); }
+        juce::String sourceRequest() { const juce::ScopedLock sl(lock); return request; }
+
+        // Hora (contador de milisegundos) de la primera petición de título que contiene text; 0 si no llegó.
+        juce::uint32 adminRequestTime(const juce::String& text) {
+            const juce::ScopedLock sl(lock);
+            for (int i = 0; i < adminRequests.size(); ++i)
+                if (adminRequests[i].contains(text)) return adminTimes[i];
+            return 0;
+        }
+        juce::String firstAdminRequest() { const juce::ScopedLock sl(lock); return adminRequests[0]; }
+
+        // Cuadros MP3: la sincronía de 11 bits (0xFFE) en dos bytes seguidos.
+        int mp3FrameSyncs() {
+            const juce::ScopedLock sl(lock);
+            const auto* bytes = static_cast<const juce::uint8*>(received.getData());
+            int count = 0;
+            for (size_t i = 0; i + 1 < received.getSize(); ++i)
+                if (bytes[i] == 0xFF && (bytes[i + 1] & 0xE0) == 0xE0) ++count;
+            return count;
+        }
 
         bool accepting;
         juce::String untilText;
         juce::StreamingSocket server;
         bool listening = false;
         std::thread thread;
-        juce::String request;
+        std::vector<std::thread> sources;
         juce::CriticalSection lock;
+        juce::String request;
+        juce::StringArray adminRequests;
+        juce::Array<juce::uint32> adminTimes;
         juce::MemoryBlock received;
     };
 
@@ -2062,19 +2120,84 @@ public:
     {
         StreamEncoder::Server server;
         server.host = "127.0.0.1";
-        server.mount = "prueba.ogg";
+        server.mount = "prueba";
         server.user = "source";
         server.password = "secreto";
         server.name = "Radio Prueba";
 
-        beginTest("La petición SOURCE lleva el punto de montaje, la clave y el tipo");
+        beginTest("La petición SOURCE lleva el punto de montaje, la clave, el formato y los datos de la emisora");
         {
-            const auto request = StreamEncoder::buildSourceRequest(server);
-            expect(request.startsWith("SOURCE /prueba.ogg HTTP/1.0\r\n"));
+            auto s = server;
+            s.format = StreamEncoder::Format::Mp3;
+            s.bitrate = 192;
+            s.genre = "Tropical";
+            s.website = "https://radio.example.org";
+            s.name = "Radio\r\nX-Inyectada: 1";
+            const auto request = StreamEncoder::buildSourceRequest(s, 48000.0);
+            expect(request.startsWith("SOURCE /prueba HTTP/1.0\r\n"), request);
             expect(request.contains("Authorization: Basic " + juce::Base64::toBase64("source:secreto") + "\r\n"));
-            expect(request.contains("Content-Type: application/ogg\r\n") && request.endsWith("\r\n\r\n"));
+            expect(request.contains("Content-Type: audio/mpeg\r\n") && request.endsWith("\r\n\r\n"));
+            expect(request.contains("ice-genre: Tropical\r\n") && request.contains("ice-url: https://radio.example.org\r\n"));
+            expect(request.contains("ice-public: 0\r\n") && !request.contains("ice-description"), "lo vacío no se manda");
+            expect(request.contains("ice-audio-info: ice-samplerate=48000;ice-bitrate=192;ice-channels=2\r\n"), request);
+            expect(!request.contains("\r\nX-Inyectada"), "un salto de línea en el nombre no crea otra cabecera");
+
+            s.format = StreamEncoder::Format::OggVorbis;
+            s.isPublic = true;
+            const auto ogg = StreamEncoder::buildSourceRequest(s);
+            expect(ogg.contains("Content-Type: application/ogg\r\n") && ogg.contains("ice-public: 1\r\n"));
+
             expect(StreamEncoder::isAccepted("HTTP/1.0 200 OK") && StreamEncoder::isAccepted("ICY 200 OK"));
             expect(!StreamEncoder::isAccepted("HTTP/1.0 401 Unauthorized") && !StreamEncoder::isAccepted(""));
+        }
+
+        beginTest("El título en MP3 va por /admin/metadata, en UTF-8 y con los caracteres escapados");
+        {
+            const auto song = StreamEncoder::songText("ARTISTA", juce::String::fromUTF8("CANCIÓN & más"));
+            expectEquals(song, juce::String::fromUTF8("ARTISTA - CANCIÓN & más"));
+            expectEquals(StreamEncoder::songText("", "Radio Prueba"), juce::String("Radio Prueba"), "sin artista, solo el título");
+            expectEquals(StreamEncoder::songText("ARTISTA", " "), juce::String("ARTISTA"));
+
+            const auto request = StreamEncoder::buildMetadataRequest(server, song);
+            expect(request.startsWith("GET /admin/metadata?mount=%2Fprueba&mode=updinfo&song=ARTISTA%20-%20CANCI%C3%93N%20%26%20m%C3%A1s"
+                                      "&charset=UTF-8 HTTP/1.0\r\n"), request);
+            expect(request.contains("Authorization: Basic " + juce::Base64::toBase64("source:secreto") + "\r\n"));
+        }
+
+        beginTest("MP3 con LAME: se codifica y se vuelve a leer igual");
+        {
+            expect(Mp3Encoder::isAvailable(), "falta libmp3lame.dll junto a las pruebas");
+            expect(Mp3Encoder::libraryVersion().startsWith("3."), Mp3Encoder::libraryVersion());
+            expectEquals(Mp3Encoder::outputRateFor(48000.0), 48000);
+            expectEquals(Mp3Encoder::outputRateFor(96000.0), 44100, "una tasa que MP3 no admite pasa a 44,1 kHz");
+
+            Mp3Encoder encoder;
+            expect(encoder.open(44100.0, 128));
+            std::vector<float> left(44100 * 2), right(44100 * 2);
+            for (size_t i = 0; i < left.size(); ++i)
+                left[i] = right[i] = tone(i / 44100.0, 0.5f, 1000.0);
+            juce::MemoryBlock mp3;
+            for (size_t done = 0; done < left.size(); done += 1000)
+                expect(encoder.encode(left.data() + done, right.data() + done, (int) juce::jmin<size_t>(1000, left.size() - done), mp3));
+            encoder.flush(mp3);
+
+            // 2 s a 128 kbps: unos 32 000 bytes.
+            expect(mp3.getSize() > 28000 && mp3.getSize() < 36000, juce::String((int) mp3.getSize()) + " bytes");
+            const auto* bytes = static_cast<const juce::uint8*>(mp3.getData());
+            expect(mp3.getSize() > 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0, "empieza con un cuadro MP3, sin etiqueta");
+
+            juce::MP3AudioFormat format;
+            std::unique_ptr<juce::AudioFormatReader> reader(format.createReaderFor(new juce::MemoryInputStream(mp3, false), true));
+            expect(reader != nullptr);
+            if (reader != nullptr) {
+                expectEquals((int) reader->sampleRate, 44100);
+                expect(reader->lengthInSamples >= 88200 && reader->lengthInSamples < 88200 + 4000,
+                       juce::String(reader->lengthInSamples));
+                juce::AudioBuffer<float> decoded(2, 44100);
+                reader->read(&decoded, 0, 44100, 22050, true, true);
+                const float rms = decoded.getRMSLevel(0, 0, 44100);
+                expectWithinAbsoluteError(rms, 0.5f / std::sqrt(2.0f), 0.02f);
+            }
         }
 
         juce::AudioBuffer<float> block(2, 512);
@@ -2086,15 +2209,17 @@ public:
         {
             FakeIcecast icecast(true, "TITLE=SIGUIENTE");
             expect(icecast.listening);
-            server.port = icecast.port();
+            auto s = server;
+            s.format = StreamEncoder::Format::OggVorbis;
+            s.port = icecast.port();
 
             StreamEncoder encoder;
             encoder.prepare(44100.0);
             encoder.setNowPlaying("ARTISTA", juce::String::fromUTF8("CANCIÓN"));
-            encoder.start(server);
+            encoder.start(s);
 
             bool changedTitle = false;
-            for (int i = 0; i < 1500 && icecast.thread.joinable() && !icecast.contains("TITLE=SIGUIENTE"); ++i) {
+            for (int i = 0; i < 1500 && !icecast.contains("TITLE=SIGUIENTE"); ++i) {
                 encoder.pushBlock(block, 0, 512);
                 if (!changedTitle && icecast.size() > 8000) {
                     encoder.setNowPlaying("OTRO", "SIGUIENTE");
@@ -2105,19 +2230,86 @@ public:
             expect(encoder.getStatus() == StreamEncoder::Status::Connected);
             encoder.stop();
 
-            expect(icecast.request.startsWith("SOURCE /prueba.ogg HTTP/1.0"), icecast.request);
+            const auto request = icecast.sourceRequest();
+            expect(request.startsWith("SOURCE /prueba HTTP/1.0") && request.contains("application/ogg"), request);
             expect(icecast.contains("OggS"), "llegan páginas Ogg");
             expect(icecast.contains(juce::String::fromUTF8("TITLE=CANCIÓN")) && icecast.contains("ARTIST=ARTISTA"),
                    "el título y el artista con tildes");
             expect(icecast.contains("TITLE=SIGUIENTE"), "al cambiar de canción empieza un flujo encadenado con el título nuevo");
         }
 
+        beginTest("Transmite MP3 y manda el título aparte: al conectar enseguida, después con el retardo");
+        {
+            FakeIcecast icecast(true);
+            expect(icecast.listening);
+            auto s = server;
+            s.format = StreamEncoder::Format::Mp3;
+            s.port = icecast.port();
+            s.metadataDelaySeconds = 1;
+
+            StreamEncoder encoder;
+            encoder.prepare(44100.0);
+            encoder.setNowPlaying("ARTISTA", juce::String::fromUTF8("CANCIÓN"));
+            encoder.start(s);
+
+            juce::uint32 changedAt = 0, arrivedAt = 0;
+            for (int i = 0; i < 1500 && arrivedAt == 0; ++i) {
+                encoder.pushBlock(block, 0, 512);
+                if (changedAt == 0 && icecast.size() > 4000 && icecast.adminRequestTime("CANCI%C3%93N") != 0) {
+                    encoder.setNowPlaying("OTRO", "SIGUIENTE");
+                    changedAt = juce::Time::getMillisecondCounter();
+                }
+                if (changedAt != 0) arrivedAt = icecast.adminRequestTime("SIGUIENTE");
+                juce::Thread::sleep(3);
+            }
+            expect(encoder.getStatus() == StreamEncoder::Status::Connected);
+            encoder.stop();
+
+            const auto request = icecast.sourceRequest();
+            expect(request.startsWith("SOURCE /prueba HTTP/1.0") && request.contains("Content-Type: audio/mpeg"), request);
+            expect(icecast.mp3FrameSyncs() > 10, "llegan cuadros MP3");
+            expect(!icecast.contains("OggS"), "no es Ogg");
+            expect(icecast.adminRequestTime("song=ARTISTA%20-%20CANCI%C3%93N") != 0, "el título de la canción al conectar");
+            if (icecast.adminRequestTime("CANCI%C3%93N") != 0)
+                expect(icecast.firstAdminRequest().contains("mount=%2Fprueba&mode=updinfo"), icecast.firstAdminRequest());
+            expect(arrivedAt != 0, "el título siguiente llegó");
+            if (arrivedAt != 0)
+                expect(arrivedAt - changedAt >= 900 && arrivedAt - changedAt < 4000,
+                       "con el retardo de 1 s: " + juce::String((int) (arrivedAt - changedAt)) + " ms");
+        }
+
+        beginTest("Lo que se transmite no pasa de -1 dBFS");
+        {
+            MasterLimiter limiter(StreamEncoder::ceilingDb);
+            limiter.prepare(44100.0);
+            juce::AudioBuffer<float> loud(2, 44100);
+            for (int i = 0; i < 44100; ++i)
+                for (int ch = 0; ch < 2; ++ch)
+                    loud.setSample(ch, i, tone(i / 44100.0, 1.0f, 440.0));
+            limiter.process(loud);
+            expect(loud.getMagnitude(0, 44100) <= juce::Decibels::decibelsToGain(-1.0f) + 1.0e-5f,
+                   juce::String(juce::Decibels::gainToDecibels(loud.getMagnitude(0, 44100))) + " dBFS");
+
+            MasterLimiter quiet(StreamEncoder::ceilingDb);
+            quiet.prepare(44100.0);
+            juce::AudioBuffer<float> soft(2, 4410);
+            for (int i = 0; i < 4410; ++i)
+                for (int ch = 0; ch < 2; ++ch)
+                    soft.setSample(ch, i, tone(i / 44100.0, 0.5f, 440.0));
+            const float before = soft.getRMSLevel(0, 0, 4410);
+            quiet.process(soft);
+            expectWithinAbsoluteError(soft.getRMSLevel(0, 0, 4410), before, 1.0e-6f, "por debajo del techo no se toca");
+
+            expectEquals(MasterLimiter().getCeiling(), 1.0f, "la salida al aire sigue en 0 dBFS");
+        }
+
         beginTest("Una clave equivocada queda como error, con el motivo");
         {
             FakeIcecast icecast(false);
-            server.port = icecast.port();
+            auto s = server;
+            s.port = icecast.port();
             StreamEncoder encoder;
-            encoder.start(server);
+            encoder.start(s);
             for (int i = 0; i < 100 && encoder.getStatus() != StreamEncoder::Status::Error; ++i)
                 juce::Thread::sleep(20);
             expect(encoder.getStatus() == StreamEncoder::Status::Error);
@@ -2193,12 +2385,283 @@ public:
             expect(!SecretStore::unprotect("dpapi:%%%", secret));
         }
 
+        beginTest("Formato, datos de la emisora y envío de lo que suena; las emisoras de antes siguen en Ogg");
+        {
+            TempLab other;
+            const auto stationFile = other.root.getChildFile("station.json");
+            {
+                StationConfig config(stationFile);
+                expect(config.get().streamFormat == StationSettings::StreamFormat::Mp3, "una emisora nueva transmite en MP3");
+                expectEquals(config.get().streamBitrate, 128);
+                auto s = config.get();
+                s.streamFormat = StationSettings::StreamFormat::OggVorbis;
+                s.streamBitrate = 192;
+                s.streamGenre = "Tropical";
+                s.streamDescription = juce::String::fromUTF8("La que más suena");
+                s.streamWebsite = "https://radio.example.org";
+                s.streamPublic = true;
+                s.streamMetadataDelay = 6;
+                s.nowPlayingPushUrl = "https://radio.example.org/ahora.php";
+                config.set(s);
+            }
+            StationConfig reread(stationFile);
+            const auto& r = reread.get();
+            expect(r.streamFormat == StationSettings::StreamFormat::OggVorbis);
+            expectEquals(r.streamBitrate, 192);
+            expectEquals(r.streamGenre, juce::String("Tropical"));
+            expectEquals(r.streamDescription, juce::String::fromUTF8("La que más suena"));
+            expectEquals(r.streamWebsite, juce::String("https://radio.example.org"));
+            expect(r.streamPublic);
+            expectEquals(r.streamMetadataDelay, 6);
+            expectEquals(r.nowPlayingPushUrl, juce::String("https://radio.example.org/ahora.php"));
+
+            const auto withServer = StationSettings::fromVar(juce::JSON::parse(R"({ "streamHost": "radio.example.org", "streamQuality": 6 })"));
+            expect(withServer.streamFormat == StationSettings::StreamFormat::OggVorbis, "ya transmitía en Ogg: no cambia sola");
+            expectEquals(withServer.streamQuality, 6);
+            const auto withoutServer = StationSettings::fromVar(juce::JSON::parse(R"({ "deadAirSeconds": 30 })"));
+            expect(withoutServer.streamFormat == StationSettings::StreamFormat::Mp3, "sin servidor configurado, MP3");
+
+            const auto clamped = StationSettings::fromVar(juce::JSON::parse(R"({ "streamBitrate": 999, "streamMetadataDelay": -5 })"));
+            expectEquals(clamped.streamBitrate, 320);
+            expectEquals(clamped.streamMetadataDelay, 0);
+
+            expect(NowPlayingPublisher::isValidPushUrl("https://radio.example.org/ahora.php"));
+            expect(!NowPlayingPublisher::isValidPushUrl("radio.example.org") && !NowPlayingPublisher::isValidPushUrl("ftp://x.org/a")
+                   && !NowPlayingPublisher::isValidPushUrl("https://radio.example.org/a b"));
+        }
+
         auto broken = StationSettings().toVar();
         broken.getDynamicObject()->setProperty("deadAirSeconds", 0);
         broken.getDynamicObject()->setProperty("streamPort", 99999);
         const auto fixed = StationSettings::fromVar(broken);
         expectEquals(fixed.deadAirSeconds, 5);
         expectEquals(fixed.streamPort, 65535);
+    }
+};
+
+//==============================================================================
+class NowPlayingTests : public juce::UnitTest
+{
+public:
+    NowPlayingTests() : juce::UnitTest("Lo que suena", "RAAADIO") {}
+
+    static HistoryEntry played(const TrackInfo& track, juce::Time when)
+    {
+        HistoryEntry entry;
+        entry.timestamp = when;
+        entry.track = track;
+        return entry;
+    }
+
+    static TrackInfo song(int id, const juce::String& artist, const juce::String& title)
+    {
+        auto t = makeTrack("C:/lab/" + title + ".mp3", artist, title);
+        t.id = id;
+        t.duration = 200.0;
+        return t;
+    }
+
+    // GET a un servidor HTTP local; devuelve la respuesta completa.
+    static juce::String httpGet(int port, const juce::String& path)
+    {
+        juce::StreamingSocket socket;
+        if (!socket.connect("127.0.0.1", port, 2000)) return {};
+        const auto request = "GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        socket.write(request.toRawUTF8(), (int) request.getNumBytesAsUTF8());
+        juce::MemoryBlock response;
+        char buffer[1024];
+        while (socket.waitUntilReady(true, 2000) == 1) {
+            const int n = socket.read(buffer, (int) sizeof(buffer), false);
+            if (n <= 0) break;
+            response.append(buffer, (size_t) n);
+        }
+        return response.toString();
+    }
+
+    void runTest() override
+    {
+        const juce::Time now(2026, 8, 24, 16, 0, 0, 0, true);
+        auto seconds = [](double s) { return juce::RelativeTime(s); };
+        const auto a = song(1, "ARTISTA A", "UNO"), b = song(2, "ARTISTA B", "DOS"), c = song(3, "ARTISTA C", "TRES"),
+                   d = song(4, "ARTISTA D", "CUATRO"), e = song(5, "ARTISTA E", "CINCO");
+        auto spot = song(9, "", juce::String::fromUTF8("CUÑA FERRETERÍA"));
+        spot.duration = 30.0;
+        auto isMusic = [](const TrackInfo& t) { return t.id != 9; };
+
+        beginTest("Anterior, actual y siguientes: solo música, sin repetir la que suena");
+        {
+            NowPlaying::Inputs in;
+            in.station = "Radio Prueba";
+            in.now = now;
+            in.onAir = NowPlaying::Airing { c, now - seconds(60), 136.5 };
+            in.history = { played(c, now - seconds(60)), played(spot, now - seconds(90)),
+                           played(b, now - seconds(290)), played(a, now - seconds(490)) };
+            in.upcoming = { { spot, 136.5 }, { d, 163.0 }, { e, 359.5 } };
+            in.isMusic = isMusic;
+            const auto s = NowPlaying::build(in);
+
+            expect(s.state == NowPlaying::State::Music);
+            expectEquals(s.streamArtist(), juce::String("ARTISTA C"));
+            expectEquals(s.streamTitle(), juce::String("TRES"));
+            expect(s.currentEnds == now + seconds(137), "entra lo siguiente, redondeado al segundo");
+            expectEquals((int) s.previous.size(), 2, "la que suena y la cuña no son anteriores");
+            if (s.previous.size() == 2)
+                expect(s.previous[0].title == "DOS" && s.previous[1].title == "UNO" && s.previous[0].time == now - seconds(290));
+            expectEquals((int) s.next.size(), 2, "la cuña de la cola no aparece");
+            if (s.next.size() == 2)
+                expect(s.next[0].title == "CUATRO" && s.next[0].time == now + seconds(163) && s.next[1].title == "CINCO");
+
+            const auto json = juce::JSON::parse(NowPlaying::toJson(s, now));
+            expectEquals(json["station"].toString(), juce::String("Radio Prueba"));
+            expectEquals(json["state"].toString(), juce::String("music"));
+            expectEquals(json["updated"].toString(), now.toISO8601(true));
+            expectEquals(json["now"]["text"].toString(), juce::String("ARTISTA C - TRES"));
+            expectEquals(json["now"]["started"].toString(), (now - seconds(60)).toISO8601(true));
+            expectEquals((int) json["now"]["duration"], 200);
+            expectEquals(json["previous"][0]["title"].toString(), juce::String("DOS"));
+            expectEquals(json["previous"][0]["played"].toString(), (now - seconds(290)).toISO8601(true));
+            expectEquals(json["next"][0]["artist"].toString(), juce::String("ARTISTA D"));
+            expectEquals(json["next"][0]["eta"].toString(), (now + seconds(163)).toISO8601(true));
+        }
+
+        beginTest("Durante una tanda los oyentes ven el nombre de la emisora");
+        {
+            NowPlaying::Inputs in;
+            in.station = "Radio Prueba";
+            in.now = now;
+            in.onAir = NowPlaying::Airing { spot, now - seconds(5), 25.0 };
+            in.history = { played(spot, now - seconds(5)), played(c, now - seconds(200)) };
+            in.upcoming = { { d, 25.0 } };
+            in.isMusic = isMusic;
+            const auto s = NowPlaying::build(in);
+
+            expect(s.state == NowPlaying::State::Break);
+            expect(s.streamArtist().isEmpty());
+            expectEquals(s.streamTitle(), juce::String("Radio Prueba"));
+            expect(s.previous.size() == 1 && s.previous[0].title == "TRES", "la última canción sigue siendo la anterior");
+
+            const auto json = juce::JSON::parse(NowPlaying::toJson(s, now));
+            expectEquals(json["state"].toString(), juce::String("break"));
+            expect(json["now"].isVoid(), "now es null");
+            expectEquals(json["next"][0]["title"].toString(), juce::String("CUATRO"));
+        }
+
+        beginTest("Sin nada al aire; sin hora conocida la hora prevista es null; límites de la lista");
+        {
+            NowPlaying::Inputs in;
+            in.station = "Radio Prueba";
+            in.now = now;
+            for (int i = 0; i < 8; ++i) in.history.push_back(played(a, now - seconds(600 + 200 * i)));
+            in.upcoming = { { a, -1.0 }, { b, -1.0 }, { c, -1.0 }, { d, -1.0 } };
+            const auto s = NowPlaying::build(in);
+
+            expect(s.state == NowPlaying::State::Off);
+            expectEquals(s.streamTitle(), juce::String("Radio Prueba"));
+            expectEquals((int) s.previous.size(), 5);
+            expectEquals((int) s.next.size(), 3);
+
+            const auto json = juce::JSON::parse(NowPlaying::toJson(s, now));
+            expectEquals(json["state"].toString(), juce::String("off"));
+            expect(json["now"].isVoid() && json["next"][0]["eta"].isVoid());
+            expectEquals(json["previous"].size(), 5);
+        }
+
+        beginTest("Las pistas de identificaciones, cuñas y separadores se reconocen por su categoría");
+        {
+            LibraryFixture fx;
+            auto& lib = fx.library;
+            lib.addCategory("SALSA");
+            int salsa = -1;
+            for (const auto& category : lib.getCategories())
+                if (juce::String(category.name) == "SALSA") salsa = category.id;
+
+            const auto music = fx.add("Musica/uno.mp3", "UNO");
+            const auto spotTrack = fx.add("Cunas/ferreteria.mp3", "FERRETERIA");
+            const auto sweeper = fx.add("Separadores/barrido.mp3", "BARRIDO");
+            auto& db = lib.getDatabase();
+            db.addTrackCategory(music.id, salsa);
+            db.addTrackCategory(spotTrack.id, lib.getSystemCategory(CategoryRole::Spots).id);
+            db.addTrackCategory(sweeper.id, salsa);
+            db.addTrackCategory(sweeper.id, lib.getSystemCategory(CategoryRole::Sweepers).id);
+
+            const auto roles = lib.getSystemRolesByTrack();
+            expect(roles.find(music.id) == roles.end(), "la música no aparece");
+            expect(roles.count(spotTrack.id) == 1 && roles.at(spotTrack.id) == CategoryRole::Spots);
+            expect(roles.count(sweeper.id) == 1 && roles.at(sweeper.id) == CategoryRole::Sweepers,
+                   "en una categoría de música y en SEPARADORES: es separador");
+        }
+
+        beginTest("El publicador arma lo que suena con los decks, la cola y el historial");
+        {
+            LibraryFixture fx;
+            TempLab outside;
+            // Duraciones distintas: el mismo audio se tomaría por el mismo archivo.
+            auto import = [&](const juce::String& name, double seconds, const juce::String& category = {}) {
+                const auto file = writeWav(outside.root.getChildFile(name + ".wav"), seconds, toneBetween({ { 0.0, seconds } }));
+                fx.library.processAndAddTrack(file, category);
+                return fx.library.search(name.fromFirstOccurrenceOf(" - ", false, false), "").front();
+            };
+            const auto cero = import("ARTISTA - CERO", 20.0), uno = import("ARTISTA - UNO", 21.0),
+                       dos = import("ARTISTA - DOS", 22.0), tres = import("ARTISTA - TRES", 23.0);
+            const auto spotTrack = import(juce::String::fromUTF8("FERRETERÍA - CUÑA"), 24.0,
+                                          juce::String(fx.library.getSystemCategory(CategoryRole::Spots).name));
+
+            AudioEngine engine(fx.library, false);
+            auto& mixer = engine.getMixer();
+            mixer.prepareToPlay(512, 44100.0);
+            auto& deckA = engine.getDeck(0);
+            auto& deckB = engine.getDeck(1);
+            HistoryManager history;
+            history.initialise(fx.library);
+            history.addEntry(cero, "Deck B");
+            deckA.onTrackLog = [&history](const TrackInfo& t) { history.addEntry(t, "Deck A"); };
+            deckA.loadTrack(juce::File(juce::String(uno.path)));
+            deckA.setRouting(true, false);
+            deckA.play();
+            pump(mixer, 0.3, { &deckA });
+
+            Playlist playlist;
+            playlist.addTrack(dos);
+            playlist.addTrack(spotTrack);
+            playlist.addTrack(tres);
+
+            StreamEncoder encoder;
+            ApiServer api;
+            api.start(0);
+            NowPlayingPublisher publisher(deckA, deckB, playlist, history, fx.library, encoder, api);
+
+            const auto response = httpGet(api.getPort(), "/nowplaying.json");
+            const auto json = juce::JSON::parse(response.fromFirstOccurrenceOf("\r\n\r\n", false, false));
+            expectEquals(json["state"].toString(), juce::String("music"), response);
+            expectEquals(json["now"]["title"].toString(), juce::String("UNO"));
+            expect(!json["now"]["ends"].isVoid(), "se sabe cuándo entra la siguiente");
+            expectEquals(json["previous"].size(), 1);
+            expectEquals(json["previous"][0]["title"].toString(), juce::String("CERO"), "la que suena no es anterior");
+            expectEquals(json["next"].size(), 2);
+            expectEquals(json["next"][0]["title"].toString(), juce::String("DOS"));
+            expectEquals(json["next"][1]["title"].toString(), juce::String("TRES"), "la cuña de la cola no aparece");
+            expect(!json["next"][0]["eta"].isVoid());
+            expect(httpGet(api.getPort(), "/nowplaying").endsWith("ARTISTA - UNO"));
+            api.stop();
+            deckA.stop();
+        }
+
+        beginTest("El servidor local entrega el texto y el JSON");
+        {
+            ApiServer api;
+            api.start(0);
+            const int port = api.getPort();
+            expect(port > 0);
+            api.update("ARTISTA - TITULO", R"({"state":"music"})");
+
+            const auto json = httpGet(port, "/nowplaying.json");
+            expect(json.startsWith("HTTP/1.1 200") && json.contains("Content-Type: application/json; charset=utf-8"), json);
+            expect(json.endsWith(R"({"state":"music"})"), json);
+            const auto text = httpGet(port, "/nowplaying?cache=1");
+            expect(text.contains("Content-Type: text/plain") && text.endsWith("ARTISTA - TITULO"), text);
+            expect(httpGet(port, "/otra").startsWith("HTTP/1.1 404"));
+            api.stop();
+        }
     }
 };
 
@@ -2223,6 +2686,7 @@ static AirLogTests airLogTests;
 static CartwallTests cartwallTests;
 static StreamingTests streamingTests;
 static StationSettingsTests stationSettingsTests;
+static NowPlayingTests nowPlayingTests;
 
 #if JUCE_WINDOWS
 extern "C" __declspec(dllimport) int __stdcall SetConsoleOutputCP(unsigned int codePage);

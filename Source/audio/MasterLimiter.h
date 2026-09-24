@@ -1,9 +1,12 @@
 #pragma once
 #include <JuceHeader.h>
 
+// Limitador de pico: ataque instantáneo (ninguna muestra pasa del techo) y 100 ms de
+// recuperación. En la salida al aire el techo es 0 dBFS; la transmisión por internet usa
+// otro con -1 dB, porque al comprimir en MP3 u Ogg aparecen picos por encima del original.
 class MasterLimiter {
 public:
-    MasterLimiter() : sampleRate(44100.0) {}
+    explicit MasterLimiter(float ceilingDb = 0.0f) : sampleRate(44100.0), threshold(juce::Decibels::decibelsToGain(ceilingDb)) {}
 
     void prepare(double newSampleRate) {
         sampleRate = newSampleRate;
@@ -11,14 +14,14 @@ public:
         currentGain = 1.0f;
     }
 
+    float getCeiling() const { return threshold; }
+
     void process(juce::AudioBuffer<float>& buffer) {
-        const int numChannels = buffer.getNumChannels();
-        const int numSamples = buffer.getNumSamples();
-        const float threshold = 1.0f; 
+        process(buffer.getArrayOfWritePointers(), buffer.getNumChannels(), 0, buffer.getNumSamples());
+    }
 
-        auto* channelData = buffer.getArrayOfWritePointers();
-
-        for (int i = 0; i < numSamples; ++i) {
+    void process(float* const* channelData, int numChannels, int startSample, int numSamples) {
+        for (int i = startSample; i < startSample + numSamples; ++i) {
             float peak = 0.0f;
             for (int ch = 0; ch < numChannels; ++ch) {
                 peak = std::max(peak, std::abs(channelData[ch][i]));
@@ -43,6 +46,7 @@ public:
 
 private:
     double sampleRate;
+    float threshold;
     float currentGain = 1.0f;
     float releaseCoeff = 0.999f;
 };

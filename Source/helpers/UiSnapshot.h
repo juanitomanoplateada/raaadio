@@ -9,7 +9,7 @@ class MainComponent;
 //
 //   RAAADIO.exe --ui-snapshot salida.png [--size 1920x1080] [--theme dark|light]
 //               [--lang es|en] [--view main|empty|history|ads|settings|settings-library|
-//                                     settings-broadcast|settings-language|settings-about|
+//                                     settings-broadcast|settings-broadcast-2|settings-language|settings-about|
 //                                     cartwall|generator|track|import]
 class UiSnapshotRunner : private juce::Timer
 {

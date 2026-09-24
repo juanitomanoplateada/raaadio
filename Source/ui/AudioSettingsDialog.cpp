@@ -2,6 +2,7 @@
 #include "BinaryData.h"
 #include "../helpers/ThemeManager.h"
 #include "../helpers/UiStyle.h"
+#include "../network/Mp3Encoder.h"
 
  
 SettingsDialog::AudioTab::AudioTab(juce::AudioDeviceManager& m, juce::AudioDeviceManager& c)
@@ -550,12 +551,13 @@ void SettingsDialog::UpdatesTab::lookAndFeelChanged() {
     appInfoLabel.setColour(juce::Label::textColourId, ThemeManager::getInstance().getSecondaryTextColour());
 }
 //==============================================================================
-SettingsDialog::BroadcastTab::BroadcastTab(StationConfig& config, StreamEncoder& encoder, juce::File logFolder)
-    : station(config), streamEncoder(encoder), airLogFolder(std::move(logFolder))
+SettingsDialog::BroadcastTab::BroadcastTab(StationConfig& config, StreamEncoder& encoder, NowPlayingPublisher* publisher,
+                                           juce::File logFolder)
+    : station(config), streamEncoder(encoder), nowPlaying(publisher), airLogFolder(std::move(logFolder))
 {
     const auto& s = station.get();
 
-    for (auto* group : { &deadAirGroup, &airLogGroup, &streamGroup }) {
+    for (auto* group : { &deadAirGroup, &airLogGroup, &streamGroup, &nowPlayingGroup }) {
         group->setTextLabelPosition(juce::Justification::centredLeft);
         addAndMakeVisible(group);
     }
@@ -600,7 +602,9 @@ SettingsDialog::BroadcastTab::BroadcastTab(StationConfig& config, StreamEncoder&
     // Transmisión: los campos se guardan al salir de ellos o con Enter.
     const std::pair<Field*, juce::String> fields[] = {
         { &host, s.streamHost }, { &port, juce::String(s.streamPort) }, { &mount, s.streamMount },
-        { &user, s.streamUser }, { &password, s.streamPassword }, { &name, s.streamName }
+        { &user, s.streamUser }, { &password, s.streamPassword }, { &name, s.streamName },
+        { &genre, s.streamGenre }, { &website, s.streamWebsite }, { &description, s.streamDescription },
+        { &pushUrl, s.nowPlayingPushUrl }
     };
     for (const auto& [field, text] : fields) {
         addAndMakeVisible(field->label);
@@ -612,13 +616,31 @@ SettingsDialog::BroadcastTab::BroadcastTab(StationConfig& config, StreamEncoder&
     port.editor.setInputRestrictions(5, "0123456789");
     password.editor.setPasswordCharacter((juce::juce_wchar) 0x2022);
 
-    addAndMakeVisible(qualityLabel);
-    addAndMakeVisible(quality);
-    const auto qualities = juce::OggVorbisAudioFormat().getQualityOptions();
-    for (int i = 0; i < qualities.size(); ++i)
-        quality.addItem(qualities[i], i + 1);
-    quality.setSelectedId(s.streamQuality + 1, juce::dontSendNotification);
-    quality.onChange = [this] { apply(); };
+    for (auto* choice : { &format, &quality }) {
+        addAndMakeVisible(choice->label);
+        addAndMakeVisible(choice->combo);
+    }
+    format.combo.addItem("MP3", 1);
+    format.combo.addItem("Ogg Vorbis", 2);
+    format.combo.setSelectedId(s.streamFormat == StationSettings::StreamFormat::Mp3 ? 1 : 2, juce::dontSendNotification);
+    format.combo.onChange = [this] {
+        fillQualityOptions();
+        apply();
+    };
+    fillQualityOptions();
+    quality.combo.onChange = [this] { apply(); };
+
+    addAndMakeVisible(publicToggle);
+    publicToggle.setToggleState(s.streamPublic, juce::dontSendNotification);
+    publicToggle.onClick = [this] { apply(); };
+
+    addAndMakeVisible(metadataDelayLabel);
+    addAndMakeVisible(metadataDelay);
+    for (int seconds : { 0, 2, 4, 6, 8, 10, 15, 20, 30 })
+        metadataDelay.addItem(juce::String(seconds) + " s", seconds + 1);
+    metadataDelay.setSelectedId(s.streamMetadataDelay + 1, juce::dontSendNotification);
+    if (metadataDelay.getSelectedId() == 0) metadataDelay.setSelectedId(1, juce::dontSendNotification);
+    metadataDelay.onChange = [this] { apply(); };
 
     addAndMakeVisible(streamToggle);
     streamToggle.setToggleState(s.streamEnabled, juce::dontSendNotification);
@@ -626,8 +648,36 @@ SettingsDialog::BroadcastTab::BroadcastTab(StationConfig& config, StreamEncoder&
 
     addAndMakeVisible(streamStatusLabel);
 
+    // Lo que suena
+    addAndMakeVisible(nowPlayingHint);
+    nowPlayingHint.setJustificationType(juce::Justification::topLeft);
+    addAndMakeVisible(viewDataButton);
+    UiStyle::setVariant(viewDataButton, "ghost");
+    viewDataButton.onClick = [] { juce::URL("http://127.0.0.1:8080/nowplaying.json").launchInDefaultBrowser(); };
+    addAndMakeVisible(pushStatusLabel);
+
     lookAndFeelChanged();
     startTimer(500);
+}
+
+void SettingsDialog::BroadcastTab::fillQualityOptions() {
+    const auto& s = station.get();
+    const bool mp3 = format.combo.getSelectedId() == 1;
+    quality.combo.clear(juce::dontSendNotification);
+    if (mp3) {
+        for (int kbps : Mp3Encoder::bitrates())
+            quality.combo.addItem(juce::String(kbps) + " kbps", kbps);
+        quality.combo.setSelectedId(s.streamBitrate, juce::dontSendNotification);
+        if (quality.combo.getSelectedId() == 0) quality.combo.setSelectedId(Mp3Encoder::defaultBitrate, juce::dontSendNotification);
+    } else {
+        const auto qualities = juce::OggVorbisAudioFormat().getQualityOptions();
+        for (int i = 0; i < qualities.size(); ++i)
+            quality.combo.addItem(qualities[i], i + 1);
+        quality.combo.setSelectedId(s.streamQuality + 1, juce::dontSendNotification);
+    }
+    // El título retrasado es solo para MP3: en Ogg viaja pegado al audio.
+    metadataDelay.setEnabled(mp3);
+    metadataDelayLabel.setEnabled(mp3);
 }
 
 void SettingsDialog::BroadcastTab::apply() {
@@ -643,7 +693,17 @@ void SettingsDialog::BroadcastTab::apply() {
     s.streamUser = user.editor.getText().trim();
     s.streamPassword = password.editor.getText();
     s.streamName = name.editor.getText().trim();
-    if (quality.getSelectedId() > 0) s.streamQuality = quality.getSelectedId() - 1;
+    s.streamFormat = format.combo.getSelectedId() == 1 ? StationSettings::StreamFormat::Mp3 : StationSettings::StreamFormat::OggVorbis;
+    if (quality.combo.getSelectedId() > 0) {
+        if (s.streamFormat == StationSettings::StreamFormat::Mp3) s.streamBitrate = quality.combo.getSelectedId();
+        else s.streamQuality = quality.combo.getSelectedId() - 1;
+    }
+    s.streamGenre = genre.editor.getText().trim();
+    s.streamWebsite = website.editor.getText().trim();
+    s.streamDescription = description.editor.getText().trim();
+    s.streamPublic = publicToggle.getToggleState();
+    if (metadataDelay.getSelectedId() > 0) s.streamMetadataDelay = metadataDelay.getSelectedId() - 1;
+    s.nowPlayingPushUrl = pushUrl.editor.getText().trim();
 
     // Sin servidor no hay a dónde transmitir.
     if (s.streamHost.isEmpty()) streamToggle.setToggleState(false, juce::dontSendNotification);
@@ -664,10 +724,48 @@ void SettingsDialog::BroadcastTab::timerCallback() {
     }
     streamStatusLabel.setText(text, juce::dontSendNotification);
     streamStatusLabel.setColour(juce::Label::textColourId, colour);
+
+    // Último envío a la página web.
+    const auto url = pushUrl.editor.getText().trim();
+    text = {};
+    colour = t.getSecondaryTextColour();
+    if (url.isNotEmpty() && !NowPlayingPublisher::isValidPushUrl(url)) {
+        text = TRANS("now_playing_push_invalid");
+        colour = t.getWarningColour();
+    } else if (url.isNotEmpty() && nowPlaying != nullptr) {
+        const auto status = nowPlaying->getPushStatus();
+        if (!status.attempted) {
+            text = TRANS("now_playing_push_waiting");
+        } else if (status.ok) {
+            text = TRANS("now_playing_push_ok") + " " + status.time.formatted("%H:%M:%S");
+            colour = t.getSuccessColour();
+        } else {
+            text = TRANS("now_playing_push_failed") + " ("
+                   + (status.httpStatus > 0 ? "HTTP " + juce::String(status.httpStatus) : TRANS("now_playing_push_no_response"))
+                   + ") " + status.time.formatted("%H:%M:%S");
+            colour = t.getErrorColour();
+        }
+    }
+    pushStatusLabel.setText(text, juce::dontSendNotification);
+    pushStatusLabel.setColour(juce::Label::textColourId, colour);
+}
+
+namespace {
+    // Medidas de la pestaña Emisión, compartidas por resized() y getIdealHeight().
+    constexpr int margin = 12, groupGap = 12, deadAirHeight = 112, airLogHeight = 78;
+    constexpr int labelHeight = 18, fieldRowHeight = 18 + 4 + UiStyle::controlHeight + 8;
+    constexpr int streamHeight = 26 + 8 + 6 * fieldRowHeight + (UiStyle::controlHeight + 8)
+                               + (UiStyle::controlHeight + 6) + 22 + 8;
+    constexpr int nowPlayingHintHeight = 50;
+    constexpr int nowPlayingHeight = 26 + 8 + nowPlayingHintHeight + 6 + (18 + 4 + UiStyle::controlHeight) + 6 + 22 + 8;
+}
+
+int SettingsDialog::BroadcastTab::getIdealHeight() {
+    return margin + deadAirHeight + groupGap + airLogHeight + groupGap + streamHeight + groupGap + nowPlayingHeight + margin;
 }
 
 void SettingsDialog::BroadcastTab::resized() {
-    auto area = getLocalBounds().reduced(16, 12);
+    auto area = getLocalBounds().reduced(16, margin);
     const int rowH = UiStyle::controlHeight;
 
     // El título de cada grupo va encima del recuadro; el contenido, dentro.
@@ -681,52 +779,75 @@ void SettingsDialog::BroadcastTab::resized() {
         const int width = juce::jmin(row.getWidth(), 120);
         control.setBounds(row.removeFromLeft(width).withSizeKeepingCentre(width, rowH));
     };
+    // Etiqueta arriba, control abajo.
+    auto stacked = [](juce::Label& label, juce::Component& control, juce::Rectangle<int> cell) {
+        label.setBounds(cell.removeFromTop(labelHeight));
+        cell.removeFromTop(4);
+        control.setBounds(cell.removeFromTop(UiStyle::controlHeight));
+    };
 
     // Protección contra silencio
-    auto deadAir = groupContent(deadAirGroup, area.removeFromTop(112));
+    auto deadAir = groupContent(deadAirGroup, area.removeFromTop(deadAirHeight));
     auto row = deadAir.removeFromTop(rowH);
     deadAirToggle.setBounds(row.removeFromLeft(row.getWidth() / 2));
     labelledRow(deadAirSecondsLabel, deadAirSeconds, row, 110);
     deadAir.removeFromTop(4);
     deadAirHint.setBounds(deadAir);
 
-    area.removeFromTop(12);
+    area.removeFromTop(groupGap);
 
     // Registro de lo emitido
-    auto airLog = groupContent(airLogGroup, area.removeFromTop(78));
+    auto airLog = groupContent(airLogGroup, area.removeFromTop(airLogHeight));
     row = airLog.removeFromTop(rowH);
     openLogFolderButton.setBounds(row.removeFromRight(juce::jmax(110, openLogFolderButton.getBestWidthForHeight(rowH) + 16)));
     row.removeFromRight(8);
     airLogToggle.setBounds(row.removeFromLeft(row.getWidth() - 170));
     labelledRow(retentionLabel, retention, row, 50);
 
-    area.removeFromTop(12);
+    area.removeFromTop(groupGap);
 
     // Transmisión
-    auto stream = groupContent(streamGroup, area.removeFromTop(juce::jmin(area.getHeight(), 300)));
-    auto fieldRow = [&](Field& left, Field& right, int rightWidth) {
-        auto r = stream.removeFromTop(18 + 4 + rowH);
+    auto stream = groupContent(streamGroup, area.removeFromTop(streamHeight));
+    auto twoCells = [&](juce::Label& leftLabel, juce::Component& left, juce::Label& rightLabel, juce::Component& right, int rightWidth) {
+        auto r = stream.removeFromTop(fieldRowHeight);
         auto rightArea = r.removeFromRight(rightWidth);
         r.removeFromRight(12);
-        for (auto [field, cell] : { std::make_pair(&left, r), std::make_pair(&right, rightArea) }) {
-            field->label.setBounds(cell.removeFromTop(18));
-            cell.removeFromTop(4);
-            field->editor.setBounds(cell);
-        }
-        stream.removeFromTop(8);
+        stacked(leftLabel, left, r);
+        stacked(rightLabel, right, rightArea);
     };
     const int half = (stream.getWidth() - 12) / 2;
-    fieldRow(host, port, 110);
-    fieldRow(mount, user, half);
-    fieldRow(password, name, half);
+    twoCells(host.label, host.editor, port.label, port.editor, 110);
+    twoCells(mount.label, mount.editor, user.label, user.editor, half);
+    twoCells(password.label, password.editor, name.label, name.editor, half);
+    twoCells(format.label, format.combo, quality.label, quality.combo, half);
+    twoCells(genre.label, genre.editor, website.label, website.editor, half);
+    stacked(description.label, description.editor, stream.removeFromTop(fieldRowHeight));
 
     row = stream.removeFromTop(rowH);
-    qualityLabel.setBounds(row.removeFromLeft(70));
-    quality.setBounds(row.removeFromLeft(130));
-    row.removeFromLeft(16);
-    streamToggle.setBounds(row);
+    stream.removeFromTop(8);
+    metadataDelay.setBounds(row.removeFromRight(90));
+    row.removeFromRight(8);
+    metadataDelayLabel.setBounds(row.removeFromRight(150));
+    publicToggle.setBounds(row);
+
+    row = stream.removeFromTop(rowH);
     stream.removeFromTop(6);
+    streamToggle.setBounds(row);
     streamStatusLabel.setBounds(stream.removeFromTop(22));
+
+    area.removeFromTop(groupGap);
+
+    // Lo que suena
+    auto published = groupContent(nowPlayingGroup, area.removeFromTop(nowPlayingHeight));
+    nowPlayingHint.setBounds(published.removeFromTop(nowPlayingHintHeight));
+    published.removeFromTop(6);
+    auto urlRow = published.removeFromTop(labelHeight + 4 + rowH);
+    auto buttonArea = urlRow.removeFromRight(juce::jmax(110, viewDataButton.getBestWidthForHeight(rowH) + 16));
+    urlRow.removeFromRight(8);
+    stacked(pushUrl.label, pushUrl.editor, urlRow);
+    viewDataButton.setBounds(buttonArea.removeFromBottom(rowH));
+    published.removeFromTop(6);
+    pushStatusLabel.setBounds(published.removeFromTop(22));
 }
 
 void SettingsDialog::BroadcastTab::lookAndFeelChanged() {
@@ -735,12 +856,11 @@ void SettingsDialog::BroadcastTab::lookAndFeelChanged() {
     deadAirGroup.setText(TRANS("group_dead_air"));
     airLogGroup.setText(TRANS("group_air_log"));
     streamGroup.setText(TRANS("group_stream"));
+    nowPlayingGroup.setText(TRANS("group_now_playing"));
 
     deadAirToggle.setButtonText(TRANS("dead_air_enable"));
     deadAirSecondsLabel.setText(TRANS("dead_air_after"), juce::dontSendNotification);
     deadAirHint.setText(TRANS("dead_air_hint"), juce::dontSendNotification);
-    deadAirHint.setFont(UiStyle::ui(12.5f));
-    deadAirHint.setColour(juce::Label::textColourId, t.getSecondaryTextColour());
 
     airLogToggle.setButtonText(TRANS("air_log_enable"));
     airLogToggle.setTooltip(TRANS("tip_air_log"));
@@ -754,34 +874,72 @@ void SettingsDialog::BroadcastTab::lookAndFeelChanged() {
     password.label.setText(TRANS("stream_password"), juce::dontSendNotification);
     // La clave está cifrada para otro equipo o usuario de Windows (la emisora se movió).
     password.editor.setTextToShowWhenEmpty(station.get().isStreamPasswordUnreadable() ? TRANS("stream_password_reenter") : juce::String(),
-                                           ThemeManager::getInstance().getWarningColour());
+                                           t.getWarningColour());
     name.label.setText(TRANS("stream_name"), juce::dontSendNotification);
-    qualityLabel.setText(TRANS("stream_quality"), juce::dontSendNotification);
+    format.label.setText(TRANS("stream_format"), juce::dontSendNotification);
+    format.combo.setTooltip(TRANS("tip_stream_format"));
+    quality.label.setText(TRANS("stream_quality"), juce::dontSendNotification);
+    genre.label.setText(TRANS("stream_genre"), juce::dontSendNotification);
+    website.label.setText(TRANS("stream_website"), juce::dontSendNotification);
+    website.editor.setTextToShowWhenEmpty("https://", t.getSecondaryTextColour());
+    description.label.setText(TRANS("stream_description"), juce::dontSendNotification);
+    publicToggle.setButtonText(TRANS("stream_public"));
+    publicToggle.setTooltip(TRANS("tip_stream_public"));
+    metadataDelayLabel.setText(TRANS("stream_metadata_delay"), juce::dontSendNotification);
+    metadataDelayLabel.setTooltip(TRANS("tip_stream_metadata_delay"));
+    metadataDelay.setTooltip(TRANS("tip_stream_metadata_delay"));
     streamToggle.setButtonText(TRANS("stream_enable"));
     streamToggle.setTooltip(TRANS("tip_stream_enable"));
 
-    for (auto* label : { &host.label, &port.label, &mount.label, &user.label, &password.label, &name.label }) {
+    nowPlayingHint.setText(TRANS("now_playing_hint"), juce::dontSendNotification);
+    pushUrl.label.setText(TRANS("now_playing_push_url"), juce::dontSendNotification);
+    pushUrl.editor.setTextToShowWhenEmpty("https://", t.getSecondaryTextColour());
+    viewDataButton.setButtonText(TRANS("now_playing_view"));
+    viewDataButton.setTooltip(TRANS("tip_now_playing_view"));
+
+    for (auto* hint : { &deadAirHint, &nowPlayingHint }) {
+        hint->setFont(UiStyle::ui(12.5f));
+        hint->setColour(juce::Label::textColourId, t.getSecondaryTextColour());
+    }
+    for (auto* label : { &host.label, &port.label, &mount.label, &user.label, &password.label, &name.label,
+                         &format.label, &quality.label, &genre.label, &website.label, &description.label, &pushUrl.label }) {
         label->setFont(UiStyle::caption(12.0f));
         label->setColour(juce::Label::textColourId, t.getSecondaryTextColour());
         label->setBorderSize({ 0, 0, 0, 0 });
     }
-    for (auto* label : { &deadAirSecondsLabel, &retentionLabel, &qualityLabel }) {
+    for (auto* label : { &deadAirSecondsLabel, &retentionLabel, &metadataDelayLabel }) {
         label->setFont(UiStyle::ui(13.5f));
         label->setColour(juce::Label::textColourId, t.getSecondaryTextColour());
         label->setJustificationType(juce::Justification::centredRight);
     }
-    streamStatusLabel.setFont(UiStyle::ui(13.0f));
+    for (auto* label : { &streamStatusLabel, &pushStatusLabel })
+        label->setFont(UiStyle::ui(13.0f));
     timerCallback();
 }
 
 //==============================================================================
+SettingsDialog::ScrollingTab::ScrollingTab(juce::Component& content, int height) : contentHeight(height) {
+    setViewedComponent(&content, false);
+    setScrollBarsShown(true, false);
+    setScrollBarThickness(10);
+}
+
+void SettingsDialog::ScrollingTab::resized() {
+    const bool scrolls = getHeight() < contentHeight;
+    if (auto* content = getViewedComponent())
+        content->setSize(getWidth() - (scrolls ? getScrollBarThickness() : 0), contentHeight);
+    juce::Viewport::resized();
+}
+
+//==============================================================================
 SettingsDialog::SettingsDialog(juce::AudioDeviceManager& m, juce::AudioDeviceManager& c, MusicLibrary& lib, AdvertisingManager& ads,
-                               StationConfig& station, StreamEncoder& streamEncoder, juce::File airLogFolder)
+                               StationConfig& station, StreamEncoder& streamEncoder, NowPlayingPublisher* nowPlaying, juce::File airLogFolder)
 {
     audioTab = std::make_unique<AudioTab>(m, c);
     libraryTab = std::make_unique<LibraryTab>(lib, ads);
     libraryTab->onLibraryReset = [this] { if (onLibraryReset) onLibraryReset(); };
-    broadcastTab = std::make_unique<BroadcastTab>(station, streamEncoder, airLogFolder);
+    broadcastTab = std::make_unique<BroadcastTab>(station, streamEncoder, nowPlaying, airLogFolder);
+    broadcastScroller = std::make_unique<ScrollingTab>(*broadcastTab, BroadcastTab::getIdealHeight());
     languageTab = std::make_unique<LanguageTab>();
     updatesTab = std::make_unique<UpdatesTab>();
 
@@ -789,7 +947,7 @@ SettingsDialog::SettingsDialog(juce::AudioDeviceManager& m, juce::AudioDeviceMan
 
     tabs.addTab(TRANS("audio_settings"), juce::Colour(0x00000000), audioTab.get(), false);
     tabs.addTab(TRANS("library_settings"), juce::Colour(0x00000000), libraryTab.get(), false);
-    tabs.addTab(TRANS("broadcast_settings"), juce::Colour(0x00000000), broadcastTab.get(), false);
+    tabs.addTab(TRANS("broadcast_settings"), juce::Colour(0x00000000), broadcastScroller.get(), false);
     tabs.addTab(TRANS("language"), juce::Colour(0x00000000), languageTab.get(), false);
     tabs.addTab(TRANS("tab_updates"), juce::Colour(0x00000000), updatesTab.get(), false);
     tabs.setTabBarDepth(42);

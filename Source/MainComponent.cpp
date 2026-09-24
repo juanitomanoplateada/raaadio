@@ -1,6 +1,5 @@
 #include "MainComponent.h"
 #include "ui/AudioSettingsDialog.h"
-#include "autodj/OnAir.h"
 #include "helpers/ThemeManager.h"
 #include "helpers/PersistenceManager.h"
 #include "helpers/UiStyle.h"
@@ -98,30 +97,24 @@ MainComponent::MainComponent(MainComponentOptions opts)
     adScheduler = std::make_unique<AdScheduler>(library, adsManager, playlist, audioEngine.getDeck(0), audioEngine.getDeck(1),
                                                 configFolder.getChildFile("ad_breaks_done.json"));
 
+    auto& d1 = audioEngine.getDeck(0);
+    auto& d2 = audioEngine.getDeck(1);
+
+    // Lo que oyen los oyentes (una pista en preescucha, solo CUE, no cuenta): el título del
+    // stream y los datos de anterior, actual y siguientes para la API y la página web.
+    nowPlaying = std::make_unique<NowPlayingPublisher>(d1, d2, playlist, historyManager, library, streamEncoder, apiServer);
+
     applyStationSettings();
     stationConfig->addChangeListener(this);
 
     if (options.startApiServer)
         apiServer.start(8080);
-    
-    auto& d1 = audioEngine.getDeck(0);
-    auto& d2 = audioEngine.getDeck(1);
-    
-    auto updateApi = [this, &d1, &d2] {
-        // Lo que oyen los oyentes: una pista en preescucha (solo CUE) no cuenta.
-        juce::String artist = TRANS("radio_station");
-        juce::String title = TRANS("ready");
-        if (const auto* deck = OnAir::nowPlaying(d1, d2)) {
-            artist = deck->getCurrentTrack().artist;
-            title = deck->getCurrentTrack().title;
-        }
 
-        apiServer.updateNowPlaying(artist, title);
-        streamEncoder.setNowPlaying(artist, title);  // título en los reproductores de los oyentes
+    auto onDeckStateChange = [this] {
+        if (nowPlaying != nullptr) nowPlaying->refresh();
     };
-    
-    d1.onStateChange = updateApi;
-    d2.onStateChange = updateApi;
+    d1.onStateChange = onDeckStateChange;
+    d2.onStateChange = onDeckStateChange;
     
     d1.onTrackLog = [this](const TrackInfo& track) {
         historyManager.addEntry(track, "Deck A");
@@ -129,9 +122,7 @@ MainComponent::MainComponent(MainComponentOptions opts)
     d2.onTrackLog = [this](const TrackInfo& track) {
         historyManager.addEntry(track, "Deck B");
     };
-    
-    updateApi();
-    
+
     juce::Logger::writeToLog("Step 2.3: Creating UI Components...");
     deckA = std::make_unique<DeckComponent>(audioEngine.getDeck(0));
     deckB = std::make_unique<DeckComponent>(audioEngine.getDeck(1));
@@ -206,7 +197,19 @@ void MainComponent::applyStationSettings() {
     server.user = s.streamUser;
     server.password = s.streamPassword;
     server.name = s.streamName;
+    server.format = s.streamFormat == StationSettings::StreamFormat::Mp3 ? StreamEncoder::Format::Mp3
+                                                                         : StreamEncoder::Format::OggVorbis;
     server.quality = s.streamQuality;
+    server.bitrate = s.streamBitrate;
+    server.genre = s.streamGenre;
+    server.description = s.streamDescription;
+    server.website = s.streamWebsite;
+    server.isPublic = s.streamPublic;
+    server.metadataDelaySeconds = s.streamMetadataDelay;
+
+    // Durante las tandas los oyentes ven el nombre de la emisora.
+    nowPlaying->setStationName(s.streamName);
+    nowPlaying->setPushUrl(options.openAudioDevices ? s.nowPlayingPushUrl : juce::String());
 
     const bool wantStream = s.streamEnabled && s.streamHost.isNotEmpty() && options.openAudioDevices;
     if (!wantStream) {
@@ -243,6 +246,7 @@ MainComponent::~MainComponent() {
 
     playlistStore = nullptr;  // guarda la cola por última vez
     stationConfig->removeChangeListener(this);
+    nowPlaying = nullptr;  // antes que los decks, la cola y el historial que observa
     if (keyWindow != nullptr) keyWindow->removeKeyListener(&cartKeys);
 
     // Primero se cierra el audio; después se sueltan los que reciben la salida al aire.
@@ -258,7 +262,7 @@ MainComponent::~MainComponent() {
 
 void MainComponent::openSettings() {
     auto* dialog = new SettingsDialog(audioEngine.getDeviceManager(), audioEngine.getCueDeviceManager(), library, adsManager,
-                                      *stationConfig, streamEncoder, PersistenceManager::getRecordingsFolder().getChildFile("Registro"));
+                                      *stationConfig, streamEncoder, nowPlaying.get(), PersistenceManager::getRecordingsFolder().getChildFile("Registro"));
     // Al borrar la biblioteca, la cola y la botonera apuntarían a pistas que ya no existen.
     // Lo que suena en los decks sigue: el archivo no se borra.
     dialog->onLibraryReset = [this] {

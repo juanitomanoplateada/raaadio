@@ -19,6 +19,7 @@
 #include "autodj/AdScheduler.h"
 #include "network/ApiServer.h"
 #include "network/StreamEncoder.h"
+#include "network/NowPlayingPublisher.h"
 #include "helpers/StationSettings.h"
 
 // Qué servicios arranca la ventana principal. Todo activo en uso normal; el modo
@@ -73,6 +74,7 @@ private:
     AirLogRecorder airLog;
     StreamEncoder streamEncoder;
     StreamEncoder::Server runningStream;
+    std::unique_ptr<NowPlayingPublisher> nowPlaying;
     std::unique_ptr<DeadAirGuard> deadAirGuard;
     std::unique_ptr<AdScheduler> adScheduler;
 
