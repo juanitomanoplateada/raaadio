@@ -1,0 +1,21 @@
+# Fin de línea LF en el repositorio y en la copia de trabajo, en todos los sistemas.
+# (MSVC, CMake y JUCE leen LF sin problema; así los diffs no se llenan de cambios de CRLF.)
+* text=auto eol=lf
+
+# Textos de la interfaz: UTF-8 con tildes y eñes, siempre como texto.
+Assets/lang_*.txt text eol=lf
+
+# Archivos de Windows que esperan CRLF
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binarios
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.wav  binary
+*.mp3  binary
+*.flac binary
+*.ogg  binary
+*.db   binary

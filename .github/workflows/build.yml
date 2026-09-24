@@ -1,0 +1,39 @@
+name: Compilación y pruebas
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Windows x64 (Release)
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # JUCE, SQLite y libebur128 se descargan con FetchContent: se guardan entre corridas.
+      - name: Caché de dependencias
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configurar
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Compilar
+        run: cmake --build build --config Release --parallel
+
+      - name: Pruebas
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Publicar el ejecutable
+        uses: actions/upload-artifact@v4
+        with:
+          name: RAAADIO-windows-x64
+          path: build/RAAADIO_artefacts/Release/RAAADIO.exe
+          if-no-files-found: error

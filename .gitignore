@@ -1,0 +1,64 @@
+# ── Compilación (CMake, FetchContent) ─────────────────────────────────────────
+/build/
+/build-*/
+/out/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+JuceLibraryCode/
+
+# Binarios y objetos sueltos
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.obj
+*.o
+*.a
+*.so
+*.dylib
+
+# ── Editores e IDE ───────────────────────────────────────────────────────────
+.vs/
+.vscode/
+.idea/
+.cache/
+*.vcxproj
+*.vcxproj.user
+*.vcxproj.filters
+*.sln
+*.suo
+*.sdf
+*.opensdf
+*.ipch
+*.jucer.backup
+*.swp
+*~
+
+# ── Datos de una emisora (nunca van al repositorio) ──────────────────────────
+# Laboratorio: base de datos, música, grabaciones, respaldos y ajustes con claves.
+raaadio_lab/
+raaadio.db
+raaadio.db-journal
+*.settings
+
+# ── Registros y salidas temporales ───────────────────────────────────────────
+*.log
+build_output_*.txt
+debug_log.txt
+dj_log.txt
+
+# Capturas de la interfaz (--ui-snapshot) generadas en la raíz; las del README
+# viven en docs/screenshots/.
+/*.png
+
+# ── Sistema operativo ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
