@@ -12,6 +12,12 @@
 #include "../Source/audio/Mixer.h"
 #include "../Source/audio/TrackAnalyzer.h"
 #include "../Source/library/TagReader.h"
+#include "../Source/library/TrackNaming.h"
+#include "../Source/library/ImportReview.h"
+#include "../Source/audio/AcousticFingerprint.h"
+#include "../Source/network/Chromaprint.h"
+#include "../Source/network/OnlineMetadata.h"
+#include "../Source/network/OnlineIdentifier.h"
 #include "../Source/library/AdvertisingManager.h"
 #include "../Source/generator/PlaylistGenerator.h"
 #include "../Source/autodj/QueueTiming.h"
@@ -846,6 +852,193 @@ public:
 };
 
 //==============================================================================
+class TrackNamingTests : public juce::UnitTest
+{
+public:
+    TrackNamingTests() : juce::UnitTest("Nombres de canciones", "RAAADIO") {}
+
+    TrackNaming::Source file(const char* name, const char* group = "MERENGUE")
+    {
+        TrackNaming::Source s;
+        s.fileName = utf8(name);
+        s.group = group;
+        return s;
+    }
+
+    void runTest() override
+    {
+        using namespace TrackNaming;
+
+        beginTest("Claves: mayúsculas, tildes y \"&\" no cambian el nombre");
+        expectEquals(key(utf8("Rubby Pérez")), key("RUBBY PEREZ"));
+        expectEquals(key("Sandy & Papo"), key("SANDY Y PAPO"));
+        expectEquals(key(utf8("Oscar D'León")), juce::String("oscar dleon"));
+        expectEquals(matchKey(utf8("Rubby Pérez"), "Buscando Tus Besos"), matchKey("RUBBY PEREZ", "BUSCANDO TUS BESOS"));
+
+        beginTest("Tipo Título para lo que viene en mayúsculas; lo demás queda igual");
+        expectEquals(smartCase("POCHY Y SU COCOBAND"), juce::String("Pochy y su Cocoband"));
+        expectEquals(smartCase("LOS OCHO DE COLOMBIA"), juce::String("Los Ocho de Colombia"));
+        expectEquals(smartCase(utf8("AY AY CARIÑO")), utf8("Ay Ay Cariño"));
+        expectEquals(smartCase("DJ PEPE"), juce::String("DJ Pepe"));
+        expectEquals(smartCase("ROCKY II"), juce::String("Rocky II"));
+        expectEquals(smartCase(utf8("La Gota Fría")), utf8("La Gota Fría"));
+        expectEquals(smartCase("la camisa negra"), juce::String("La Camisa Negra"));
+
+        beginTest("Nombres limpios: copias repetidas, número de pista, video oficial y direcciones web");
+        expectEquals(cleanFileName("LA FLACA - POCHY Y SU COCOBAND (ALFONSO VASQUEZ)_521167018"),
+                     juce::String("LA FLACA - POCHY Y SU COCOBAND (ALFONSO VASQUEZ)"));
+        expectEquals(cleanFileName(utf8("01 - Carlos Vives - La Gota Fría (Video Oficial)")), utf8("Carlos Vives - La Gota Fría"));
+        expectEquals(cleanFileName("Juanes_-_La_Camisa_Negra"), juce::String("Juanes - La Camisa Negra"));
+        expectEquals(cleanFileName("www.musica.com - Artista - Tema [HD]"), juce::String("Artista - Tema"));
+        expectEquals(cleanFileName("50 Cent - In Da Club"), juce::String("50 Cent - In Da Club"));
+        expectEquals(cleanFileName("07 Bachata Rosa"), juce::String("Bachata Rosa"));
+
+        const Context empty({}, {}, { "MERENGUE" }, {});
+
+        beginTest("Título – Artista: compositores entre paréntesis, año, género e invitados");
+        {
+            auto p = propose(file("LA FLACA - POCHY Y SU COCOBAND (ALFONSO VASQUEZ)"), Orientation::TitleArtist, empty);
+            expectEquals(p.artist, juce::String("Pochy y su Cocoband"));
+            expectEquals(p.title, juce::String("La Flaca"));
+            expectEquals(p.composers.joinIntoString("|"), juce::String("Alfonso Vasquez"));
+
+            p = propose(file("AMARTE A TI - SIN FRONTERAS - MERENGUE (D. FREIGBERG - W. A. RENZON) 1997"), Orientation::TitleArtist, empty);
+            expectEquals(p.artist, juce::String("Sin Fronteras"));
+            expectEquals(p.title, juce::String("Amarte a Ti"));
+            expectEquals(p.year, 1997);
+            expectEquals(p.composers.joinIntoString("|"), juce::String("D. Freigberg|W. A. Renzon"));
+            expectEquals(p.genreRemoved, juce::String("MERENGUE"));
+
+            p = propose(file("LA GRAN MANZANA - FRENESI ORQUESTA, CANTA EL FANTASMA"), Orientation::TitleArtist, empty);
+            expectEquals(p.artist, juce::String("Frenesi Orquesta"));
+            expectEquals(p.featured.joinIntoString("|"), juce::String("El Fantasma"));
+            expectEquals(p.credit(), juce::String("Frenesi Orquesta feat. El Fantasma"));
+            expect(!p.featuredGuessed, "\"canta\" dice explícitamente quién es el invitado");
+
+            p = propose(file("DAME TU QUERER - LOS OCHO DE COLOMBIA, CANTA EDER ORTEGA MERENGUE (D. EN D.)"), Orientation::TitleArtist, empty);
+            expectEquals(p.artist, juce::String("Los Ocho de Colombia"));
+            expectEquals(p.featured.joinIntoString("|"), juce::String("Eder Ortega"));
+            expectEquals(p.title, juce::String("Dame Tu Querer"));
+
+            p = propose(file("ESA MORENA - LOS HERMANOS ROSARIO - 1997"), Orientation::TitleArtist, empty);
+            expectEquals(p.artist, juce::String("Los Hermanos Rosario"));
+            expectEquals(p.title, juce::String("Esa Morena"));
+            expectEquals(p.year, 1997);
+        }
+
+        beginTest("El formato de cada carpeta sale de los artistas que se repiten con títulos distintos");
+        {
+            std::vector<Source> batch;
+            for (auto* name : { "VOLVERE - WILFRIDO VARGAS", "CUPIDO ME FLECHO - WILFRIDO VARGAS",
+                                "EL BAILE DEL PERRITO - WILFRIDO VARGAS (WILFRIDO VARGAS)", "EL PADRINO - FULANITO",
+                                "CALLATE - FULANITO_521290686", "GUALLANDO - FULANITO", "HOLA - LOS HERMANOS ROSARIO",
+                                "ESA MORENA - LOS HERMANOS ROSARIO - 1997", "LA DUEÑA DEL SWING - LOS HERMANOS ROSARIO",
+                                "DEMASIADO NIÑA - EDDY HERRERA_521204329", "A DORMIR JUNTITOS - EDDY HERRERA Y LIZ",
+                                "LA BAILADORA - EDDY HERRERA (ALFONSO VALLEJO)", "LA MOVIDA - SANDY Y PAPO",
+                                "LA HORA DE BAILAR - SANDY Y PAPO", "EL VIRAO - LOS CANTANTES DE RAMON ORLANDO" })
+                batch.push_back(file(name));
+            for (auto* name : { "LOS HERMANOS ROSARIO - ESA MORENA", "RUBBY PEREZ - BUSCANDO TUS BESOS",
+                                "JUAN LUIS GUERRA - OJALA QUE LLUEVA CAFE" })
+                batch.push_back(file(name, "GENERAL"));
+
+            const Context context({}, {}, { "MERENGUE" }, batch);
+            const auto formats = detectFormats(batch, context);
+            const auto merengue = formats.at("MERENGUE");
+            expect(merengue.orientation == Orientation::TitleArtist, "la carpeta de merengue viene al revés");
+            expect(merengue.verified());
+            expect(merengue.confirming >= 10, "lo confirman los artistas repetidos: " + juce::String(merengue.confirming));
+            expectEquals(merengue.contradicting, 0);
+            expect(formats.at("GENERAL").orientation == Orientation::ArtistTitle, "la carpeta general viene bien");
+
+            auto p = propose(file("A DORMIR JUNTITOS - EDDY HERRERA Y LIZ"), Orientation::TitleArtist, context);
+            expectEquals(p.artist, juce::String("Eddy Herrera"));
+            expectEquals(p.featured.joinIntoString("|"), juce::String("Liz"));
+            expect(p.featuredGuessed, "se separó porque Eddy Herrera aparece solo en otros archivos");
+            expectEquals(p.joinedArtist, juce::String("Eddy Herrera y Liz"));
+
+            p = propose(file("LA MOVIDA - SANDY Y PAPO"), Orientation::TitleArtist, context);
+            expectEquals(p.artist, juce::String("Sandy y Papo"));
+            expect(p.featured.isEmpty(), "un dúo que nadie conoce por separado queda entero");
+        }
+
+        beginTest("Artistas conocidos: se escriben como en la biblioteca, con alias y parecidos");
+        {
+            std::map<juce::String, KnownArtist> known {
+                { key("Juan Luis Guerra"), { "Juan Luis Guerra", 12 } },
+                { key("Los Hermanos Rosario"), { "Los Hermanos Rosario", 6 } },
+                { key(utf8("Rubby Pérez")), { utf8("Rubby Pérez"), 3 } },
+            };
+            const Context context(known, { { key("Hnos Rosario"), key("Los Hermanos Rosario") } }, {}, {});
+            expectEquals(propose(file("RUBBY PEREZ - BUSCANDO TUS BESOS", "GENERAL"), Orientation::ArtistTitle, context).artist,
+                         utf8("Rubby Pérez"));
+            expectEquals(propose(file("HNOS ROSARIO - HOLA", "GENERAL"), Orientation::ArtistTitle, context).artist,
+                         juce::String("Los Hermanos Rosario"));
+            expectEquals(context.closestKnown("Hermanos Rosario"), juce::String("Los Hermanos Rosario"));
+            expectEquals(context.closestKnown("Juan Luis Guera"), juce::String("Juan Luis Guerra"));
+            expectEquals(context.closestKnown("Juan Gabriel"), juce::String());
+            expectEquals((int) context.suggestions("juan", 5).size(), 1);
+        }
+
+        beginTest("Etiquetas: invitados y versión; y lo que no se debe quitar");
+        {
+            Source tagged;
+            tagged.fileName = "pista 07";
+            tagged.tagArtist = "Carlos Vives feat. Shakira";
+            tagged.tagTitle = "La Bicicleta (Remix)";
+            auto p = propose(tagged, Orientation::TitleArtist, empty);
+            expectEquals(p.artist, juce::String("Carlos Vives"));
+            expectEquals(p.featured.joinIntoString("|"), juce::String("Shakira"));
+            expectEquals(p.title, juce::String("La Bicicleta"));
+            expectEquals(p.version, juce::String("Remix"));
+            expectEquals(p.fullTitle(), juce::String("La Bicicleta (Remix)"));
+
+            p = propose(file("PRINCE - 1999", "GENERAL"), Orientation::ArtistTitle, empty);
+            expectEquals(p.artist, juce::String("Prince"));
+            expectEquals(p.title, juce::String("1999"));
+            expectEquals(p.year, 0);
+
+            const Context salsa({}, {}, { "SALSA" }, {});
+            p = propose(file("GRUPO NICHE - SALSA", "GENERAL"), Orientation::ArtistTitle, salsa);
+            expectEquals(p.title, juce::String("Salsa"));
+
+            p = propose(file("MARC ANTHONY - TUYA (MAS QUE TUYA)", "GENERAL"), Orientation::ArtistTitle, empty);
+            expectEquals(p.title, juce::String("Tuya (Mas Que Tuya)"));
+            expect(p.composers.isEmpty());
+        }
+
+        beginTest("Casos de la biblioteca real: \"vi\" no es número romano, siglas con puntos y artistas pegados");
+        {
+            auto p = propose(file("LOS VI PASAR - LA BANDA NOCTURNA - TECNO MERENGUE (AUGUSTO ZAPATA) 1992"), Orientation::TitleArtist, empty);
+            expectEquals(p.title, juce::String("Los Vi Pasar"));
+            expectEquals(p.genreRemoved, juce::String("TECNO MERENGUE"));
+            p = propose(file("SOY CHIQUITO - SANTI Y SUS DUENDES (D.R.A.)"), Orientation::TitleArtist, empty);
+            expectEquals(p.composers.joinIntoString("|"), juce::String("D.R.A."));
+            p = propose(file("TE QUIERO - MONCHI CAPRICHO."), Orientation::TitleArtist, empty);
+            expectEquals(p.artist, juce::String("Monchi Capricho"));
+            p = propose(file("SUAVECITO - PROYECCION T.L.F."), Orientation::TitleArtist, empty);
+            expectEquals(p.artist, juce::String("Proyeccion T.L.F."));
+
+            std::vector<Source> batch;
+            for (auto* name : { "VOLVERE - WILFRIDO VARGAS", "CUPIDO ME FLECHO - WILFRIDO VARGAS", "EL JARDINERO - WILFRIDO VARGAS",
+                                "BACHATA MERENGUE - WILFRIDOVARGAS, CANTA MICKEY TAVERAS (MARINO PEREZ)" })
+                batch.push_back(file(name));
+            const Context context({}, {}, { "MERENGUE" }, batch);
+            p = propose(batch.back(), Orientation::TitleArtist, context);
+            expectEquals(p.artist, juce::String("Wilfridovargas"));
+            expectEquals(context.closestKnown(p.artist), juce::String("Wilfrido Vargas"),
+                         "la forma que más se repite en el lote, aunque la biblioteca esté vacía");
+            expectEquals(context.closestKnown("Wilfrido Vargas"), juce::String(), "la forma más repetida no se corrige a sí misma");
+        }
+
+        beginTest("En pantalla, en mayúsculas si la emisora lo prefiere; lo guardado no cambia");
+        setDisplayUppercase(true);
+        expectEquals(display(utf8("Cariño")), utf8("CARIÑO"));
+        setDisplayUppercase(false);
+        expectEquals(display(utf8("Cariño")), utf8("Cariño"));
+    }
+};
+
+//==============================================================================
 class ImportTests : public juce::UnitTest
 {
 public:
@@ -870,9 +1063,11 @@ public:
         expectEquals((int) tracks.size(), 1);
         const auto track = tracks.empty() ? TrackInfo {} : tracks.front();
         const juce::File copied(track.path);
-        expectEquals(juce::String(track.artist), juce::String("CARLOS VIVES"));
-        expectEquals(juce::String::fromUTF8(track.title.c_str()), utf8("LA GOTA FRÍA"));
-        expectEquals(copied.getFileName(), utf8("CARLOS VIVES - LA GOTA FRÍA.wav"));
+        expectEquals(juce::String(track.artist), juce::String("Carlos Vives"));
+        expectEquals(juce::String::fromUTF8(track.title.c_str()), utf8("La Gota Fría"));
+        expect(track.isPending(), "la música entra por revisar");
+        expectEquals(copied.getFileName(), juce::String("pista 07.wav"));
+        expect(copied.isAChildOf(fx.lab.root.getChildFile("Library/_Entrada")), "espera en _Entrada hasta que se confirme");
         expect(copied.hasIdenticalContentTo(source), "el archivo es idéntico al original, sin recodificar");
         expectEquals(track.analysisVersion, TrackAnalyzer::version);
         expectWithinAbsoluteError(track.cueIn, 0.98, 0.03);
@@ -942,6 +1137,793 @@ public:
             expectEquals(legacy.analysisVersion, TrackAnalyzer::version);
             expectWithinAbsoluteError(legacy.cueIn, 1.98, 0.03);
             expect(!legacy.fileHash.empty(), "el hash queda guardado para detectar duplicados");
+        }
+    }
+};
+
+//==============================================================================
+class ImportReviewTests : public juce::UnitTest
+{
+public:
+    ImportReviewTests() : juce::UnitTest("Revisión de lo importado", "RAAADIO") {}
+
+    // Un archivo corto con un tono propio (así cada uno es distinto para el hash).
+    static juce::File song(const juce::File& folder, const char* name, int index, double seconds = 2.0)
+    {
+        return writeWav(folder.getChildFile(utf8(name) + ".wav"), seconds,
+                        [index](double t) { return tone(t, 0.3f, 300.0 + 37.0 * index); });
+    }
+
+    static void importAndWait(MusicLibrary& library, const juce::File& folder, const juce::String& category)
+    {
+        library.importFiles({ folder }, category);
+        for (int i = 0; i < 600 && library.isImporting(); ++i) juce::Thread::sleep(20);
+    }
+
+    static int rowNamed(const ImportReview& review, const char* sourceName)
+    {
+        const auto& items = review.getItems();
+        for (int i = 0; i < (int) items.size(); ++i)
+            if (juce::String::fromUTF8(items[(size_t) i].source.name.c_str()) == utf8(sourceName)) return i;
+        return -1;
+    }
+
+    static TrackInfo trackTitled(MusicLibrary& library, const juce::String& title)
+    {
+        for (const auto& t : library.search("", ""))
+            if (juce::String::fromUTF8(t.title.c_str()) == title) return t;
+        TrackInfo none {};
+        none.id = -1;
+        return none;
+    }
+
+    static int generatorCandidates(MusicLibrary& library)
+    {
+        std::vector<int> music;
+        for (const auto& c : library.getCategories())
+            if (!c.isSystem()) music.push_back(c.id);
+        GeneratorSettings settings;
+        return (int) PlaylistGenerator::selectCandidates(library.search("", ""), library.getAllTrackCategories(), music,
+                                                         settings, juce::Time::getCurrentTime()).size();
+    }
+
+    void runTest() override
+    {
+        using ImportReview = ::ImportReview;
+
+        LibraryFixture fx;
+        TempLab outside;
+        fx.library.addCategory("MERENGUE");
+        fx.library.addCategory("EXITOS");
+
+        // Una carpeta como la de la emisora: "TÍTULO - ARTISTA (compositores)", sin etiquetas.
+        const auto merengue = outside.root.getChildFile("MERENGUE");
+        const char* names[] = { "VOLVERE - WILFRIDO VARGAS", "CUPIDO ME FLECHO - WILFRIDO VARGAS", "EL PADRINO - FULANITO",
+                                "GUALLANDO - FULANITO", "LA FLACA - POCHY Y SU COCOBAND (ALFONSO VASQUEZ)",
+                                "A DORMIR JUNTITOS - EDDY HERRERA Y LIZ", "DEMASIADO NIÑA - EDDY HERRERA",
+                                "LA BAILADORA - EDDY HERRERA (ALFONSO VALLEJO)" };
+        int index = 0;
+        for (auto* name : names) song(merengue, name, index++);
+        importAndWait(fx.library, merengue, "MERENGUE");
+
+        beginTest("La música importada espera por revisar: AutoDJ y el generador no la usan");
+        expectEquals(fx.library.getPendingCount(), 8);
+        expectEquals(generatorCandidates(fx.library), 0);
+
+        ImportReview review(fx.library);
+        review.load(ImportReview::Scope::NewImports);
+
+        beginTest("La revisión lee la carpeta completa: título – artista, compositores e invitados");
+        {
+            expectEquals((int) review.getGroups().size(), 1);
+            const auto& group = review.getGroups().front();
+            expect(group.format.orientation == TrackNaming::Orientation::TitleArtist, "se detecta que la carpeta va al revés");
+            expect(group.format.verified());
+            expectEquals(group.name, juce::String("MERENGUE"));
+
+            const int flaca = rowNamed(review, "LA FLACA - POCHY Y SU COCOBAND (ALFONSO VASQUEZ)");
+            expect(flaca >= 0);
+            if (flaca >= 0) {
+                const auto& item = review.getItems()[(size_t) flaca];
+                expectEquals(item.proposal.artist, juce::String("Pochy y su Cocoband"));
+                expectEquals(item.proposal.title, juce::String("La Flaca"));
+                expectEquals(item.proposal.composers.joinIntoString("|"), juce::String("Alfonso Vasquez"));
+                expect(item.state == ImportReview::State::Ready);
+            }
+            const int juntitos = rowNamed(review, "A DORMIR JUNTITOS - EDDY HERRERA Y LIZ");
+            expect(juntitos >= 0 && review.getItems()[(size_t) juntitos].state == ImportReview::State::Check,
+                   "\"y Liz\" puede ser una invitada o parte del nombre: se pregunta");
+            expectEquals((int) review.readyRows().size(), 7);
+        }
+
+        beginTest("Confirmar ordena el archivo en Musica/<artista> y guarda los créditos");
+        {
+            const auto outcome = review.confirm(review.readyRows());
+            expectEquals(outcome.confirmed, 7);
+            expectEquals(outcome.failed, 0);
+
+            const auto volvere = trackTitled(fx.library, "Volvere");
+            expect(volvere.id != -1);
+            expect(!volvere.isPending());
+            expect(!volvere.confirmedAt.empty());
+            expectEquals(juce::File(volvere.path).getRelativePathFrom(fx.lab.root).replaceCharacter('\\', '/'),
+                         juce::String("Library/Musica/Wilfrido Vargas/Wilfrido Vargas - Volvere.wav"));
+
+            const auto flaca = trackTitled(fx.library, "La Flaca");
+            const auto credits = fx.library.getTrackCredits(flaca);
+            expectEquals(credits.artist, juce::String("Pochy y su Cocoband"));
+            expectEquals(credits.composers.joinIntoString("|"), juce::String("Alfonso Vasquez"));
+
+            expectEquals(fx.library.getPendingCount(), 1);
+            expectEquals(generatorCandidates(fx.library), 7);
+            expectEquals((int) review.getItems().size(), 1);  // la revisión se recarga sola
+        }
+
+        beginTest("Lo que el operador corrige queda guardado aunque cierre la revisión");
+        {
+            review.resolveFeatured(0, true);
+            expect(review.getItems().front().state == ImportReview::State::Ready);
+
+            ImportReview again(fx.library);
+            again.load(ImportReview::Scope::NewImports);
+            expect(again.getItems().size() == 1 && again.getItems().front().manual);
+            expect(again.getItems().front().state == ImportReview::State::Ready);
+            expectEquals(again.getItems().front().proposal.credit(), juce::String("Eddy Herrera feat. Liz"));
+            expectEquals(again.confirm(again.readyRows()).confirmed, 1);
+            expect(!fx.lab.root.getChildFile("Library/_Entrada").exists(), "la carpeta de entrada vacía se quita");
+        }
+
+        beginTest("Un artista conocido orienta la importación: otra copia de la canción se reconoce al importarla");
+        {
+            const auto exitos = outside.root.getChildFile("EXITOS");
+            song(exitos, "VOLVERE - WILFRIDO VARGAS", 40);
+            importAndWait(fx.library, exitos, "EXITOS");
+
+            expectEquals(fx.library.getLastImportSummary().duplicates, 1);
+            expectEquals(fx.library.getPendingCount(), 0);
+            const auto original = trackTitled(fx.library, "Volvere");
+            expectEquals((int) fx.library.getTrackCategories(original.id).size(), 2);
+        }
+
+        beginTest("Si el operador corrige el artista, la próxima vez se reconoce solo");
+        {
+            const auto typo = outside.root.getChildFile("TYPO");
+            song(typo, "TE QUIERO - WILFRIDO VARGAZ", 50);
+            song(typo, "LA LOCA - WILFRIDO VARGAS", 51);
+            importAndWait(fx.library, typo, "MERENGUE");
+
+            review.load(ImportReview::Scope::NewImports);
+            const int row = rowNamed(review, "TE QUIERO - WILFRIDO VARGAZ");
+            expect(row >= 0 && review.getItems()[(size_t) row].has(ImportReview::Issue::DidYouMean));
+            if (row >= 0) {
+                expectEquals(review.getItems()[(size_t) row].didYouMean, juce::String("Wilfrido Vargas"));
+                review.acceptDidYouMean(row);
+            }
+            expectEquals(review.confirm(review.readyRows()).confirmed, 2);
+            const auto context = fx.library.makeNamingContext({});
+            const auto* known = context.findKnown(TrackNaming::key("WILFRIDO VARGAZ"));
+            expect(known != nullptr && known->name == "Wilfrido Vargas");
+        }
+
+        beginTest("Editar una canción confirmada la cambia de lugar y avisa a la cola");
+        {
+            const auto volvere = trackTitled(fx.library, "Volvere");
+            int relocatedId = -1;
+            juce::String relocatedPath;
+            fx.library.onTrackRelocated = [&](int id, const juce::String& path) { relocatedId = id; relocatedPath = path; };
+
+            auto values = fx.library.getTrackCredits(volvere);
+            values.title = utf8("Volveré");
+            values.version = "En Vivo";
+            const auto result = fx.library.confirmTrack(volvere.id, values);
+            expect(result.ok && result.fileMoved);
+            const auto edited = fx.library.getTrackById(volvere.id);
+            expectEquals(juce::String::fromUTF8(edited.title.c_str()), utf8("Volveré (En Vivo)"));
+            expectEquals(juce::File(edited.path).getFileName(), utf8("Wilfrido Vargas - Volveré (En Vivo).wav"));
+            expect(juce::File(edited.path).existsAsFile());
+            expectEquals(relocatedId, volvere.id);
+            expectEquals(relocatedPath, juce::String::fromUTF8(edited.path.c_str()));
+            expect(fx.library.search("volvere", "").size() == 1, "se encuentra sin la tilde");
+            fx.library.onTrackRelocated = nullptr;
+        }
+
+        beginTest("Un respaldo de antes de ordenar la música: los archivos se encuentran por su huella");
+        {
+            const auto volvere = trackTitled(fx.library, utf8("Volveré (En Vivo)"));
+            const auto ordered = juce::String::fromUTF8(volvere.path.c_str());
+            // Así queda la base restaurada: con la ruta que tenía el archivo antes de confirmarlo.
+            fx.library.getDatabase().setTrackPath(volvere.id, fx.lab.root.getChildFile("Library/_Entrada/1/VOLVERE - WILFRIDO VARGAS.wav")
+                                                                  .getFullPathName().toStdString());
+            expectEquals(fx.library.repairMissingFiles(), 1);
+            expectEquals(juce::String::fromUTF8(fx.library.getTrackById(volvere.id).path.c_str()), ordered);
+            expectEquals(fx.library.repairMissingFiles(), 0, "no queda nada por buscar");
+        }
+
+        beginTest("La última forma en que se confirma un artista es la que se sugiere después");
+        {
+            const auto padrino = trackTitled(fx.library, "El Padrino");
+            auto values = fx.library.getTrackCredits(padrino);
+            values.artist = "FULANITO";
+            expect(fx.library.confirmTrack(padrino.id, values).ok);
+            const auto context = fx.library.makeNamingContext({});
+            const auto* known = context.findKnown(TrackNaming::key("Fulanito"));
+            expect(known != nullptr && known->name == "FULANITO");
+        }
+
+        beginTest("Música de versiones anteriores: sigue sonando y se puede sanear");
+        {
+            LibraryFixture old;
+            old.library.addCategory("MERENGUE");
+            // Como la dejaba la importación anterior: artista y título al revés y en mayúsculas.
+            const char* legacy[][2] = { { "VOLVERE", "WILFRIDO VARGAS" }, { "CUPIDO ME FLECHO", "WILFRIDO VARGAS" },
+                                        { "EL PADRINO", "FULANITO" }, { "GUALLANDO", "FULANITO" },
+                                        { "HOLA", "LOS HERMANOS ROSARIO" }, { "ESA MORENA", "LOS HERMANOS ROSARIO - 1997" } };
+            int merengueId = -1;
+            for (const auto& c : old.library.getCategories())
+                if (juce::String(c.name) == "MERENGUE") merengueId = c.id;
+
+            // La misma "Esa Morena", ya bien escrita, en GENERAL: la de MERENGUE es una copia.
+            const auto general = song(old.lab.root.getChildFile("Library/GENERAL/LOS HERMANOS ROSARIO"),
+                                      "LOS HERMANOS ROSARIO - ESA MORENA", 90);
+            old.library.getDatabase().addTrack(makeTrack(general.getFullPathName(), "LOS HERMANOS ROSARIO", "ESA MORENA"));
+            const int generalId = old.library.getTrackByPath(general.getFullPathName()).id;
+
+            for (const auto& l : legacy) {
+                const auto file = song(old.lab.root.getChildFile("Library/MERENGUE").getChildFile(l[0]),
+                                       (juce::String(l[0]) + " - " + l[1]).toRawUTF8(), index++);
+                old.library.getDatabase().addTrack(makeTrack(file.getFullPathName(), l[0], l[1]));
+                old.library.setTrackCategories(old.library.getTrackByPath(file.getFullPathName()).id, { merengueId });
+            }
+
+            expectEquals(old.library.getUnreviewedCount(), 7);
+            expectEquals(generatorCandidates(old.library), 7);
+
+            ImportReview sanitize(old.library);
+            sanitize.load(ImportReview::Scope::Library);
+            expectEquals((int) sanitize.getGroups().size(), 2);
+            const auto* merengueGroup = sanitize.findGroup(old.lab.root.getChildFile("Library/MERENGUE").getFullPathName());
+            expect(merengueGroup != nullptr && merengueGroup->format.orientation == TrackNaming::Orientation::TitleArtist);
+            const auto* generalGroup = sanitize.findGroup(old.lab.root.getChildFile("Library/GENERAL").getFullPathName());
+            expect(generalGroup != nullptr && generalGroup->format.orientation == TrackNaming::Orientation::ArtistTitle);
+
+            const int morena = rowNamed(sanitize, "ESA MORENA - LOS HERMANOS ROSARIO - 1997");
+            expect(morena >= 0);
+            if (morena >= 0) {
+                const auto& item = sanitize.getItems()[(size_t) morena];
+                expectEquals(item.proposal.artist, juce::String("Los Hermanos Rosario"));
+                expectEquals(item.proposal.year, 1997);
+                expect(item.state == ImportReview::State::Duplicate, "es la misma que la de GENERAL");
+                expectEquals(item.duplicateOf, generalId);
+
+                const juce::File copyFile(item.track.path);
+                expectEquals(sanitize.discard({ morena }), 1);
+                expect(!copyFile.exists());
+                expectEquals(old.lab.root.getChildFile("Library/_Descartadas").findChildFiles(juce::File::findFiles, true).size(), 1);
+                expectEquals((int) old.library.getTrackCategories(generalId).size(), 1);
+            }
+
+            expectEquals(sanitize.confirm(sanitize.readyRows()).confirmed, 6);
+            expectEquals(old.library.getUnreviewedCount(), 0);
+            expect(!old.lab.root.getChildFile("Library/MERENGUE").exists(), "las carpetas viejas vacías se quitan");
+            expect(old.lab.root.getChildFile("Library/Musica/Fulanito/Fulanito - El Padrino.wav").existsAsFile());
+        }
+
+        beginTest("Una base de la versión anterior se migra una vez y se sigue viendo en mayúsculas");
+        {
+            LibraryFixture older;
+            older.library.getDatabase().addTrack(makeTrack(older.lab.touch("Library/GENERAL/x.mp3").getFullPathName(),
+                                                           "RUBBY PEREZ", "BUSCANDO TUS BESOS"));
+            const auto dbFile = PersistenceManager::getDatabaseFolder().getChildFile("raaadio.db");
+            sqlite3* raw = nullptr;
+            sqlite3_open(dbFile.getFullPathName().toRawUTF8(), &raw);
+            sqlite3_exec(raw, "UPDATE tracks SET match_key = ''; DELETE FROM settings WHERE key = 'library.displayUppercase'; "
+                              "PRAGMA user_version = 2;", nullptr, nullptr, nullptr);
+            sqlite3_close(raw);
+
+            TrackNaming::setDisplayUppercase(false);
+            MusicLibrary reopened;
+            reopened.initialise(dbFile);
+            expect(reopened.isDisplayUppercase(), "lo guardado estaba en mayúsculas: se sigue viendo igual");
+            expectEquals(reopened.getDatabase().getSchemaVersion(), 3);
+            expect(reopened.search(utf8("rubby pérez"), "").size() == 1, "la clave permite buscar sin mayúsculas");
+            reopened.setDisplayUppercase(false);
+        }
+    }
+};
+
+//==============================================================================
+namespace
+{
+    // "Música" de prueba: dos voces con armónicos que cambian de nota cada 0,1 a 0,5 s y un
+    // golpe de ruido cada tanto, siempre igual para la misma semilla. pad: silencio al inicio.
+    constexpr double musicRate = 44100.0;
+
+    Signal music(int seed, double seconds, double pad = 0.0, float gain = 1.0f)
+    {
+        auto samples = std::make_shared<std::vector<float>>((size_t) (seconds * musicRate), 0.0f);
+        juce::Random random(seed);
+        for (int voice = 0; voice < 2; ++voice) {
+            double t = 0.0;
+            while (t < seconds) {
+                const double length = 0.1 + 0.4 * random.nextDouble();
+                const double hz = 110.0 * std::pow(2.0, random.nextInt(36) / 12.0);
+                const float amp = 0.12f + 0.08f * random.nextFloat();
+                const auto from = (size_t) (t * musicRate), to = juce::jmin(samples->size(), (size_t) ((t + length) * musicRate));
+                for (size_t i = from; i < to; ++i) {
+                    const double local = (double) (i - from) / musicRate;
+                    const float envelope = (float) juce::jmin(1.0, local * 40.0) * (float) std::exp(-local * 3.0);
+                    const double phase = juce::MathConstants<double>::twoPi * hz * (double) i / musicRate;
+                    (*samples)[i] += amp * envelope * (float) (std::sin(phase) + 0.5 * std::sin(2.0 * phase) + 0.25 * std::sin(3.0 * phase));
+                }
+                t += length;
+            }
+        }
+        for (double t = 0.3; t < seconds; t += 0.4 + 0.6 * random.nextDouble())
+            for (size_t i = (size_t) (t * musicRate); i < juce::jmin(samples->size(), (size_t) ((t + 0.05) * musicRate)); ++i)
+                (*samples)[i] += 0.2f * (random.nextFloat() * 2.0f - 1.0f);
+
+        return [samples, pad, gain](double t) {
+            const auto i = (long) ((t - pad) * musicRate);
+            return i >= 0 && i < (long) samples->size() ? gain * (*samples)[(size_t) i] : 0.0f;
+        };
+    }
+
+    std::vector<uint32_t> fingerprintOf(const juce::File& file)
+    {
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(file));
+        if (reader == nullptr) return {};
+        const auto analysis = TrackAnalyzer::analyse(*reader);
+        const double air = analysis.cueOut > analysis.cueIn ? analysis.cueOut - analysis.cueIn : analysis.lengthSeconds;
+        return AcousticFingerprint::compute(*reader, analysis.cueIn, air);
+    }
+}
+
+class AcousticFingerprintTests : public juce::UnitTest
+{
+public:
+    AcousticFingerprintTests() : juce::UnitTest("Huella acústica", "RAAADIO") {}
+
+    void runTest() override
+    {
+        TempLab lab;
+        juce::OggVorbisAudioFormat ogg;
+
+        beginTest("La misma grabación en OGG, 4 dB más baja y con otro comienzo, se reconoce; otra canción no");
+        {
+            const auto original = fingerprintOf(writeWav(lab.root.getChildFile("original.wav"), 60.0, music(7, 60.0)));
+            const auto copy = fingerprintOf(writeAudio(ogg, lab.root.getChildFile("copia.ogg"), 60.3, music(7, 60.0, 0.3, 0.63f), {}, 16, 1));
+            const auto other = fingerprintOf(writeWav(lab.root.getChildFile("otra.wav"), 60.0, music(8, 60.0)));
+
+            expect(original.size() > 300, "unos 10 segundos de huella: " + juce::String((int) original.size()));
+            const double same = AcousticFingerprint::similarity(original, copy);
+            const double different = AcousticFingerprint::similarity(original, other);
+            logMessage("  misma grabación: " + juce::String(same, 3) + ", otra canción: " + juce::String(different, 3));
+            expect(same >= AcousticFingerprint::sameRecording, "la copia se parece " + juce::String(same, 3));
+            expect(different < AcousticFingerprint::sameRecording - 0.1, "otra canción se parece " + juce::String(different, 3));
+        }
+
+        beginTest("Un tono o un silencio no tienen huella: no se confunden entre sí");
+        {
+            const auto toneA = fingerprintOf(writeWav(lab.root.getChildFile("tono_a.wav"), 50.0, [](double t) { return tone(t, 0.3f, 440.0); }));
+            const auto toneB = fingerprintOf(writeWav(lab.root.getChildFile("tono_b.wav"), 50.0, [](double t) { return tone(t, 0.3f, 523.0); }));
+            expect(toneA.empty() && toneB.empty());
+            expectEquals(AcousticFingerprint::similarity(toneA, toneB), 0.0);
+        }
+    }
+};
+
+//==============================================================================
+class CatalogToolsTests : public juce::UnitTest
+{
+public:
+    CatalogToolsTests() : juce::UnitTest("Artistas, búsqueda y lotes", "RAAADIO") {}
+
+    static TrackInfo titled(MusicLibrary& library, const juce::String& title)
+    {
+        for (const auto& t : library.search("", ""))
+            if (juce::String::fromUTF8(t.title.c_str()) == title) return t;
+        TrackInfo none {};
+        none.id = -1;
+        return none;
+    }
+
+    static void importAndWait(MusicLibrary& library, const juce::File& folder, const juce::String& category)
+    {
+        library.importFiles({ folder }, category);
+        for (int i = 0; i < 600 && library.isImporting(); ++i) juce::Thread::sleep(20);
+    }
+
+    static int artistId(MusicLibrary& library, const juce::String& name)
+    {
+        for (const auto& a : library.getArtists())
+            if (juce::String::fromUTF8(a.name.c_str()) == name) return a.id;
+        return -1;
+    }
+
+    void runTest() override
+    {
+        LibraryFixture fx;
+        TempLab outside;
+        fx.library.addCategory("MERENGUE");
+
+        // Un lote con créditos: invitada, compositor y un artista escrito de dos formas.
+        const auto folder = outside.root.getChildFile("MERENGUE");
+        const char* names[] = { "VOLVERE - WILFRIDO VARGAS", "CUPIDO ME FLECHO - WILFRIDO VARGAS", "EL JARDINERO - WILFRIDO VARGAS",
+                                "LA FLACA - POCHY Y SU COCOBAND (ALFONSO VASQUEZ)", "DEMASIADO NIÑA - EDDY HERRERA",
+                                "LA BAILADORA - EDDY HERRERA", "A DORMIR JUNTITOS - EDDY HERRERA Y LIZ",
+                                "BACHATA MERENGUE - WILFRIDOVARGAS, CANTA MICKEY TAVERAS" };
+        int index = 0;
+        for (auto* name : names)
+            writeWav(folder.getChildFile(utf8(name) + ".wav"), 2.0, [index](double t) { return tone(t, 0.3f, 250.0 + 41.0 * index); }), ++index;
+        importAndWait(fx.library, folder, "MERENGUE");
+        {
+            ImportReview review(fx.library);
+            review.load(ImportReview::Scope::NewImports);
+            for (int i = 0; i < (int) review.getItems().size(); ++i) {
+                const auto& item = review.getItems()[(size_t) i];
+                if (item.has(ImportReview::Issue::FeaturedGuess)) review.resolveFeatured(i, true);
+                // "Wilfridovargas" se deja escrito así, para fusionarlo después.
+                if (item.has(ImportReview::Issue::DidYouMean)) review.edit(i, item.proposal);
+            }
+            expectEquals(review.confirm(review.readyRows()).confirmed, 8);
+        }
+
+        beginTest("Búsqueda sin tildes ni mayúsculas, por créditos, por el nombre original y por partes de palabras");
+        {
+            expectEquals((int) fx.library.search("volvere wilfrido", "").size(), 1);
+            expectEquals((int) fx.library.search(utf8("NIÑA"), "").size(), 1);
+            expectEquals((int) fx.library.search("nina", "").size(), 1);
+            expectEquals((int) fx.library.search("vasquez", "").size(), 1, "por el compositor");
+            expectEquals((int) fx.library.search("liz", "").size(), 1, "por la invitada");
+            expectEquals((int) fx.library.search("wilf", "").size(), 4, "por el comienzo de una palabra (también \"Wilfridovargas\")");
+            expectEquals((int) fx.library.search("mickey taveras", "MERENGUE").size(), 1, "con categoría");
+            expectEquals((int) fx.library.search("nada que ver", "").size(), 0);
+        }
+
+        beginTest("La separación de artistas cuenta al intérprete aunque venga con invitados");
+        {
+            PlaylistGenerator::Pool pool;
+            pool.performersOf = fx.library.getPerformerKeys();
+            for (const auto& t : fx.library.search("", "")) pool.candidates.push_back(t);
+            const auto juntitos = titled(fx.library, "A Dormir Juntitos");
+            const auto keys = PlaylistGenerator::performerKeys(juntitos, pool);
+            expect(keys.size() == 2 && keys[0] == "eddy herrera" && keys[1] == "liz");
+
+            GeneratorSettings settings;
+            settings.artistSeparation = 1;
+            settings.titleSeparation = 0;
+            settings.categorySeparation = 0;
+            settings.lastPlayedSeparation = 0;
+            settings.targetDurationVal = 1;
+            juce::Random random(3);
+            juce::String error;
+            bool separated = true;
+            for (int round = 0; round < 20; ++round) {
+                const auto list = PlaylistGenerator::buildSequence(settings, pool, random, error);
+                for (size_t i = 1; i < list.size(); ++i) {
+                    const auto a = PlaylistGenerator::performerKeys(list[i - 1], pool);
+                    const auto b = PlaylistGenerator::performerKeys(list[i], pool);
+                    separated &= a.front() != b.front();
+                }
+            }
+            expect(separated, "\"Eddy Herrera\" y \"Eddy Herrera feat. Liz\" nunca suenan seguidas");
+
+            // Sin créditos (música de versiones anteriores), del artista guardado.
+            TrackInfo legacy {};
+            legacy.id = 999;
+            legacy.artist = "Eddy Herrera feat. Liz & Mickey Taveras";
+            const auto legacyKeys = PlaylistGenerator::performerKeys(legacy, pool);
+            expectEquals((int) legacyKeys.size(), 3);
+        }
+
+        beginTest("Renombrar un artista cambia sus canciones y sus archivos, y el nombre anterior queda como alias");
+        {
+            const int eddy = artistId(fx.library, "Eddy Herrera");
+            expect(eddy != -1);
+            int relocated = 0;
+            fx.library.onTrackRelocated = [&relocated](int, const juce::String&) { ++relocated; };
+            const auto result = fx.library.renameArtist(eddy, utf8("Eddy Herrera Ortíz"));
+            fx.library.onTrackRelocated = nullptr;
+            expect(result.ok);
+            expectEquals(result.tracksUpdated, 3);
+            expectEquals(relocated, 3);
+
+            const auto juntitos = titled(fx.library, "A Dormir Juntitos");
+            expectEquals(juce::String::fromUTF8(juntitos.artist.c_str()), utf8("Eddy Herrera Ortíz feat. Liz"));
+            expectEquals(juce::File(juntitos.path).getRelativePathFrom(fx.lab.root).replaceCharacter('\\', '/'),
+                         utf8("Library/Musica/Eddy Herrera Ortíz/Eddy Herrera Ortíz feat. Liz - A Dormir Juntitos.wav"));
+            expect(juce::File(juntitos.path).existsAsFile());
+            expect(!fx.lab.root.getChildFile("Library/Musica/Eddy Herrera").exists(), "la carpeta vieja vacía se quita");
+            expectEquals((int) fx.library.search("ortiz", "").size(), 3);
+
+            const auto* known = fx.library.makeNamingContext({}).findKnown(TrackNaming::key("Eddy Herrera"));
+            expect(known != nullptr && known->name == utf8("Eddy Herrera Ortíz"), "una importación futura con el nombre viejo lo reconoce");
+        }
+
+        beginTest("Renombrar con el nombre de otro artista avisa; fusionarlos junta sus canciones");
+        {
+            const int typo = artistId(fx.library, "Wilfridovargas");
+            const int wilfrido = artistId(fx.library, "Wilfrido Vargas");
+            expect(typo != -1 && wilfrido != -1);
+
+            const auto conflict = fx.library.renameArtist(typo, "Wilfrido Vargas");
+            expect(!conflict.ok);
+            expectEquals(conflict.conflictId, wilfrido);
+
+            const auto merged = fx.library.mergeArtists(typo, wilfrido);
+            expect(merged.ok);
+            expectEquals(merged.tracksUpdated, 1);
+            expectEquals(artistId(fx.library, "Wilfridovargas"), -1);
+            const auto bachata = titled(fx.library, "Bachata Merengue");
+            expectEquals(juce::String::fromUTF8(bachata.artist.c_str()), juce::String("Wilfrido Vargas feat. Mickey Taveras"));
+            expect(juce::File(bachata.path).isAChildOf(fx.lab.root.getChildFile("Library/Musica/Wilfrido Vargas")));
+            expectEquals((int) fx.library.getTracksOfArtist(wilfrido).size(), 4);
+
+            bool hasAlias = false;
+            for (const auto& a : fx.library.getArtists())
+                if (a.id == wilfrido)
+                    for (const auto& alias : a.aliases) hasAlias |= alias == "wilfridovargas";
+            expect(hasAlias, "la forma equivocada queda como alias");
+            expect(fx.library.removeArtistAlias("wilfridovargas"));
+        }
+
+        beginTest("Deshacer una importación saca lo que sigue por revisar; lo confirmado se queda");
+        {
+            const auto more = outside.root.getChildFile("MAS");
+            for (int i = 0; i < 3; ++i)
+                writeWav(more.getChildFile("NUEVA " + juce::String(i) + " - GRUPO NUEVO.wav"), 2.0,
+                         [i](double t) { return tone(t, 0.3f, 700.0 + 37.0 * i); });
+            importAndWait(fx.library, more, "MERENGUE");
+            expectEquals(fx.library.getPendingCount(), 3);
+
+            {
+                ImportReview review(fx.library);
+                review.load(ImportReview::Scope::NewImports);
+                expectEquals(review.confirm({ 0 }).confirmed, 1);
+            }
+            const auto batches = fx.library.getImportBatches();
+            expect(!batches.empty() && batches.front().pending == 2 && batches.front().confirmed == 1);
+            expectEquals(fx.library.undoImportBatch(batches.front().id), 2);
+            expectEquals(fx.library.getPendingCount(), 0);
+            expectEquals((int) fx.library.search("grupo nuevo", "").size(), 1, "la confirmada se queda");
+            expect(fx.lab.root.getChildFile("Library/_Descartadas").findChildFiles(juce::File::findFiles, true).size() == 2,
+                   "los archivos no se borran");
+        }
+
+        beginTest("La misma grabación con otro nombre y en otro formato se marca como duplicada por su sonido");
+        {
+            const auto copies = outside.root.getChildFile("COPIAS");
+            juce::OggVorbisAudioFormat ogg;
+            writeWav(copies.getChildFile("LA LLAVE DE MI CORAZON - JUAN LUIS GUERRA.wav"), 60.0, music(21, 60.0));
+            writeAudio(ogg, copies.getChildFile("pista 03 sin nombre.ogg"), 60.2, music(21, 60.0, 0.2, 0.7f), {}, 16, 1);
+            writeWav(copies.getChildFile("OTRA COSA - JUAN LUIS GUERRA.wav"), 60.0, music(22, 60.0));
+            importAndWait(fx.library, copies, "MERENGUE");
+
+            ImportReview review(fx.library);
+            review.load(ImportReview::Scope::NewImports);
+            expectEquals((int) review.getItems().size(), 3);
+            int bySound = 0, llave = -1, pista = -1;
+            for (const auto& item : review.getItems()) {
+                const auto name = juce::String::fromUTF8(item.source.name.c_str());
+                if (name.startsWith("LA LLAVE")) llave = item.track.id;
+                if (name.startsWith("pista")) pista = item.track.id;
+            }
+            for (const auto& item : review.getItems()) {
+                if (!item.duplicateBySound) continue;
+                ++bySound;
+                expect(item.state == ImportReview::State::Duplicate);
+                expect((item.track.id == pista && item.duplicateOf == llave) || (item.track.id == llave && item.duplicateOf == pista),
+                       "son las dos grabaciones iguales: " + item.duplicateText);
+            }
+            expectEquals(bySound, 1, "solo una de las dos iguales se marca como copia; la otra canción no");
+        }
+    }
+};
+
+//==============================================================================
+class OnlineIdentityTests : public juce::UnitTest
+{
+public:
+    OnlineIdentityTests() : juce::UnitTest("Identificación en línea", "RAAADIO") {}
+
+    // Respuestas de ejemplo con la forma de las de AcoustID y MusicBrainz.
+    static juce::String acoustIdFound()
+    {
+        return R"json({"status": "ok", "results": [
+            {"id": "a1", "score": 0.97, "recordings": [
+                {"id": "rec-1", "title": "Volveré", "duration": 248, "artists": [{"id": "x", "name": "Wilfrido Vargas"}]},
+                {"id": "rec-2", "title": "Volveré (en vivo)", "duration": 301, "artists": [{"name": "Wilfrido Vargas"}]}]},
+            {"id": "a2", "score": 0.41, "recordings": [{"id": "rec-3", "title": "Otra", "artists": [{"name": "Otro"}]}]}]})json";
+    }
+
+    static juce::String musicBrainzRecording()
+    {
+        return juce::String::fromUTF8(R"json({"id": "rec-1", "title": "Volveré", "first-release-date": "1986-05-01",
+            "isrcs": ["USABC8600001"],
+            "artist-credit": [
+                {"name": "Wilfrido Vargas", "joinphrase": " feat. ", "artist": {"name": "Wilfrido Vargas"}},
+                {"name": "Las Chicas del Can", "joinphrase": "", "artist": {"name": "Las Chicas del Can"}}],
+            "relations": [{"type": "performance", "target-type": "work", "work": {"title": "Volveré", "relations": [
+                {"type": "composer", "artist": {"name": "Wilfrido Vargas"}},
+                {"type": "lyricist", "artist": {"name": "Ramón Orlando"}}]}}]})json");
+    }
+
+    struct FakeServices {
+        std::vector<OnlineIdentifier::Request> requests;
+        OnlineIdentifier::Response acoustId { 200, acoustIdFound() };
+        OnlineIdentifier::Response musicBrainz { 200, musicBrainzRecording() };
+
+        OnlineIdentifier::Transport transport()
+        {
+            return [this](const OnlineIdentifier::Request& r) {
+                requests.push_back(r);
+                return r.url.contains("acoustid") ? acoustId : musicBrainz;
+            };
+        }
+    };
+
+    static int importOne(LibraryFixture& fx, const juce::File& file)
+    {
+        fx.library.processAndAddTrack(file, "MERENGUE");
+        return fx.library.getTrackByPath(fx.lab.root.getChildFile("Library/_Entrada/0").getChildFile(file.getFileName()).getFullPathName()).id;
+    }
+
+    static const ImportReview::Item* itemFor(const ImportReview& review, int trackId, int& row)
+    {
+        for (row = 0; row < (int) review.getItems().size(); ++row)
+            if (review.getItems()[(size_t) row].track.id == trackId) return &review.getItems()[(size_t) row];
+        return nullptr;
+    }
+
+    void runTest() override
+    {
+        TempLab outside;
+
+        beginTest("Chromaprint: la huella de AcoustID sale de la DLL y es siempre la misma");
+        {
+            expect(Chromaprint::isAvailable(), "chromaprint.dll está junto al ejecutable");
+            const auto file = writeWav(outside.root.getChildFile("huella.wav"), 60.0, music(31, 60.0));
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> first(formats.createReaderFor(file)), second(formats.createReaderFor(file));
+            const auto a = Chromaprint::compute(*first), b = Chromaprint::compute(*second);
+            expect(a.fingerprint.startsWith("AQA"), a.fingerprint.substring(0, 12));
+            expectEquals(a.duration, 60);
+            expectEquals(a.fingerprint, b.fingerprint);
+            expect(Chromaprint::libraryVersion().startsWith("1.5"));
+        }
+
+        beginTest("AcoustID y MusicBrainz: candidatos, invitados, año, compositores e ISRC");
+        {
+            juce::String error;
+            const auto candidates = OnlineMetadata::parseAcoustId(acoustIdFound(), error);
+            expect(error.isEmpty());
+            expectEquals((int) candidates.size(), 3);
+            const auto* best = OnlineMetadata::best(candidates, 250.0);
+            expect(best != nullptr && best->recordingId == "rec-1", "la más segura y de duración más parecida");
+
+            OnlineMetadata::parseAcoustId(R"json({"status": "error", "error": {"code": 4, "message": "invalid API key"}})json", error);
+            expectEquals(error, juce::String("invalid API key"));
+
+            Database::OnlineMatch match;
+            expect(OnlineMetadata::parseRecording(musicBrainzRecording(), match));
+            expectEquals(juce::String::fromUTF8(match.artist.c_str()), juce::String("Wilfrido Vargas"));
+            expect(match.featured.size() == 1 && match.featured[0] == "Las Chicas del Can");
+            expectEquals(match.year, 1986);
+            expectEquals(juce::String(match.isrc), juce::String("USABC8600001"));
+            expect(match.composers.size() == 2 && juce::String::fromUTF8(match.composers[1].c_str()) == utf8("Ramón Orlando"));
+
+            const auto p = OnlineMetadata::toProposal(match, TrackNaming::Context());
+            expectEquals(p.credit(), juce::String("Wilfrido Vargas feat. Las Chicas del Can"));
+            expectEquals(p.title, utf8("Volveré"));
+
+            // Un artista de MusicBrainz no se separa aunque se parezca a un dúo, y la versión se aparta.
+            Database::OnlineMatch duo;
+            duo.artist = "Sandy & Papo";
+            duo.title = "La Movida (en vivo)";
+            const TrackNaming::Context knowsSandy({ { "sandy", { "Sandy", 3 } } }, {}, {}, {});
+            const auto q = OnlineMetadata::toProposal(duo, knowsSandy);
+            expectEquals(q.artist, juce::String("Sandy & Papo"));
+            expect(q.featured.isEmpty());
+            expectEquals(q.title, juce::String("La Movida"));
+            expectEquals(q.version, juce::String("En Vivo"));
+        }
+
+        LibraryFixture fx;
+        fx.library.addCategory("MERENGUE");
+        FakeServices services;
+        OnlineIdentifier identifier(fx.library, services.transport());
+        identifier.setApiKey("clave123");
+
+        beginTest("Una canción sin nombre se identifica en línea; la revisión lo sugiere y al confirmar guarda su identificador");
+        {
+            const int id = importOne(fx, writeWav(outside.root.getChildFile("pista 03.wav"), 60.0, music(31, 60.0)));
+            expect(id != -1);
+            expect(identifier.identify(id) == OnlineIdentifier::Outcome::Found);
+
+            expectEquals((int) services.requests.size(), 2);
+            const auto& lookup = services.requests[0];
+            expect(lookup.body.contains("client=clave123") && lookup.body.contains("duration=60") && lookup.body.contains("fingerprint=AQA"),
+                   "a AcoustID solo va la huella y la duración");
+            expect(lookup.headers.contains("User-Agent: RAAADIO/"));
+            expect(services.requests[1].url.contains("recording/rec-1") && services.requests[1].url.contains("inc="));
+            expect(services.requests[1].body.isEmpty(), "a MusicBrainz, GET");
+
+            ImportReview review(fx.library);
+            review.load(ImportReview::Scope::NewImports);
+            int row = -1;
+            const auto* item = itemFor(review, id, row);
+            expect(item != nullptr && item->has(ImportReview::Issue::OnlineDiffers));
+            expect(item != nullptr && item->state == ImportReview::State::Check, "se sugiere, no se aplica sola");
+            expectEquals((int) review.onlineRows(true).size(), 1);
+
+            review.acceptOnline(review.onlineRows(true));
+            item = itemFor(review, id, row);
+            expect(item != nullptr && item->state == ImportReview::State::Ready);
+            if (item != nullptr) {
+                expectEquals(item->proposal.credit(), juce::String("Wilfrido Vargas feat. Las Chicas del Can"));
+                expectEquals(item->proposal.year, 1986);
+                expectEquals(item->proposal.composers.size(), 2);
+            }
+            expectEquals(review.confirm({ row }).confirmed, 1);
+
+            const auto ids = fx.library.getDatabase().getOnlineIds(id);
+            expectEquals(juce::String(ids.first), juce::String("rec-1"));
+            expectEquals(juce::String(ids.second), juce::String("USABC8600001"));
+            expect(juce::File(fx.library.getTrackById(id).path).isAChildOf(fx.lab.root.getChildFile("Library/Musica/Wilfrido Vargas")));
+        }
+
+        beginTest("Si coincide con lo propuesto, confirma el formato y completa año y compositores");
+        {
+            services.requests.clear();
+            const int id = importOne(fx, writeWav(outside.root.getChildFile("WILFRIDO VARGAS - VOLVERE.wav"), 45.0, music(32, 45.0)));
+            expect(identifier.identify(id) == OnlineIdentifier::Outcome::Found);
+
+            ImportReview review(fx.library);
+            review.load(ImportReview::Scope::NewImports);
+            int row = -1;
+            const auto* item = itemFor(review, id, row);
+            expect(item != nullptr && item->onlineAgrees);
+            expect(item != nullptr && item->state == ImportReview::State::Ready, "la carpeta de un solo archivo ya no pide elegir el formato");
+            if (item != nullptr) {
+                expectEquals(item->proposal.year, 1986);
+                expectEquals(item->proposal.composers.joinIntoString("|"), utf8("Wilfrido Vargas|Ramón Orlando"));
+                expectEquals(item->proposal.title, utf8("Volveré"), "la tilde que el nombre del archivo había perdido");
+            }
+            expectEquals(TrackNaming::withAccentsFrom("VOLVERE", utf8("Volveré")), utf8("VOLVERÉ"), "con las mayúsculas propias");
+            expectEquals(TrackNaming::withAccentsFrom("Volvere", "Otra"), juce::String("Volvere"));
+        }
+
+        beginTest("Errores: una clave inválida o sin conexión quedan para reintentar; lo desconocido no se vuelve a buscar");
+        {
+            const int invalid = importOne(fx, writeWav(outside.root.getChildFile("otra 1.wav"), 40.0, music(33, 40.0)));
+            services.acoustId = { 200, R"json({"status": "error", "error": {"code": 4, "message": "invalid API key"}})json" };
+            expect(identifier.identify(invalid) == OnlineIdentifier::Outcome::Error);
+            expectEquals(identifier.getStatus().lastError, juce::String("invalid API key"));
+
+            const int offline = importOne(fx, writeWav(outside.root.getChildFile("otra 2.wav"), 41.0, music(34, 41.0)));
+            services.acoustId = { 0, {} };
+            expect(identifier.identify(offline) == OnlineIdentifier::Outcome::Error);
+
+            const int unknown = importOne(fx, writeWav(outside.root.getChildFile("otra 3.wav"), 42.0, music(35, 42.0)));
+            services.acoustId = { 200, R"json({"status": "ok", "results": []})json" };
+            expect(identifier.identify(unknown) == OnlineIdentifier::Outcome::NotFound);
+
+            const auto again = fx.library.getDatabase().getTracksNeedingOnlineLookup();
+            auto has = [&again](int id) { return std::find(again.begin(), again.end(), id) != again.end(); };
+            expect(has(invalid) && has(offline), "los errores se reintentan en otra sesión");
+            expect(!has(unknown), "lo que AcoustID no conoce no se vuelve a preguntar");
+        }
+
+        beginTest("Sin clave no se busca nada");
+        {
+            identifier.setApiKey({});
+            const int id = importOne(fx, writeWav(outside.root.getChildFile("otra 4.wav"), 43.0, music(36, 43.0)));
+            const auto before = services.requests.size();
+            expect(identifier.identify(id) == OnlineIdentifier::Outcome::Skipped);
+            expectEquals(services.requests.size(), before);
         }
     }
 };
@@ -1655,7 +2637,7 @@ public:
 
             const auto manifest = juce::JSON::parse(first.getChildFile("manifest.json").loadFileAsString());
             expectEquals(manifest["integrity"].toString(), juce::String("ok"));
-            expectEquals((int) manifest["schemaVersion"], 2);
+            expectEquals((int) manifest["schemaVersion"], 3);
             expectEquals(manifest["files"][0]["sha256"].toString(), juce::SHA256(first.getChildFile("raaadio.db")).toHexString());
             expect(PersistenceManager::verifyBackup(first).wasOk());
             {
@@ -2809,15 +3791,15 @@ public:
             const auto response = httpGet(api.getPort(), "/nowplaying.json");
             const auto json = juce::JSON::parse(response.fromFirstOccurrenceOf("\r\n\r\n", false, false));
             expectEquals(json["state"].toString(), juce::String("music"), response);
-            expectEquals(json["now"]["title"].toString(), juce::String("UNO"));
+            expectEquals(json["now"]["title"].toString(), juce::String("Uno"));
             expect(!json["now"]["ends"].isVoid(), "se sabe cuándo entra la siguiente");
             expectEquals(json["previous"].size(), 1);
-            expectEquals(json["previous"][0]["title"].toString(), juce::String("CERO"), "la que suena no es anterior");
+            expectEquals(json["previous"][0]["title"].toString(), juce::String("Cero"), "la que suena no es anterior");
             expectEquals(json["next"].size(), 2);
-            expectEquals(json["next"][0]["title"].toString(), juce::String("DOS"));
-            expectEquals(json["next"][1]["title"].toString(), juce::String("TRES"), "la cuña de la cola no aparece");
+            expectEquals(json["next"][0]["title"].toString(), juce::String("Dos"));
+            expectEquals(json["next"][1]["title"].toString(), juce::String("Tres"), "la cuña de la cola no aparece");
             expect(!json["next"][0]["eta"].isVoid());
-            expect(httpGet(api.getPort(), "/nowplaying").endsWith("ARTISTA - UNO"));
+            expect(httpGet(api.getPort(), "/nowplaying").endsWith("Artista - Uno"));
             api.stop();
             deckA.stop();
         }
@@ -2891,7 +3873,7 @@ public:
             MusicLibrary library;
             library.initialise(dbFile);
             auto& db = library.getDatabase();
-            expectEquals(db.getSchemaVersion(), 2);
+            expectEquals(db.getSchemaVersion(), 3);
 
             AdvertisingManager ads;
             ads.initialise(library);
@@ -3110,7 +4092,12 @@ static BackupTests backupTests;
 static MixerCueTests mixerCueTests;
 static TrackAnalyzerTests trackAnalyzerTests;
 static TagReaderTests tagReaderTests;
+static TrackNamingTests trackNamingTests;
 static ImportTests importTests;
+static ImportReviewTests importReviewTests;
+static AcousticFingerprintTests acousticFingerprintTests;
+static CatalogToolsTests catalogToolsTests;
+static OnlineIdentityTests onlineIdentityTests;
 static DeckCueTests deckCueTests;
 static GeneratorTests generatorTests;
 static CategoryTests categoryTests;

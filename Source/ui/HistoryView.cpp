@@ -1,4 +1,5 @@
 #include "HistoryView.h"
+#include "../library/TrackNaming.h"
 #include "../helpers/ThemeManager.h"
 #include "../helpers/UiStyle.h"
 
@@ -87,12 +88,12 @@ void HistoryView::paintCell(juce::Graphics& g, int rowNumber, int columnId, int 
         case colTitle:
             g.setColour(t.getPrimaryTextColour());
             g.setFont(UiStyle::ui(14.5f));
-            g.drawText(juce::String(entry.track.title), area, juce::Justification::centredLeft, true);
+            g.drawText(TrackNaming::display(entry.track.title), area, juce::Justification::centredLeft, true);
             break;
         case colArtist:
             g.setColour(t.getSecondaryTextColour());
             g.setFont(UiStyle::ui(14.0f));
-            g.drawText(juce::String(entry.track.artist), area, juce::Justification::centredLeft, true);
+            g.drawText(TrackNaming::display(entry.track.artist), area, juce::Justification::centredLeft, true);
             break;
         case colLength:
             g.setColour(t.getSecondaryTextColour());

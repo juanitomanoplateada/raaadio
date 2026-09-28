@@ -43,6 +43,7 @@ PlaylistGenerator::Pool PlaylistGenerator::loadPool(const GeneratorSettings& set
         if (!c.isSystem()) allCategoryIds.push_back(c.id);
 
     pool.categoriesOf = library.getAllTrackCategories();
+    pool.performersOf = library.getPerformerKeys();
     const auto allTracks = library.search("", "");
     pool.candidates = selectCandidates(allTracks, pool.categoriesOf, allCategoryIds, settings, juce::Time::getCurrentTime());
 
@@ -80,6 +81,8 @@ std::vector<TrackInfo> PlaylistGenerator::selectCandidates(const std::vector<Tra
 
     std::vector<TrackInfo> result;
     for (const auto& t : allTracks) {
+        // Lo importado que nadie ha revisado no sale al aire solo (sí a mano).
+        if (t.isPending()) continue;
         if (!inAny(t.id, included) && !(allMusic && uncategorized(t.id))) continue;
         if (inAny(t.id, settings.excludedCategories)) continue;
 
@@ -92,6 +95,22 @@ std::vector<TrackInfo> PlaylistGenerator::selectCandidates(const std::vector<Tra
         result.push_back(t);
     }
     return result;
+}
+
+std::vector<juce::String> PlaylistGenerator::performerKeys(const TrackInfo& track, const Pool& pool) {
+    std::vector<juce::String> keys;
+    const auto it = pool.performersOf.find(track.id);
+    if (it != pool.performersOf.end()) {
+        for (const auto& k : it->second) keys.push_back(juce::String::fromUTF8(k.c_str()));
+        return keys;
+    }
+    // Sin créditos: el artista guardado, con sus invitados después de " feat. ".
+    const auto credit = juce::String::fromUTF8(track.artist.c_str());
+    keys.push_back(TrackNaming::key(credit.upToFirstOccurrenceOf(" feat. ", false, false)));
+    if (credit.contains(" feat. "))
+        for (const auto& guest : TrackNaming::splitNames(credit.fromFirstOccurrenceOf(" feat. ", false, false)))
+            keys.push_back(TrackNaming::key(guest));
+    return keys;
 }
 
 std::vector<TrackInfo> PlaylistGenerator::buildSequence(const GeneratorSettings& settings, const Pool& pool,
@@ -114,11 +133,21 @@ std::vector<TrackInfo> PlaylistGenerator::buildSequence(const GeneratorSettings&
     // la regla dejaba al generador atascado a las pocas pistas.
     std::set<int> distinctCategories;
     std::set<juce::String> distinctArtists, distinctTitles;
+    std::unordered_map<int, std::vector<juce::String>> performers;
+    std::unordered_map<int, juce::String> titleKeys;
     for (const auto& t : pool.candidates) {
         for (int c : categoriesOf(t.id)) distinctCategories.insert(c);
-        distinctArtists.insert(juce::String(t.artist).toUpperCase());
-        distinctTitles.insert(juce::String(t.title).toUpperCase());
+        performers[t.id] = performerKeys(t, pool);
+        distinctArtists.insert(performers[t.id].front());
+        titleKeys[t.id] = TrackNaming::key(juce::String::fromUTF8(t.title.c_str()));
+        distinctTitles.insert(titleKeys[t.id]);
     }
+    auto sharePerformer = [&performers](const TrackInfo& a, const TrackInfo& b) {
+        for (const auto& x : performers[a.id])
+            for (const auto& y : performers[b.id])
+                if (x.isNotEmpty() && x == y) return true;
+        return false;
+    };
     auto feasible = [](int separation, size_t distinctValues) {
         return juce::jmin(separation, juce::jmax(0, (int) distinctValues - 1));
     };
@@ -134,12 +163,14 @@ std::vector<TrackInfo> PlaylistGenerator::buildSequence(const GeneratorSettings&
         return false;
     };
     auto passesRules = [&](const TrackInfo& candidate) {
-        const juce::String artist(candidate.artist), title(candidate.title);
+        const auto& title = titleKeys[candidate.id];
         if (artistSeparation > 0
-            && clashesWithRecent(artistSeparation, [&](const TrackInfo& p) { return artist.equalsIgnoreCase(juce::String(p.artist)); }))
+            && clashesWithRecent(artistSeparation, [&](const TrackInfo& p) { return sharePerformer(candidate, p); }))
             return false;
         if (titleSeparation > 0
-            && clashesWithRecent(titleSeparation, [&](const TrackInfo& p) { return title.equalsIgnoreCase(juce::String(p.title)); }))
+            && clashesWithRecent(titleSeparation, [&](const TrackInfo& p) {
+                   return title == titleKeys[p.id];
+               }))
             return false;
         if (categorySeparation > 0) {
             const auto& categories = categoriesOf(candidate.id);

@@ -149,6 +149,15 @@ MainComponent::MainComponent(MainComponentOptions opts)
     libraryComp = std::make_unique<LibraryComponent>(library, historyManager, adsManager, *cartPlayer);
     libraryComp->setDecks(&audioEngine.getDeck(0), &audioEngine.getDeck(1));
     libraryComp->setPlaylist(&playlist);
+    libraryComp->setPreviewPlayer(&audioEngine.getPreview());
+    onlineIdentifier = std::make_unique<OnlineIdentifier>(library);
+    libraryComp->setOnlineIdentifier(onlineIdentifier.get());
+
+    // Al confirmar una canción en la revisión su archivo cambia de lugar: la cola guarda la
+    // ruta de cada fila, así que se le avisa.
+    library.onTrackRelocated = [this](int trackId, const juce::String& newPath) {
+        playlist.updatePath(trackId, newPath.toStdString());
+    };
 
     statusBar = std::make_unique<StatusBar>(audioEngine, autoDJ, recordingManager, *deadAirGuard, streamEncoder);
     statusBar->onSettingsRequested = [this] { openSettings(); };
@@ -251,12 +260,14 @@ MainComponent::~MainComponent() {
     // La interfaz se destruye antes que los servicios que observa (grabación, decks, AutoDJ).
     statusBar = nullptr;
     libraryComp = nullptr;
+    onlineIdentifier = nullptr;  // espera a que termine un pedido en curso
     playlistComp = nullptr;
     mixerComp = nullptr;
     deckA = nullptr;
     deckB = nullptr;
 
     backupService = nullptr;  // espera a que termine un respaldo en curso (la copia de música se corta)
+    library.onTrackRelocated = nullptr;
     playlistStore = nullptr;  // guarda la cola por última vez
     stationConfig->removeChangeListener(this);
     nowPlaying = nullptr;  // antes que los decks, la cola y el historial que observa
@@ -278,6 +289,7 @@ void MainComponent::openSettings() {
                                       *stationConfig, streamEncoder, nowPlaying.get(), backupService.get(), PersistenceManager::getAirLogFolder());
     // Al borrar la biblioteca, la cola y la botonera apuntarían a pistas que ya no existen.
     // Lo que suena en los decks sigue: el archivo no se borra.
+    dialog->setOnlineIdentifier(onlineIdentifier.get());
     dialog->onLibraryReset = [this] {
         playlist.clear();
         cartPlayer->clearAll();

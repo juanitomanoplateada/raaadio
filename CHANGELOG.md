@@ -11,6 +11,39 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
 
 ### Añadido
 
+- **Revisión de la música importada** (`ImportReview`, ventana *Revisar canciones*): la
+  música entra *por revisar* en `Library/_Entrada` y AutoDJ y el generador no la usan hasta
+  que alguien confirma artista, título y categoría; las cuñas, identificaciones y separadores
+  entran directo. El formato de cada carpeta (`Artista - Título` o `Título - Artista`) se
+  detecta porque los artistas se repiten con títulos distintos (`TrackNaming`). Se separan
+  invitados, compositores, año, versión y el género pegado al nombre, y se quitan número de
+  pista, `(Video Oficial)`, direcciones web y sufijos de copias. Hay dudas con respuesta de un
+  clic (*¿Es…?*, *¿invitado?*, formato sin confirmar), duplicados, acciones por lote,
+  preescucha por Cue y borradores que sobreviven al cierre. La misma ventana sanea la
+  *Biblioteca sin revisar* sin sacarla del aire.
+- **Catálogo** (esquema 3, `Catalog.cpp`): artistas únicos con clave sin mayúsculas ni
+  tildes, alias aprendidos de las correcciones, créditos por rol (principal, invitado,
+  compositor), versión, año, lotes de importación y el origen de cada pista.
+- **Archivos ordenados desde la base**: al confirmar, `Library/Musica/<Artista>/<Artista> -
+  <Título>`; editar una pista la mueve y avisa a la cola. Lo quitado va a
+  `Library/_Descartadas` (nunca se borra). Tras restaurar un respaldo viejo, los archivos se
+  vuelven a encontrar por su huella.
+- **Artistas** (pestaña de la ventana de revisión, `ArtistsView`): renombrar o fusionar
+  cambia todas sus canciones y archivos y deja el nombre anterior como alias; sugiere los
+  parecidos. **Deshacer una importación** (lo que sigue por revisar va a `_Descartadas`).
+- **Huella acústica propia** (`AcousticFingerprint`): 10 s de cada canción en 33 bandas; la
+  revisión marca la misma grabación con otro nombre o formato. Se calcula al importar y, para
+  lo que ya estaba, en segundo plano.
+- **Identificación en línea** (`OnlineIdentifier`, opcional): huella de Chromaprint
+  (`chromaprint.dll`, LGPL, aparte como LAME) → AcoustID → MusicBrainz, en segundo plano y
+  dentro de sus límites de pedidos. La revisión lo muestra como sugerencia ("Usar datos en
+  línea", en lote para lo que tiene más del 90 %); al confirmar se guardan el identificador
+  de MusicBrainz y el ISRC. Se activa con una clave de AcoustID en Ajustes.
+- **Búsqueda FTS5** sin mayúsculas ni tildes, por partes de palabras, créditos y nombre
+  original. **Separación de artistas por intérprete** en el generador (con invitados).
+- **Mostrar en MAYÚSCULAS** (*Configuración → Biblioteca y datos*): los nombres se guardan
+  bien escritos y se ven en mayúsculas si la emisora lo prefiere. Una biblioteca que ya
+  existía queda así al migrar. La búsqueda no distingue tildes.
 - **Análisis de audio al importar** (`TrackAnalyzer`): sonoridad integrada EBU R 128
   con libebur128, pico real con sobremuestreo 4×, normalización a −16 LUFS y puntos
   de entrada y salida guardados en la base de datos. Las pistas de versiones anteriores
@@ -61,6 +94,11 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
 
 ### Cambiado
 
+- **Artista y título ya no se guardan en mayúsculas**, y un nombre sin etiquetas ya no se
+  parte en cualquier guion: solo en `" - "`, con el formato de su carpeta. La música deja de
+  ordenarse en la carpeta de su categoría (una canción puede estar en varias); las cuñas,
+  identificaciones y separadores siguen en la suya. El diálogo de una pista edita invitados,
+  versión, año y compositores, y guardar la confirma.
 - **Todo el estado de la emisora en la base de datos**: la pauta, la cola, la botonera, las
   tandas ya insertadas, los ajustes de emisión y las plantillas dejan `Config/*.json` y
   `Templates/*.json`, con transacciones y claves foráneas (borrar una pista la quita de la

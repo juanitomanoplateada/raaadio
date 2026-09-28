@@ -13,6 +13,9 @@ AudioEngine::AudioEngine(MusicLibrary& library, bool openDevices) : devicesEnabl
     mixer.addDeck(decks[0].get());
     mixer.addDeck(decks[1].get());
 
+    preview = std::make_unique<PreviewPlayer>(formatManager);
+    mixer.setPreviewSource(preview.get());
+
     if (!devicesEnabled) return;
 
     juce::PropertiesFile::Options options;

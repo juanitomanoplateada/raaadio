@@ -1,6 +1,7 @@
  
 
 #include "AdsListView.h"
+#include "../library/TrackNaming.h"
 #include "TrackDetailsDialog.h"
 #include "CartwallView.h"
 #include "../autodj/OnAir.h"
@@ -185,12 +186,12 @@ void AdsListView::paintCell(juce::Graphics& g, int rowNumber, int columnId, int 
     else if (columnId == 2) {
         g.setColour(t.getPrimaryTextColour());
         g.setFont(UiStyle::ui(14.5f));
-        g.drawText(juce::String(track.title), area, juce::Justification::centredLeft, true);
+        g.drawText(TrackNaming::display(track.title), area, juce::Justification::centredLeft, true);
     }
     else if (columnId == 3) {
         g.setColour(t.getSecondaryTextColour());
         g.setFont(UiStyle::ui(14.0f));
-        g.drawText(juce::String(track.artist), area, juce::Justification::centredLeft, true);
+        g.drawText(TrackNaming::display(track.artist), area, juce::Justification::centredLeft, true);
     }
     else if (columnId == 4) {
         g.setColour(t.getSecondaryTextColour());
@@ -221,7 +222,7 @@ void AdsListView::cellDoubleClicked(int rowNumber, int columnId, const juce::Mou
             opt.resizable = true;
             
             auto* w = opt.launchAsync();
-            w->centreWithSize(500, 600);
+            w->centreWithSize(dialog->getWidth(), dialog->getHeight());
             
             dialog->onSave = [this] {
                 refreshList();

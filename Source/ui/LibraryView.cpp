@@ -149,13 +149,20 @@ void LibraryView::paintCell(juce::Graphics& g, int rowNumber, int columnId, int 
     const auto area = juce::Rectangle<int>(width, height).reduced(8, 0);
 
     if (columnId == colTitle) {
-        g.setColour(t.getPrimaryTextColour());
+        // Por revisar: se puede poner al aire a mano, pero AutoDJ no la usa todavía.
+        auto textArea = area;
+        if (track.isPending()) {
+            g.setColour(t.getWarningColour());
+            g.fillEllipse(textArea.removeFromLeft(8).toFloat().withSizeKeepingCentre(7.0f, 7.0f));
+            textArea.removeFromLeft(7);
+        }
+        g.setColour(track.isPending() ? t.getSecondaryTextColour() : t.getPrimaryTextColour());
         g.setFont(UiStyle::ui(14.5f));
-        g.drawText(juce::String(track.title), area, juce::Justification::centredLeft, true);
+        g.drawText(TrackNaming::display(track.title), textArea, juce::Justification::centredLeft, true);
     } else if (columnId == colArtist) {
         g.setColour(t.getSecondaryTextColour());
         g.setFont(UiStyle::ui(14.0f));
-        g.drawText(juce::String(track.artist), area, juce::Justification::centredLeft, true);
+        g.drawText(TrackNaming::display(track.artist), area, juce::Justification::centredLeft, true);
     } else if (columnId == colLength) {
         g.setColour(t.getSecondaryTextColour());
         g.setFont(UiStyle::mono(13.0f));
@@ -176,7 +183,7 @@ void LibraryView::cellDoubleClicked(int rowNumber, int, const juce::MouseEvent&)
     opt.resizable = true;
 
     auto* w = opt.launchAsync();
-    w->centreWithSize(520, 640);
+    w->centreWithSize(dialog->getWidth(), dialog->getHeight());
 
     dialog->onSave = [this] { refresh(); };
     dialog->onCancel = [w] { w->closeButtonPressed(); };
@@ -281,4 +288,9 @@ void LibraryView::cellClicked(int rowNumber, int, const juce::MouseEvent& e) {
 
 void LibraryView::visibilityChanged() {
     if (isVisible()) refresh();
+}
+
+juce::String LibraryView::getCellTooltip(int rowNumber, int) {
+    if (rowNumber < 0 || rowNumber >= (int) cachedTracks.size()) return {};
+    return cachedTracks[(size_t) rowNumber].isPending() ? TRANS("tip_track_pending") : juce::String();
 }

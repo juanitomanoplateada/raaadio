@@ -24,12 +24,19 @@ public:
         std::vector<TrackInfo> candidates;
         std::vector<TrackInfo> separators;
         std::unordered_map<int, std::vector<int>> categoriesOf;  // id de pista → categorías
+        // Intérpretes (principal e invitados, por clave) de las pistas con créditos. Las demás
+        // se leen del artista guardado ("Eddy Herrera feat. Liz").
+        std::unordered_map<int, std::vector<std::string>> performersOf;
     };
+
+    // Claves de los intérpretes de una pista: la separación de artistas no deja sonar
+    // seguidas dos canciones que comparten alguno ("Eddy Herrera" y "Eddy Herrera feat. Liz").
+    static std::vector<juce::String> performerKeys(const TrackInfo& track, const Pool& pool);
 
     // Lógica pura, sin base de datos (se prueba aparte).
     // Candidatas: pistas de las categorías incluidas (si no hay ninguna, las de
-    // allCategoryIds y las que no tienen categoría), sin las excluidas ni las que sonaron
-    // hace menos de lastPlayedSeparation minutos.
+    // allCategoryIds y las que no tienen categoría), sin las excluidas, las que sonaron
+    // hace menos de lastPlayedSeparation minutos ni las importadas por revisar.
     static std::vector<TrackInfo> selectCandidates(const std::vector<TrackInfo>& allTracks,
                                                    const std::unordered_map<int, std::vector<int>>& categoriesOf,
                                                    const std::vector<int>& allCategoryIds,

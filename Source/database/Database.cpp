@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "Database.h"
+#include "../library/TrackNaming.h"
 
 Database::Database() {}
 
@@ -56,7 +57,22 @@ bool Database::initSchema() {
         "cue_in REAL DEFAULT 0.0,"
         "cue_out REAL DEFAULT 0.0,"
         "analysis_version INTEGER DEFAULT 0,"
-        "file_hash TEXT DEFAULT ''"
+        "file_hash TEXT DEFAULT '',"
+        "status INTEGER DEFAULT 0,"
+        "version TEXT DEFAULT '',"
+        "year INTEGER DEFAULT 0,"
+        "confirmed_at TEXT DEFAULT '',"
+        "match_key TEXT DEFAULT '',"
+        "source_name TEXT DEFAULT '',"
+        "source_folder TEXT DEFAULT '',"
+        "tag_artist TEXT DEFAULT '',"
+        "tag_title TEXT DEFAULT '',"
+        "import_batch INTEGER DEFAULT 0,"
+        "review_draft TEXT DEFAULT '',"
+        "fingerprint BLOB,"
+        "fingerprint_version INTEGER DEFAULT 0,"
+        "mb_recording_id TEXT DEFAULT '',"
+        "isrc TEXT DEFAULT ''"
         ");";
 
     if (!execute(sqlTracks)) return false;
@@ -73,11 +89,31 @@ bool Database::initSchema() {
                                 "cue_in REAL DEFAULT 0.0",
                                 "cue_out REAL DEFAULT 0.0",
                                 "analysis_version INTEGER DEFAULT 0",
-                                "file_hash TEXT DEFAULT ''" }) {
+                                "file_hash TEXT DEFAULT ''",
+                                // Esquema 3: catálogo y revisión de lo importado.
+                                "status INTEGER DEFAULT 0",
+                                "version TEXT DEFAULT ''",
+                                "year INTEGER DEFAULT 0",
+                                "confirmed_at TEXT DEFAULT ''",
+                                "match_key TEXT DEFAULT ''",
+                                "source_name TEXT DEFAULT ''",
+                                "source_folder TEXT DEFAULT ''",
+                                "tag_artist TEXT DEFAULT ''",
+                                "tag_title TEXT DEFAULT ''",
+                                "import_batch INTEGER DEFAULT 0",
+                                "review_draft TEXT DEFAULT ''",
+                                "fingerprint BLOB",
+                                "fingerprint_version INTEGER DEFAULT 0",
+                                "mb_recording_id TEXT DEFAULT ''",
+                                "isrc TEXT DEFAULT ''" }) {
         const std::string sql = std::string("ALTER TABLE tracks ADD COLUMN ") + column + ";";
         sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr);
     }
     execute("CREATE INDEX IF NOT EXISTS idx_file_hash ON tracks(file_hash);");
+    execute("CREATE INDEX IF NOT EXISTS idx_match_key ON tracks(match_key);");
+    execute("CREATE INDEX IF NOT EXISTS idx_track_status ON tracks(status);");
+    execute("CREATE INDEX IF NOT EXISTS idx_track_duration ON tracks(duration);");
+    execute("CREATE INDEX IF NOT EXISTS idx_track_batch ON tracks(import_batch);");
 
     std::string sqlCats =
         "CREATE TABLE IF NOT EXISTS categories ("
@@ -134,6 +170,7 @@ bool Database::initSchema() {
     execute("CREATE INDEX IF NOT EXISTS idx_play_log_played_at ON play_log(played_at);");
 
     createStationTables();
+    createCatalogTables();
 
     // Claves foráneas: la pauta, la cola y la botonera no pueden apuntar a una pista borrada.
     // Antes se limpian las filas huérfanas que dejaran versiones anteriores.
@@ -280,7 +317,7 @@ std::vector<PlayLogEntry> Database::getRecentPlayLog(int limit) {
 static const char* const trackColumns =
     "t.id, t.path, t.artist, t.title, t.play_count, t.duration, t.last_played, t.normalization_gain, "
     "t.created_at, t.updated_at, t.loudness_lufs, t.true_peak_db, t.cue_in, t.cue_out, "
-    "t.analysis_version, t.file_hash";
+    "t.analysis_version, t.file_hash, t.status, t.version, t.year, t.confirmed_at";
 
 TrackInfo Database::readTrackRow(sqlite3_stmt* stmt) const {
     auto text = [stmt](int col) {
@@ -306,7 +343,20 @@ TrackInfo Database::readTrackRow(sqlite3_stmt* stmt) const {
     t.cueOut = sqlite3_column_double(stmt, 13);
     t.analysisVersion = sqlite3_column_int(stmt, 14);
     t.fileHash = text(15);
+    t.status = sqlite3_column_int(stmt, 16);
+    t.version = text(17);
+    t.year = sqlite3_column_int(stmt, 18);
+    t.confirmedAt = text(19);
     return t;
+}
+
+// Clave de la canción guardada: intérprete principal (sin invitados) y título (sin versión).
+static std::string storedMatchKey(const std::string& artist, const std::string& title, const std::string& version) {
+    const auto a = juce::String::fromUTF8(artist.c_str()).upToFirstOccurrenceOf(" feat. ", false, false);
+    auto t = juce::String::fromUTF8(title.c_str());
+    const auto v = juce::String::fromUTF8(version.c_str()).trim();
+    if (v.isNotEmpty() && t.endsWith(" (" + v + ")")) t = t.dropLastCharacters(v.length() + 3);
+    return TrackNaming::matchKey(a, t).toStdString();
 }
 
 std::vector<TrackInfo> Database::queryTracks(const std::string& whereClause,
@@ -336,8 +386,10 @@ static TrackInfo firstOrNotFound(const std::vector<TrackInfo>& tracks) {
 bool Database::addTrack(const TrackInfo& track) {
     const char* sql =
         "INSERT OR IGNORE INTO tracks (path, artist, title, duration, last_played, normalization_gain, "
-        "created_at, updated_at, loudness_lufs, true_peak_db, cue_in, cue_out, analysis_version, file_hash) "
-        "VALUES (?, ?, ?, ?, '', ?, datetime('now', 'localtime'), datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?);";
+        "created_at, updated_at, loudness_lufs, true_peak_db, cue_in, cue_out, analysis_version, file_hash, "
+        "status, version, year, confirmed_at, match_key) "
+        "VALUES (?, ?, ?, ?, '', ?, datetime('now', 'localtime'), datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?, "
+        "?, ?, ?, ?, ?);";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
 
@@ -353,35 +405,62 @@ bool Database::addTrack(const TrackInfo& track) {
     sqlite3_bind_double(stmt, 9, track.cueOut);
     sqlite3_bind_int(stmt, 10, track.analysisVersion);
     sqlite3_bind_text(stmt, 11, track.fileHash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 12, track.status);
+    sqlite3_bind_text(stmt, 13, track.version.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 14, track.year);
+    sqlite3_bind_text(stmt, 15, track.confirmedAt.c_str(), -1, SQLITE_TRANSIENT);
+    const auto matchKey = storedMatchKey(track.artist, track.title, track.version);
+    sqlite3_bind_text(stmt, 16, matchKey.c_str(), -1, SQLITE_TRANSIENT);
 
     const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    const bool inserted = ok && sqlite3_changes(db) > 0;
+    const auto id = (int) sqlite3_last_insert_rowid(db);
     sqlite3_finalize(stmt);
+    if (inserted) indexTrack(id);
     return ok;
+}
+
+// Búsqueda FTS5: cada palabra (sin tildes ni signos) como prefijo, todas a la vez. "vives
+// gota" encuentra "Carlos Vives - La Gota Fría"; "wilf" encuentra a Wilfrido Vargas.
+static std::string ftsQuery(const std::string& query) {
+    std::string expression;
+    for (const auto& word : juce::StringArray::fromTokens(TrackNaming::key(juce::String::fromUTF8(query.c_str())), " ", ""))
+        if (word.isNotEmpty()) expression += (expression.empty() ? "\"" : " \"") + word.toStdString() + "\"*";
+    return expression;
 }
 
 std::vector<TrackInfo> Database::searchTracks(const std::string& query, const std::string& categoryFilter) {
     const bool filterUncategorized = (categoryFilter == "Uncategorized");
     const bool filterAll = (categoryFilter == "All Categories" || categoryFilter.empty());
+    const std::string match = ftsAvailable && !query.empty() ? ftsQuery(query) : std::string();
 
-    std::string where;
+    std::string joins, conditions = "1=1", order;
     if (filterUncategorized) {
-        where = "WHERE t.id NOT IN (SELECT track_id FROM track_categories) ";
+        conditions += " AND t.id NOT IN (SELECT track_id FROM track_categories)";
     } else if (!filterAll) {
-        where = "JOIN track_categories tc ON t.id = tc.track_id "
-                "JOIN categories c ON tc.category_id = c.id "
-                "WHERE c.name = ?1 ";
-    } else {
-        where = "WHERE 1=1 ";
+        joins += "JOIN track_categories tc ON t.id = tc.track_id JOIN categories c ON tc.category_id = c.id ";
+        conditions += " AND c.name = ?1";
     }
-    if (!query.empty())
-        where += "AND (t.artist LIKE ?2 OR t.title LIKE ?2) ";
+    if (!match.empty()) {
+        joins += "JOIN tracks_fts ON tracks_fts.rowid = t.id ";
+        conditions += " AND tracks_fts MATCH ?4";
+        order = " ORDER BY tracks_fts.rank";
+    } else if (!query.empty()) {
+        // Sin índice: también por la clave, que no distingue mayúsculas ni tildes.
+        conditions += " AND (t.artist LIKE ?2 OR t.title LIKE ?2 OR t.match_key LIKE ?3)";
+    }
 
     const std::string pattern = "%" + query + "%";
-    return queryTracks(where, [&](sqlite3_stmt* stmt) {
+    const std::string keyPattern = "%" + TrackNaming::key(juce::String::fromUTF8(query.c_str())).toStdString() + "%";
+    return queryTracks(joins + "WHERE " + conditions + order, [&](sqlite3_stmt* stmt) {
         if (!filterUncategorized && !filterAll)
             sqlite3_bind_text(stmt, 1, categoryFilter.c_str(), -1, SQLITE_TRANSIENT);
-        if (!query.empty())
+        if (!match.empty()) {
+            sqlite3_bind_text(stmt, 4, match.c_str(), -1, SQLITE_TRANSIENT);
+        } else if (!query.empty()) {
             sqlite3_bind_text(stmt, 2, pattern.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 3, keyPattern.c_str(), -1, SQLITE_TRANSIENT);
+        }
     });
 }
 
@@ -409,14 +488,7 @@ TrackInfo Database::findTrackByHash(const std::string& fileHash) {
 
 TrackInfo Database::findTrackByMetadata(const std::string& artist, const std::string& title,
                                         double duration, double toleranceSeconds) {
-    return firstOrNotFound(queryTracks(
-        "WHERE t.artist = ?1 COLLATE NOCASE AND t.title = ?2 COLLATE NOCASE AND abs(t.duration - ?3) <= ?4 LIMIT 1",
-        [&](sqlite3_stmt* stmt) {
-            sqlite3_bind_text(stmt, 1, artist.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 2, title.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_double(stmt, 3, duration);
-            sqlite3_bind_double(stmt, 4, toleranceSeconds);
-        }));
+    return findDuplicate(storedMatchKey(artist, title, {}), duration, toleranceSeconds, -1);
 }
 
 bool Database::updateTrackAnalysis(const TrackInfo& track) {
@@ -479,19 +551,25 @@ bool Database::incrementPlayCount(int trackId) {
 
 bool Database::updateTrackDetails(int trackId, const std::string& artist, const std::string& title, const std::string& path) {
     const std::string storedPath = toStoredPath(path);
-    return run("UPDATE tracks SET artist = ?1, title = ?2, path = ?3, updated_at = datetime('now', 'localtime') WHERE id = ?4;",
-               [&](sqlite3_stmt* s) {
-                   bindText(s, 1, artist);
-                   bindText(s, 2, title);
-                   bindText(s, 3, storedPath);
-                   sqlite3_bind_int(s, 4, trackId);
-               });
+    const auto matchKey = storedMatchKey(artist, title, {});
+    const bool ok = run("UPDATE tracks SET artist = ?1, title = ?2, path = ?3, match_key = ?5, "
+                        "updated_at = datetime('now', 'localtime') WHERE id = ?4;",
+                        [&](sqlite3_stmt* s) {
+                            bindText(s, 1, artist);
+                            bindText(s, 2, title);
+                            bindText(s, 3, storedPath);
+                            sqlite3_bind_int(s, 4, trackId);
+                            bindText(s, 5, matchKey);
+                        });
+    if (ok) indexTrack(trackId);
+    return ok;
 }
 
 bool Database::deleteTrack(int trackId) {
     auto bindId = [trackId](sqlite3_stmt* s) { sqlite3_bind_int(s, 1, trackId); };
     execute("BEGIN TRANSACTION;");
     run("DELETE FROM track_categories WHERE track_id = ?1;", bindId);
+    if (ftsAvailable) run("DELETE FROM tracks_fts WHERE rowid = ?1;", bindId);
     const bool success = run("DELETE FROM tracks WHERE id = ?1;", bindId);
     execute("COMMIT;");
     return success;
@@ -499,6 +577,11 @@ bool Database::deleteTrack(int trackId) {
 
 void Database::clearDatabase() {
     execute("DELETE FROM track_categories;");
+    execute("DELETE FROM track_credits;");
+    execute("DELETE FROM artist_aliases;");
+    execute("DELETE FROM artists;");
+    execute("DELETE FROM import_batches;");
+    if (ftsAvailable) execute("DELETE FROM tracks_fts;");
     execute("DELETE FROM tracks;");
     execute("DELETE FROM categories;");
     ensureSystemCategories();

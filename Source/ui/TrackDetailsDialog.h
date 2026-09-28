@@ -4,6 +4,7 @@
 #include "../library/MusicLibrary.h"
 #include "../library/Playlist.h"
 #include "../helpers/ThemeManager.h"
+#include "CreditsEditor.h"
 
 class TrackDetailsDialog : public juce::Component {
 public:
@@ -29,11 +30,10 @@ private:
     juce::Label systemSectionHeader;
 
      
-    juce::Label artistLabel;
-    juce::TextEditor artistEditor;
-    
-    juce::Label titleLabel;
-    juce::TextEditor titleEditor;
+    // Artista, título y créditos (en cuñas, identificaciones y separadores, solo artista y título).
+    CreditsEditor creditsEditor;
+    TrackNaming::Context namingContext;
+    bool systemTrack = false;
     
      
     juce::Label durationLabel;

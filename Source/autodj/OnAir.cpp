@@ -1,4 +1,5 @@
 #include "OnAir.h"
+#include "../library/TrackNaming.h"
 
 namespace OnAir {
 
@@ -52,7 +53,7 @@ void requestPlayNow(Deck& a, Deck& b, const TrackInfo& track, std::function<bool
         return;
     }
 
-    const auto name = juce::String(track.artist) + " - " + juce::String(track.title);
+    const auto name = TrackNaming::display(track.artist) + " - " + TrackNaming::display(track.title);
     juce::AlertWindow::showOkCancelBox(juce::AlertWindow::QuestionIcon, TRANS("play_now_confirm_title"),
         TRANS("play_now_confirm_msg").replace("%1", name),
         TRANS("play_now_confirm_btn"), TRANS("cancel"), nullptr,

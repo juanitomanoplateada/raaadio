@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 #include "LibraryComponent.h"
 #include "AdvancedImportDialog.h"
+#include "../network/OnlineIdentifier.h"
 #include "../helpers/ThemeManager.h"
 #include "../helpers/UiStyle.h"
 
@@ -73,6 +74,13 @@ LibraryComponent::LibraryComponent(MusicLibrary& lib, HistoryManager& hm, Advert
     UiStyle::setIcon(importAnunciosButton, "megaphone");
     importAnunciosButton.onClick = [this] { importAnuncios(); };
 
+    addChildComponent(reviewButton);
+    UiStyle::setVariant(reviewButton, "warning");
+    UiStyle::setIcon(reviewButton, "list");
+    reviewButton.onClick = [this] {
+        openReview(pendingCount > 0 ? ImportReview::Scope::NewImports : ImportReview::Scope::Library);
+    };
+
     addChildComponent(progressBar);
     addChildComponent(cancelButton);
     UiStyle::setVariant(cancelButton, "ghost");
@@ -84,6 +92,7 @@ LibraryComponent::LibraryComponent(MusicLibrary& lib, HistoryManager& hm, Advert
 
 LibraryComponent::~LibraryComponent() {
     stopTimer();
+    reviewWindow = nullptr;
 }
 
 void LibraryComponent::paint(juce::Graphics& g) {
@@ -118,11 +127,27 @@ void LibraryComponent::resized() {
     importAnunciosButton.setButtonText(TRANS("import_anuncios_btn"));
     const int importWidth = advancedImportButton.getBestWidthForHeight(h) + 26;
     const int adsWidth = importAnunciosButton.getBestWidthForHeight(h) + 26;
-    const bool compact = tabsRight + importWidth + adsWidth + 12 > actions.getRight() - actions.getX();
+    const int available = actions.getRight() - actions.getX();
+    const bool compact = tabsRight + importWidth + adsWidth + 12 > available;
     if (compact) importAnunciosButton.setButtonText({});
+
+    // "Por revisar (N)": si no cabe, solo el número (la ayuda emergente dice qué es).
+    int reviewWidth = 0;
+    if (reviewButton.isVisible()) {
+        const int count = pendingCount > 0 ? pendingCount : unreviewedCount;
+        reviewButton.setButtonText(TRANS(pendingCount > 0 ? "review_button_pending" : "review_button_library")
+                                       .replace("%1", juce::String(count)));
+        reviewWidth = reviewButton.getBestWidthForHeight(h) + 30;
+        const int used = tabsRight + importWidth + (compact ? h + 8 : adsWidth) + 18;
+        if (used + reviewWidth > available) {
+            reviewButton.setButtonText(juce::String(count));
+            reviewWidth = reviewButton.getBestWidthForHeight(h) + 34;
+        }
+    }
 
     place(advancedImportButton, importWidth);
     place(importAnunciosButton, compact ? h + 8 : adsWidth);
+    if (reviewButton.isVisible()) place(reviewButton, reviewWidth);
 
     // Progreso de importación y estado, a la izquierda de las acciones.
     actions.removeFromLeft(tabsRight);
@@ -140,6 +165,7 @@ void LibraryComponent::lookAndFeelChanged() {
     advancedImportButton.setTooltip(TRANS("tip_import"));
     importAnunciosButton.setButtonText(TRANS("import_anuncios_btn"));
     importAnunciosButton.setTooltip(TRANS("tip_import_ads"));
+    reviewButton.setTooltip(TRANS("tip_review_button"));
     cancelButton.setButtonText(TRANS("cancel"));
 
     tabs.setTabName(0, TRANS("tab_library"));
@@ -175,9 +201,19 @@ void LibraryComponent::timerCallback() {
             importSummaryShortText << separator << summary.duplicates << " " << TRANS("import_duplicates");
         if (summary.failed > 0)
             importSummaryShortText << separator << summary.failed << " " << TRANS("import_failed");
+        if (summary.toReview > 0)
+            importSummaryShortText << separator << summary.toReview << " " << TRANS("import_to_review");
         importSummaryText = TRANS("import_done") + ": " + importSummaryShortText;
         importSummaryUntil = juce::Time::getMillisecondCounter() + 15000;
+
+        // La música nueva espera que alguien confirme artista, título y categoría.
+        if (summary.toReview > 0) {
+            if (onlineIdentifier != nullptr) onlineIdentifier->enqueuePending();  // busca en línea lo nuevo
+            openReview(ImportReview::Scope::NewImports);
+        }
     }
+
+    if (library.getCatalogVersion() != catalogVersionSeen) updateReviewButton();
 
     if (importing) {
         // Solo se lee el progreso (atómico): el texto de estado lo escribe el hilo de importación.
@@ -204,6 +240,41 @@ void LibraryComponent::setStatusText(const juce::String& text, const juce::Strin
 void LibraryComponent::setDecks(Deck* dA, Deck* dB) {
     libraryView.setDecks(dA, dB);
     adsView.setDecks(dA, dB);
+}
+
+void LibraryComponent::updateReviewButton() {
+    catalogVersionSeen = library.getCatalogVersion();
+    pendingCount = library.getPendingCount();
+    unreviewedCount = library.getUnreviewedCount();
+    reviewButton.setVisible(pendingCount > 0 || unreviewedCount > 0);
+    UiStyle::setVariant(reviewButton, pendingCount > 0 ? "warning" : "");
+    resized();
+    repaint();
+}
+
+void LibraryComponent::openReview(ImportReview::Scope scope) {
+    if (reviewWindow != nullptr) {
+        reviewWindow->showReview(scope);
+        reviewWindow->toFront(true);
+        return;
+    }
+
+    reviewWindow = std::make_unique<ImportReviewWindow>(library, previewPlayer, scope);
+    reviewWindow->setOnlineIdentifier(onlineIdentifier);
+    reviewWindow->onLibraryChanged = [this] {
+        libraryView.refresh();
+        updateReviewButton();
+    };
+    // Se cierra después del clic: la ventana no se puede borrar dentro de su propio evento.
+    juce::Component::SafePointer<LibraryComponent> safe(this);
+    reviewWindow->onClosed = [safe] {
+        juce::MessageManager::callAsync([safe] {
+            if (safe == nullptr) return;
+            safe->reviewWindow = nullptr;
+            safe->libraryView.refresh();
+            safe->updateReviewButton();
+        });
+    };
 }
 
 void LibraryComponent::refreshLibrary() {

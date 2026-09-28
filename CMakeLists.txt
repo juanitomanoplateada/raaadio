@@ -20,6 +20,8 @@ FetchContent_MakeAvailable(SQLite3)
 
 add_library(sqlite3 STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
 target_include_directories(sqlite3 PUBLIC ${sqlite3_SOURCE_DIR})
+# FTS5: búsqueda de la biblioteca sin mayúsculas ni tildes.
+target_compile_definitions(sqlite3 PRIVATE SQLITE_ENABLE_FTS5)
 # Linux needs dl and pthread usually, but we are on Windows. 
 if(UNIX)
     target_link_libraries(sqlite3 PRIVATE dl pthread)
@@ -85,6 +87,42 @@ if(MSVC)
     set_target_properties(mp3lame PROPERTIES OUTPUT_NAME libmp3lame)
 endif()
 
+# Chromaprint 1.5.1 (LGPL 2.1 por el remuestreo de FFmpeg que trae; el resto es MIT): la huella
+# que entiende AcoustID, para identificar canciones en línea. Como LAME, va como biblioteca
+# aparte (chromaprint.dll) que RAAADIO carga si está; sin ella todo funciona menos la búsqueda
+# en línea. Se compila con kissfft (incluido), sin FFmpeg.
+FetchContent_Declare(
+    chromaprint
+    URL https://github.com/acoustid/chromaprint/releases/download/v1.5.1/chromaprint-1.5.1.tar.gz
+    URL_HASH SHA256=a1aad8fa3b8b18b78d3755b3767faff9abb67242e01b478ec9a64e190f335e1c
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SOURCE_SUBDIR no-cmake
+)
+FetchContent_MakeAvailable(chromaprint)
+
+if(MSVC)
+    set(CHROMAPRINT_SOURCES
+        audio_processor.cpp chroma.cpp chroma_resampler.cpp chroma_filter.cpp spectrum.cpp fft.cpp
+        fingerprinter.cpp image_builder.cpp simhash.cpp silence_remover.cpp fingerprint_calculator.cpp
+        fingerprint_compressor.cpp fingerprint_decompressor.cpp fingerprinter_configuration.cpp
+        fingerprint_matcher.cpp utils/base64.cpp avresample/resample2.c fft_lib_kissfft.cpp chromaprint.cpp
+        3rdparty/kissfft/kiss_fft.c 3rdparty/kissfft/tools/kiss_fftr.c
+    )
+    list(TRANSFORM CHROMAPRINT_SOURCES PREPEND ${chromaprint_SOURCE_DIR}/src/)
+    # Lo que su CMake averigua al configurar, escrito a mano para Visual C++.
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/chromaprint_config/config.h
+         "#define HAVE_ROUND 1\n#define HAVE_LRINTF 1\n#define USE_KISSFFT 1\n")
+    add_library(chromaprint SHARED ${CHROMAPRINT_SOURCES})
+    target_include_directories(chromaprint PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/chromaprint_config
+        ${chromaprint_SOURCE_DIR}/src ${chromaprint_SOURCE_DIR}/src/3rdparty/kissfft)
+    target_compile_definitions(chromaprint PRIVATE
+        HAVE_CONFIG_H CHROMAPRINT_API_EXPORTS _SCL_SECURE_NO_WARNINGS _CRT_SECURE_NO_WARNINGS
+        _USE_MATH_DEFINES __STDC_LIMIT_MACROS __STDC_CONSTANT_MACROS)
+    target_compile_features(chromaprint PRIVATE cxx_std_11)
+    target_compile_options(chromaprint PRIVATE /W0)
+endif()
+
 juce_add_gui_app(RAAADIO
     PRODUCT_NAME "RAAADIO"
     VERSION 1.0.0
@@ -110,6 +148,10 @@ target_sources(RAAADIO PRIVATE
     Source/audio/AirLogRecorder.cpp
     Source/audio/CartPlayer.h
     Source/audio/CartPlayer.cpp
+    Source/audio/PreviewPlayer.h
+    Source/audio/PreviewPlayer.cpp
+    Source/audio/AcousticFingerprint.h
+    Source/audio/AcousticFingerprint.cpp
     Source/autodj/AutoDJ.h
     Source/autodj/AutoDJ.cpp
     Source/autodj/QueueTiming.h
@@ -167,10 +209,20 @@ target_sources(RAAADIO PRIVATE
     Source/network/NowPlaying.cpp
     Source/network/NowPlayingPublisher.h
     Source/network/NowPlayingPublisher.cpp
+    Source/network/Chromaprint.h
+    Source/network/Chromaprint.cpp
+    Source/network/OnlineMetadata.h
+    Source/network/OnlineMetadata.cpp
+    Source/network/OnlineIdentifier.h
+    Source/network/OnlineIdentifier.cpp
     Source/library/MusicLibrary.h
     Source/library/MusicLibrary.cpp
     Source/library/TagReader.h
     Source/library/TagReader.cpp
+    Source/library/TrackNaming.h
+    Source/library/TrackNaming.cpp
+    Source/library/ImportReview.h
+    Source/library/ImportReview.cpp
     Source/library/Playlist.h
     Source/library/Playlist.cpp
     Source/library/PlaylistStore.h
@@ -178,6 +230,7 @@ target_sources(RAAADIO PRIVATE
     Source/database/Database.h
     Source/database/Database.cpp
     Source/database/StationState.cpp
+    Source/database/Catalog.cpp
     Source/helpers/LanguageManager.h
     Source/helpers/LanguageManager.cpp
     Source/helpers/PersistenceManager.h
@@ -209,6 +262,12 @@ target_sources(RAAADIO PRIVATE
     Source/ui/PlaylistGeneratorDialog.cpp
     Source/ui/AdvancedImportDialog.h
     Source/ui/AdvancedImportDialog.cpp
+    Source/ui/CreditsEditor.h
+    Source/ui/CreditsEditor.cpp
+    Source/ui/ImportReviewView.h
+    Source/ui/ImportReviewView.cpp
+    Source/ui/ArtistsView.h
+    Source/ui/ArtistsView.cpp
 )
 
 target_compile_features(RAAADIO PRIVATE cxx_std_17)
@@ -263,6 +322,17 @@ function(raaadio_copy_lame target)
 endfunction()
 raaadio_copy_lame(RAAADIO)
 
+# chromaprint.dll y su licencia, junto a cada ejecutable que identifica canciones en línea.
+function(raaadio_copy_chromaprint target)
+    if(TARGET chromaprint)
+        add_dependencies(${target} chromaprint)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:chromaprint> $<TARGET_FILE_DIR:${target}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${chromaprint_SOURCE_DIR}/LICENSE.md $<TARGET_FILE_DIR:${target}>/chromaprint-LICENSE.md)
+    endif()
+endfunction()
+raaadio_copy_chromaprint(RAAADIO)
+
 # Pruebas: persistencia (rutas portables, registro de emisión, cola), mezclador,
 # análisis de audio (LUFS, puntos de entrada y salida), etiquetas, importación, generador,
 # horarios y pauta, protección contra silencio, registro por hora, botonera, transmisión
@@ -277,6 +347,7 @@ if(RAAADIO_BUILD_TESTS)
         Tests/RaaadioTests.cpp
         Source/database/Database.cpp
         Source/database/StationState.cpp
+        Source/database/Catalog.cpp
         Source/library/MusicLibrary.cpp
         Source/library/Playlist.cpp
         Source/library/PlaylistStore.cpp
@@ -287,6 +358,8 @@ if(RAAADIO_BUILD_TESTS)
         Source/audio/RecordingManager.cpp
         Source/audio/TrackAnalyzer.cpp
         Source/library/TagReader.cpp
+        Source/library/TrackNaming.cpp
+        Source/library/ImportReview.cpp
         Source/library/AdvertisingManager.cpp
         Source/generator/PlaylistGenerator.cpp
         Source/autodj/QueueTiming.cpp
@@ -297,11 +370,16 @@ if(RAAADIO_BUILD_TESTS)
         Source/audio/AudioEngine.cpp
         Source/audio/AirLogRecorder.cpp
         Source/audio/CartPlayer.cpp
+        Source/audio/PreviewPlayer.cpp
+        Source/audio/AcousticFingerprint.cpp
         Source/network/StreamEncoder.cpp
         Source/network/Mp3Encoder.cpp
         Source/network/NowPlaying.cpp
         Source/network/ApiServer.cpp
         Source/network/NowPlayingPublisher.cpp
+        Source/network/Chromaprint.cpp
+        Source/network/OnlineMetadata.cpp
+        Source/network/OnlineIdentifier.cpp
         Source/helpers/StationSettings.cpp
         Source/helpers/SecretStore.cpp
         Source/helpers/BackupService.cpp
@@ -326,6 +404,7 @@ if(RAAADIO_BUILD_TESTS)
     )
 
     raaadio_copy_lame(RAAADIO_Tests)
+    raaadio_copy_chromaprint(RAAADIO_Tests)
 
     enable_testing()
     add_test(NAME RAAADIO_Tests COMMAND RAAADIO_Tests)

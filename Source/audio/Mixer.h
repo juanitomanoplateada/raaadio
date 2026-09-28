@@ -36,6 +36,8 @@ public:
 
     // Botonera: se suma a la salida al aire, sin pasar por los faders ni la locución.
     void setCartSource(juce::AudioSource* source) { cartSource = source; }
+    // Preescucha de la revisión: solo a la salida de cue (se fija antes de abrir el audio).
+    void setPreviewSource(juce::AudioSource* source) { previewSource = source; }
 
 private:
     std::vector<Deck*> decks;
@@ -82,6 +84,8 @@ private:
 
     juce::AudioSource* cartSource = nullptr;
     juce::AudioBuffer<float> cartBuffer;
+    juce::AudioSource* previewSource = nullptr;
+    juce::AudioBuffer<float> previewBuffer;
 
     std::atomic<juce::int64> mainSilentSamples { 0 };
     std::atomic<juce::int64> deckSilentSamples[2] { {0}, {0} };

@@ -1,4 +1,5 @@
 #include "DeckComponent.h"
+#include "../library/TrackNaming.h"
 #include "TrackDetailsDialog.h"
 #include "../library/Playlist.h"
 #include "../helpers/ThemeManager.h"
@@ -180,9 +181,9 @@ void DeckComponent::paint(juce::Graphics& g) {
     const auto track = deck.getCurrentTrack();
     g.setColour(t.getPrimaryTextColour());
     g.setFont(UiStyle::semibold(titleArea.getHeight() >= 30 ? 23.0f : 20.0f));
-    g.drawText(juce::String(track.title), titleArea, juce::Justification::centredLeft, true);
+    g.drawText(TrackNaming::display(track.title), titleArea, juce::Justification::centredLeft, true);
 
-    const juce::String artist(track.artist);
+    const auto artist = TrackNaming::display(track.artist);
     g.setColour(t.getSecondaryTextColour());
     g.setFont(UiStyle::ui(15.0f));
     g.drawText(artist.isNotEmpty() ? artist : TRANS("unknown_artist"), artistArea, juce::Justification::centredLeft, true);
@@ -439,7 +440,7 @@ void DeckComponent::openTrackInfo() {
     opt.resizable = true;
 
     auto* w = opt.launchAsync();
-    w->centreWithSize(520, 640);
+    w->centreWithSize(dialog->getWidth(), dialog->getHeight());
 
     dialog->onSave = [this] { repaint(); };
     dialog->onCancel = [w] { w->closeButtonPressed(); };

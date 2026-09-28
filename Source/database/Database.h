@@ -5,6 +5,7 @@
 #include <map>
 #include <set>
 #include <unordered_map>
+#include <cstdint>
 #include <iostream>
 #include <JuceHeader.h>
 
@@ -29,6 +30,15 @@ struct TrackInfo {
     double cueOut = 0.0;          // segundos; 0 = hasta el final del archivo
     int analysisVersion = 0;
     std::string fileHash;         // SHA-256 del archivo, para detectar duplicados
+
+    // Catálogo (esquema 3). artist y title son lo que se muestra ("Eddy Herrera feat. Liz",
+    // "Volveré (En vivo)"); los créditos por separado están en track_credits.
+    int status = 0;               // 0 = en la biblioteca; 1 = importada, por revisar
+    std::string version;          // "En vivo", "Remix"... (ya incluida en title)
+    int year = 0;
+    std::string confirmedAt;      // cuándo alguien confirmó los datos; vacío = sin revisar
+    // Por revisar: se puede poner al aire a mano, pero AutoDJ y el generador no la usan.
+    bool isPending() const { return status == 1; }
 
     // Solo en la cola (no se guarda en la base de datos): la tanda comercial a la que
     // pertenece, con la clave de AdScheduler ("AAAA-MM-DD HH:MM"). Vacía si no es de una tanda.
@@ -141,6 +151,151 @@ public:
     bool addPlayLogEntry(const PlayLogEntry& entry);
     std::vector<PlayLogEntry> getRecentPlayLog(int limit);  // la más reciente primero
 
+    //--------------------------------------------------------------------------
+    // Catálogo (Catalog.cpp): artistas, créditos, lotes de importación y revisión.
+
+    enum class CreditRole { Main = 1, Featured = 2, Composer = 3 };
+    struct Credit {
+        int artistId = -1;
+        std::string name;
+        CreditRole role = CreditRole::Main;
+    };
+
+    // De dónde vino una pista importada: el nombre del archivo y su carpeta originales, y
+    // las etiquetas tal como venían. La revisión propone artista y título a partir de esto.
+    struct ImportSource {
+        std::string name;        // nombre del archivo, sin extensión
+        std::string folder;      // carpeta de origen
+        std::string tagArtist, tagTitle;
+        int batch = 0;           // import_batches.id; 0 = sin lote
+    };
+    int createImportBatch(const std::string& source, int categoryId, int files);  // -1 si falla
+    bool setImportSource(int trackId, const ImportSource& source);
+
+    // Lo que se revisa: las importadas por revisar (pending) o la música de la biblioteca que
+    // nadie ha confirmado todavía (de versiones anteriores). Sin cuñas, identificaciones ni
+    // separadores.
+    struct ReviewRecord {
+        TrackInfo track;
+        ImportSource source;
+        std::string draft;       // borrador de la revisión (JSON), si alguien empezó a editarla
+        std::vector<uint32_t> fingerprint;  // huella acústica, si ya se calculó
+    };
+    std::vector<ReviewRecord> getReviewRecords(bool pending);
+    int countPending();
+    int countUnreviewed();
+    bool saveReviewDraft(int trackId, const std::string& json);
+
+    // Artistas con créditos (clave → nombre, canciones como intérprete principal) y alias
+    // aprendidos (clave del alias → clave del artista).
+    struct ArtistRow { std::string name, key; int tracks = 0; };
+    std::vector<ArtistRow> getKnownArtists();
+    std::vector<std::pair<std::string, std::string>> getArtistAliases();
+    std::vector<Credit> getTrackCredits(int trackId);
+
+    // Confirma una pista: créditos, datos, ruta y estado en una transacción.
+    struct CatalogEntry {
+        std::string artist;                         // intérprete principal
+        std::vector<std::string> featured, composers;
+        std::string title, version;                 // título sin la versión
+        int year = 0;
+        std::string displayArtist, displayTitle;    // lo que se guarda en artist y title
+        std::string path;
+        std::string aliasKey;                       // otra forma de escribir al artista, para recordar
+    };
+    bool confirmTrack(int trackId, const CatalogEntry& entry);
+    // Solo artista y título (cuñas, identificaciones, separadores: no llevan créditos).
+    bool setTrackNames(int trackId, const std::string& artist, const std::string& title);
+    bool setTrackPath(int trackId, const std::string& path);
+
+    // La misma canción (artista principal y título, sin mayúsculas ni tildes) con una
+    // duración parecida, entre la música; id -1 si no hay.
+    TrackInfo findDuplicate(const std::string& matchKey, double duration, double toleranceSeconds, int excludeId);
+    // Clave, duración y nombre de toda la música, de una vez (para buscar duplicados de
+    // muchas filas sin una consulta por cada una).
+    struct KeyRow { int id = -1; std::string key, artist, title; double duration = 0.0; };
+    std::vector<KeyRow> getMusicKeys();
+
+    //--------------------------------------------------------------------------
+    // Búsqueda (FTS5): artista, título, créditos, versión, año, nombre original del archivo
+    // y etiquetas, sin distinguir mayúsculas ni tildes. Sin FTS5, searchTracks usa LIKE.
+    bool hasSearchIndex() const { return ftsAvailable; }
+    void indexTrack(int trackId);
+    // Rehace el índice si no tiene las mismas pistas que la base (migración, respaldo viejo).
+    void ensureSearchIndex();
+    void rebuildSearchIndex();
+
+    // Intérpretes (principal e invitados, por clave) de cada pista con créditos: la
+    // separación de artistas del generador los compara.
+    std::unordered_map<int, std::vector<std::string>> getPerformerKeys();
+
+    // Artistas: cada uno con sus canciones por rol y sus alias.
+    struct ArtistOverview {
+        int id = -1;
+        std::string name, key;
+        int main = 0, featured = 0, composer = 0;
+        std::vector<std::string> aliases;
+    };
+    std::vector<ArtistOverview> getArtistsOverview();
+    std::vector<int> getTracksOfArtist(int artistId);  // con cualquier rol
+    // Cambia cómo se escribe; si el nombre nuevo es de otro artista no cambia nada y devuelve
+    // su id en conflictId (el operador decide si fusionarlos). El nombre anterior queda como
+    // alias si era otra clave.
+    bool renameArtist(int artistId, const std::string& newName, int& conflictId);
+    // Los créditos y alias de fromId pasan a intoId; fromId queda como alias de intoId.
+    bool mergeArtists(int fromId, int intoId);
+    bool removeAlias(const std::string& aliasKey);
+    // Artista para mostrar de una pista con créditos (tras renombrar o fusionar).
+    bool setTrackArtistLine(int trackId, const std::string& artist, const std::string& matchKey);
+
+    // Lotes de importación, con cuántas canciones siguen por revisar y cuántas se confirmaron.
+    struct BatchInfo {
+        int id = -1;
+        std::string createdAt, source;
+        int files = 0, pending = 0, confirmed = 0;
+    };
+    std::vector<BatchInfo> getImportBatches();
+    std::vector<int> getPendingTracksOfBatch(int batchId);
+
+    // Identificación en línea (AcoustID y MusicBrainz): lo que se encontró de cada pista.
+    enum class OnlineStatus { None = 0, Found = 1, NotFound = 2, Error = 3 };
+    struct OnlineMatch {
+        OnlineStatus status = OnlineStatus::None;
+        double score = 0.0;  // de AcoustID, de 0 a 1
+        std::string recordingId, artist, title, isrc, error;
+        std::vector<std::string> featured, composers;
+        int year = 0;
+    };
+    bool saveOnlineMatch(int trackId, const OnlineMatch& match);
+    std::unordered_map<int, OnlineMatch> getOnlineMatches();
+    // Música por revisar (primero) y la biblioteca sin revisar que no se ha buscado, o que dio
+    // error la última vez.
+    std::vector<int> getTracksNeedingOnlineLookup();
+    // Identificadores de MusicBrainz y el ISRC de una pista confirmada con esos datos.
+    bool setOnlineIds(int trackId, const std::string& recordingId, const std::string& isrc);
+    std::pair<std::string, std::string> getOnlineIds(int trackId);
+
+    // Huella acústica: una por pista de música (ver AcousticFingerprint).
+    bool setFingerprint(int trackId, const std::vector<uint32_t>& fingerprint, int version);
+    struct FingerprintRow {
+        int id = -1;
+        std::string artist, title;
+        double duration = 0.0;
+        std::vector<uint32_t> fingerprint;
+    };
+    // La música con huella de duración parecida (una grabación dura lo mismo en otro formato).
+    std::vector<FingerprintRow> getFingerprintsNear(double duration, double toleranceSeconds);
+    std::vector<int> getTrackIdsNeedingFingerprint(int version);  // música ya analizada
+
+    // Música confirmada con su intérprete principal: para ordenar los archivos que no se
+    // pudieron mover al confirmarlos (estaban sonando).
+    struct Placement { int id = -1; std::string path, mainArtist, artist, title; };
+    std::vector<Placement> getConfirmedMusicPlacement();
+
+    // Una sola vez (esquema 3): calcula las claves de las pistas que ya estaban. Devuelve
+    // cuántas pistas había.
+    int migrateCatalog();
+
     // Salud de la base: "ok" o la descripción del daño (PRAGMA quick_check).
     std::string quickCheck();
     int getSchemaVersion();  // PRAGMA user_version
@@ -195,6 +350,7 @@ public:
 
 private:
     sqlite3* db = nullptr;
+    bool ftsAvailable = false;
     juce::File pathBase;
 
     bool execute(const std::string& sql);  // solo SQL fijo, sin datos del usuario
@@ -221,4 +377,6 @@ private:
     bool each(const char* sql, const std::function<void(sqlite3_stmt*)>& bind,
               const std::function<void(sqlite3_stmt*)>& row);
     void createStationTables();
+    void createCatalogTables();
+    int artistIdFor(const std::string& name);  // lo crea si no existe; -1 si falla
 };

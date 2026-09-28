@@ -121,6 +121,29 @@ SettingsDialog::LibraryTab::LibraryTab(MusicLibrary& lib, AdvertisingManager& ad
     addAndMakeVisible(labGroup);
     addAndMakeVisible(dataGroup);
     addAndMakeVisible(migrationGroup);
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &onlineGroup, &onlineToggle, &onlineKeyCaption,
+                                                                       &onlineKeyEditor, &onlineStatusLabel, &onlineNoteLabel })
+        addAndMakeVisible(c);
+    onlineKeyCaption.setFont(UiStyle::caption(12.0f));
+    onlineKeyCaption.setBorderSize({ 0, 0, 0, 0 });
+    for (auto* label : { &onlineStatusLabel, &onlineNoteLabel }) {
+        label->setFont(UiStyle::ui(12.5f));
+        label->setJustificationType(juce::Justification::topLeft);
+        label->setMinimumHorizontalScale(0.8f);
+    }
+    onlineKeyEditor.setFont(UiStyle::mono(13.0f));
+    onlineKeyEditor.setIndents(10, 0);
+    onlineKeyEditor.setJustification(juce::Justification::centredLeft);
+    onlineToggle.setEnabled(false);
+    onlineKeyEditor.setEnabled(false);
+    onlineToggle.onClick = [this] { if (onlineIdentifier != nullptr) onlineIdentifier->setEnabled(onlineToggle.getToggleState()); updateOnlineStatus(); };
+    auto saveKey = [this] {
+        if (onlineIdentifier != nullptr && onlineKeyEditor.getText().trim() != onlineIdentifier->getApiKey())
+            onlineIdentifier->setApiKey(onlineKeyEditor.getText());
+        updateOnlineStatus();
+    };
+    onlineKeyEditor.onReturnKey = saveKey;
+    onlineKeyEditor.onFocusLost = saveKey;
     addAndMakeVisible(dangerGroup);
 
     for (auto* label : { &labPathLabel, &externalPathLabel }) {
@@ -147,6 +170,15 @@ SettingsDialog::LibraryTab::LibraryTab(MusicLibrary& lib, AdvertisingManager& ad
     addAndMakeVisible(autoBackupToggle);
     addAndMakeVisible(backupHour);
     addAndMakeVisible(mirrorToggle);
+    addAndMakeVisible(uppercaseToggle);
+    uppercaseToggle.setToggleState(library.isDisplayUppercase(), juce::dontSendNotification);
+    uppercaseToggle.onClick = [this] {
+        library.setDisplayUppercase(uppercaseToggle.getToggleState());
+        // Todo lo que muestra canciones se vuelve a dibujar (la transmisión cambia con la próxima).
+        auto& desktop = juce::Desktop::getInstance();
+        for (int i = 0; i < desktop.getNumComponents(); ++i)
+            if (auto* window = desktop.getComponent(i)) window->repaint();
+    };
 
     UiStyle::setVariant(resetButton, "danger");
     UiStyle::setVariant(clearExternalButton, "ghost");
@@ -188,12 +220,13 @@ PersistenceManager::DatabaseSnapshot SettingsDialog::LibraryTab::databaseSnapsho
 
 namespace {
     // Medidas de la pestaña, compartidas por resized() y getIdealHeight().
-    constexpr int libMargin = 15, libGap = 15, labHeight = 118, migrationHeight = 90, dangerHeight = 120;
+    constexpr int libMargin = 15, libGap = 15, labHeight = 164, migrationHeight = 90, dangerHeight = 120;
+    constexpr int onlineHeight = 30 + 30 + 6 + 18 + 4 + 30 + 6 + 20 + 36 + 14;
     constexpr int backupHeight = 30 + 35 + 8 + 18 + 4 + 30 + 8 + 30 + 8 + 35 + 8 + 4 * 20 + 20;
 }
 
 int SettingsDialog::LibraryTab::getIdealHeight() {
-    return libMargin * 2 + labHeight + libGap + backupHeight + libGap + migrationHeight + libGap + dangerHeight;
+    return libMargin * 2 + labHeight + libGap + backupHeight + libGap + onlineHeight + libGap + migrationHeight + libGap + dangerHeight;
 }
 
 void SettingsDialog::LibraryTab::resized() {
@@ -212,6 +245,8 @@ void SettingsDialog::LibraryTab::resized() {
     labNextLabel.setBounds(labContent.removeFromTop(18));
     labContent.removeFromTop(3);
     changeLabButton.setBounds(labContent.removeFromTop(30).reduced(50, 0));
+    labContent.removeFromTop(8);
+    uppercaseToggle.setBounds(labContent.removeFromTop(30));
 
     area.removeFromTop(libGap);
 
@@ -249,6 +284,21 @@ void SettingsDialog::LibraryTab::resized() {
 
     area.removeFromTop(libGap);
 
+    // Identificar canciones en línea
+    auto onlineArea = area.removeFromTop(onlineHeight);
+    onlineGroup.setBounds(onlineArea);
+    auto online = onlineArea.withTrimmedTop(30).reduced(groupPadding, 0);
+    onlineToggle.setBounds(online.removeFromTop(30));
+    online.removeFromTop(6);
+    onlineKeyCaption.setBounds(online.removeFromTop(18));
+    online.removeFromTop(4);
+    onlineKeyEditor.setBounds(online.removeFromTop(30));
+    online.removeFromTop(6);
+    onlineStatusLabel.setBounds(online.removeFromTop(20));
+    onlineNoteLabel.setBounds(online.removeFromTop(36));
+
+    area.removeFromTop(libGap);
+
     // 2. Migración
     auto migArea = area.removeFromTop(migrationHeight);
     migrationGroup.setBounds(migArea);
@@ -281,6 +331,8 @@ void SettingsDialog::LibraryTab::lookAndFeelChanged() {
         label->setColour(juce::Label::textColourId, t.getSecondaryTextColour());
     }
     externalCaption.setColour(juce::Label::textColourId, t.getSecondaryTextColour());
+    onlineKeyCaption.setColour(juce::Label::textColourId, t.getSecondaryTextColour());
+    onlineNoteLabel.setColour(juce::Label::textColourId, t.getMutedTextColour());
     retentionLabel.setColour(juce::Label::textColourId, t.getMutedTextColour());
     updateTexts();
 }
@@ -289,6 +341,11 @@ void SettingsDialog::LibraryTab::updateTexts() {
     labGroup.setText(TRANS("group_lab_root"));
     dataGroup.setText(TRANS("group_persistence"));
     migrationGroup.setText(TRANS("group_migration"));
+    onlineGroup.setText(TRANS("group_online"));
+    onlineToggle.setButtonText(TRANS("online_toggle"));
+    onlineKeyCaption.setText(TRANS("online_key_caption"), juce::dontSendNotification);
+    onlineKeyEditor.setTextToShowWhenEmpty(TRANS("online_key_placeholder"), ThemeManager::getInstance().getMutedTextColour());
+    onlineNoteLabel.setText(TRANS("online_note"), juce::dontSendNotification);
     dangerGroup.setText(TRANS("group_danger_zone"));
 
     const auto current = PersistenceManager::getLabRoot();
@@ -297,6 +354,8 @@ void SettingsDialog::LibraryTab::updateTexts() {
     labNextLabel.setText(next != current ? TRANS("lab_next_start").replace("%1", next.getFullPathName()) : juce::String(),
                          juce::dontSendNotification);
     changeLabButton.setButtonText(TRANS("btn_change_lab_root"));
+    uppercaseToggle.setButtonText(TRANS("label_display_uppercase"));
+    uppercaseToggle.setTooltip(TRANS("tip_display_uppercase"));
 
     autoBackupToggle.setButtonText(TRANS("label_auto_backup"));
     externalCaption.setText(TRANS("backup_external_caption"), juce::dontSendNotification);
@@ -319,7 +378,43 @@ void SettingsDialog::LibraryTab::updateTexts() {
     updateStatus();
 }
 
+void SettingsDialog::LibraryTab::setOnlineIdentifier(OnlineIdentifier* identifier) {
+    onlineIdentifier = identifier;
+    const bool available = identifier != nullptr;
+    onlineToggle.setEnabled(available);
+    onlineKeyEditor.setEnabled(available);
+    if (available) {
+        onlineToggle.setToggleState(identifier->isEnabled(), juce::dontSendNotification);
+        onlineKeyEditor.setText(identifier->getApiKey(), false);
+    }
+    updateOnlineStatus();
+}
+
+void SettingsDialog::LibraryTab::updateOnlineStatus() {
+    auto& t = ThemeManager::getInstance();
+    juce::String text;
+    auto colour = t.getSecondaryTextColour();
+    if (onlineIdentifier == nullptr || !OnlineIdentifier::isChromaprintAvailable()) {
+        text = TRANS("online_status_no_chromaprint");
+        colour = t.getWarningColour();
+    } else if (onlineKeyEditor.getText().trim().isEmpty()) {
+        text = TRANS("online_status_no_key");
+        colour = t.getWarningColour();
+    } else {
+        const auto s = onlineIdentifier->getStatus();
+        text = TRANS("online_status").replace("%1", juce::String(s.queued + (s.working ? 1 : 0)))
+                                     .replace("%2", juce::String(s.found)).replace("%3", juce::String(s.notFound));
+        if (s.lastError.isNotEmpty()) {
+            text << "  ·  " << TRANS("online_status_error").replace("%1", s.lastError);
+            colour = t.getWarningColour();
+        }
+    }
+    onlineStatusLabel.setText(text, juce::dontSendNotification);
+    onlineStatusLabel.setColour(juce::Label::textColourId, colour);
+}
+
 void SettingsDialog::LibraryTab::updateStatus() {
+    updateOnlineStatus();
     auto& t = ThemeManager::getInstance();
     const auto& s = station.get();
     const auto status = backupService != nullptr ? backupService->getStatus() : BackupService::Status();
@@ -1132,6 +1227,10 @@ SettingsDialog::SettingsDialog(juce::AudioDeviceManager& m, juce::AudioDeviceMan
 }
 
 SettingsDialog::~SettingsDialog() {}
+
+void SettingsDialog::setOnlineIdentifier(OnlineIdentifier* identifier) {
+    if (libraryTab != nullptr) libraryTab->setOnlineIdentifier(identifier);
+}
 
 void SettingsDialog::resized() {
     tabs.setBounds(getLocalBounds().reduced(12, 6));

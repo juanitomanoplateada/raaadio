@@ -1,4 +1,5 @@
 #include "NowPlaying.h"
+#include "../library/TrackNaming.h"
 #include "StreamEncoder.h"
 
 namespace NowPlaying {
@@ -10,8 +11,8 @@ namespace {
 
     Item itemFor(const TrackInfo& track, juce::Time time) {
         Item item;
-        item.artist = juce::String(track.artist).trim();
-        item.title = juce::String(track.title).trim();
+        item.artist = TrackNaming::display(track.artist).trim();
+        item.title = TrackNaming::display(track.title).trim();
         item.duration = track.getAirDuration();
         item.time = time.toMilliseconds() == 0 ? juce::Time() : wholeSeconds(time);
         return item;

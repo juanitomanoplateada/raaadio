@@ -7,6 +7,7 @@
 #include "../ui/AdvancedImportDialog.h"
 #include "../ui/LibraryView.h"
 #include "../ui/AdsListView.h"
+#include "../ui/ImportReviewView.h"
 
 //==============================================================================
 
@@ -249,6 +250,102 @@ void UiSnapshotRunner::populateDemoState()
         main->cartPlayer->assign(i == 2 ? 4 : i, addTrack(j.artist, j.title, j.duration, j.category, file.getFullPathName()));
     }
 
+    // Revisión: un lote de merengue con los nombres tal como llegan ("TÍTULO - ARTISTA
+    // (compositores) año"), con un duplicado y un artista mal escrito.
+    if (options.view.startsWith("review"))
+    {
+        // Artistas que la emisora ya confirmó.
+        for (const auto& t : added)
+        {
+            const auto artist = juce::String::fromUTF8(t.artist.c_str());
+            if (artist == "WILFRIDO VARGAS" || artist == "JUAN LUIS GUERRA" || artist == "CARLOS VIVES")
+            {
+                TrackNaming::Proposal p;
+                p.artist = TrackNaming::titleCase(artist);
+                p.title = TrackNaming::titleCase(juce::String::fromUTF8(t.title.c_str()));
+                library.confirmTrack(t.id, p);
+            }
+        }
+
+        struct Pending { const char* name; double duration; };
+        const Pending batch[] = {
+            { "BURBUJAS DE AMOR - JUAN LUIS GERRA", 251 },
+            { "VOLVERE - WILFRIDO VARGAS", 248 }, { "CUPIDO ME FLECHO - WILFRIDO VARGAS", 262 },
+            { "EL JARDINERO - WILFRIDO VARGAS", 241 }, { "EL PADRINO - FULANITO", 236 },
+            { "GUALLANDO - FULANITO", 229 }, { "CALLATE - FULANITO_521290686", 244 },
+            { "LA FLACA - POCHY Y SU COCOBAND (ALFONSO VASQUEZ)", 271 },
+            { "LA GRAN MANZANA - FRENESI ORQUESTA, CANTA EL FANTASMA", 283 },
+            { "A DORMIR JUNTITOS - EDDY HERRERA Y LIZ", 259 }, { "DEMASIADO NIÑA - EDDY HERRERA_521204329", 247 },
+            { "LA BAILADORA - EDDY HERRERA (ALFONSO VALLEJO)", 266 },
+            { "AMARTE A TI - SIN FRONTERAS - MERENGUE (D. FREIGBERG - W. A. RENZON) 1997", 252 },
+            { "HOLA - LOS HERMANOS ROSARIO", 238 }, { "ESA MORENA - LOS HERMANOS ROSARIO - 1997", 243 },
+            { "LA DUEÑA DEL SWING - LOS HERMANOS ROSARIO", 255 }, 
+            { "LA MOVIDA - SANDY Y PAPO", 240 }, { "LA HORA DE BAILAR - SANDY Y PAPO", 233 },
+        };
+        const juce::String folder = "D:\\Musica\\MERENGUE";
+        int merengue = categoryId("MERENGUE");
+        for (const auto& p : batch)
+        {
+            const auto name = juce::String::fromUTF8(p.name);
+            TrackInfo t {};
+            t.path = PersistenceManager::getLibraryFolder().getChildFile("_Entrada/1/" + name + ".mp3").getFullPathName().toStdString();
+            t.artist = name.upToFirstOccurrenceOf(" - ", false, false).toStdString();
+            t.title = name.fromFirstOccurrenceOf(" - ", false, false).toStdString();
+            t.duration = p.duration;
+            t.normalizationGain = 1.0;
+            t.status = 1;
+            db.addTrack(t);
+            const auto stored = db.getTrackByPath(t.path);
+            Database::ImportSource source;
+            source.name = p.name;
+            source.folder = folder.toStdString();
+            source.batch = 1;
+            db.setImportSource(stored.id, source);
+            library.setTrackCategories(stored.id, { merengue });
+
+            // Lo que habría devuelto la búsqueda en línea (sin conectarse).
+            Database::OnlineMatch online;
+            online.status = Database::OnlineStatus::Found;
+            if (name.startsWith("BURBUJAS")) {
+                online.score = 0.96;
+                online.artist = "Juan Luis Guerra";
+                online.title = "Burbujas de amor";
+                online.year = 1990;
+                online.composers = { "Juan Luis Guerra" };
+            } else if (name.startsWith("LA GRAN MANZANA")) {
+                online.score = 0.93;
+                online.artist = juce::String::fromUTF8("Frenesí Orquesta").toStdString();
+                online.featured = { "El Fantasma" };
+                online.title = "La gran manzana";
+                online.year = 1995;
+            } else if (name.startsWith("VOLVERE")) {
+                online.score = 0.98;
+                online.artist = "Wilfrido Vargas";
+                online.title = juce::String::fromUTF8("Volveré").toStdString();
+                online.year = 1986;
+                online.composers = { "Wilfrido Vargas" };
+            } else {
+                continue;
+            }
+            db.saveOnlineMatch(stored.id, online);
+        }
+    }
+
+    // Artistas: la biblioteca confirmada, con un artista escrito de dos formas.
+    if (options.view == "artists")
+    {
+        ImportReview all(library);
+        all.load(ImportReview::Scope::Library);
+        all.confirm(all.readyRows());
+
+        const auto typo = addTrack("ARMANDO MANZANER", "SOMOS NOVIOS", 187, "BOLERO");
+        TrackNaming::Proposal p;
+        p.artist = "Armando Manzaner";
+        p.title = "Somos Novios";
+        p.composers.add("Armando Manzanero");
+        library.confirmTrack(typo.id, p);
+    }
+
     // Vista "empty": la emisora recién abierta, con biblioteca pero sin nada cargado.
     if (options.view == "empty")
     {
@@ -322,6 +419,7 @@ juce::Component* UiSnapshotRunner::createView()
                                                       main->audioEngine.getCueDeviceManager(),
                                                       main->library, main->adsManager, *main->stationConfig,
                                                       main->streamEncoder, main->nowPlaying.get(), main->backupService.get(), PersistenceManager::getAirLogFolder());
+        static_cast<SettingsDialog*>(dialogView.get())->setOnlineIdentifier(main->onlineIdentifier.get());
         height = 640;
     }
     else if (view == "generator")
@@ -332,7 +430,25 @@ juce::Component* UiSnapshotRunner::createView()
     else if (view == "track")
     {
         dialogView = std::make_unique<TrackDetailsDialog>(main->library, main->audioEngine.getDeck(0).getCurrentTrack());
-        width = 520; height = 640;
+        width = dialogView->getWidth(); height = dialogView->getHeight();
+    }
+    else if (view == "artists")
+    {
+        auto artists = std::make_unique<ArtistsView>(main->library);
+        artists->setScopeCounts(main->library.getPendingCount(), main->library.getUnreviewedCount());
+        artists->reload();
+        dialogView = std::move(artists);
+        width = options.width;
+        height = options.height;
+    }
+    else if (view == "review" || view == "review-library")
+    {
+        auto review = std::make_unique<ImportReviewView>(main->library, nullptr,
+                                                         view == "review" ? ImportReview::Scope::NewImports : ImportReview::Scope::Library);
+        review->setArtistCount((int) main->library.getArtists().size());
+        dialogView = std::move(review);
+        width = options.width;
+        height = options.height;
     }
     else if (view == "import")
     {

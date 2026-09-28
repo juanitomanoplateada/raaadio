@@ -149,3 +149,16 @@ uint64_t Playlist::getLastModified() const {
     std::lock_guard<std::mutex> lock(mutex);
     return lastModified;
 }
+
+int Playlist::updatePath(int id, const std::string& newPath) {
+    std::lock_guard<std::mutex> lock(mutex);
+    int changed = 0;
+    for (auto& track : queue) {
+        if (track.id == id && track.path != newPath) {
+            track.path = newPath;
+            ++changed;
+        }
+    }
+    if (changed > 0) ++lastModified;
+    return changed;
+}

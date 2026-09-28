@@ -48,6 +48,8 @@ void Mixer::prepareToPlay(int samplesPerBlockExpected, double sampleRate) {
 
     if (cartSource != nullptr) cartSource->prepareToPlay(samplesPerBlockExpected, sampleRate);
     cartBuffer.setSize(2, samplesPerBlockExpected);
+    if (previewSource != nullptr) previewSource->prepareToPlay(samplesPerBlockExpected, sampleRate);
+    previewBuffer.setSize(2, samplesPerBlockExpected);
 
     mainSilentSamples = 0;
     deckSilentSamples[0] = 0;
@@ -195,8 +197,18 @@ void Mixer::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) 
         }
     }
     
-    if (cueFifoBuffer.getNumChannels() < 2) cueFifoBuffer.setSize(2, 8192); 
-    
+    // Preescucha de la revisión: se suma solo a lo que va a cue.
+    if (previewSource != nullptr) {
+        previewBuffer.setSize(2, numSamples, false, false, true);
+        previewBuffer.clear();
+        juce::AudioSourceChannelInfo previewInfo(&previewBuffer, 0, numSamples);
+        previewSource->getNextAudioBlock(previewInfo);
+        for (int ch = 0; ch < 2; ++ch)
+            cueInternalBuffer.addFrom(ch, 0, previewBuffer, ch, 0, numSamples);
+    }
+
+    if (cueFifoBuffer.getNumChannels() < 2) cueFifoBuffer.setSize(2, 8192);
+
     int space = cueFifo.getFreeSpace();
     
     if (space >= numSamples) {

@@ -81,11 +81,11 @@ void CartwallView::paint(juce::Graphics& g) {
         g.drawText(UiStyle::formatTime(player.getRemainingSeconds(i)), top, juce::Justification::centredRight, false);
 
         content.removeFromTop(4.0f);
-        const juce::String artist(juce::String::fromUTF8(track.artist.c_str()));
+        const auto artist = TrackNaming::display(track.artist);
         auto artistArea = content.removeFromBottom(artist.isNotEmpty() ? 18.0f : 0.0f);
         g.setColour(t.getPrimaryTextColour());
         g.setFont(UiStyle::semibold(14.5f));
-        g.drawFittedText(juce::String::fromUTF8(track.title.c_str()), content.toNearestInt(),
+        g.drawFittedText(TrackNaming::display(track.title), content.toNearestInt(),
                          juce::Justification::centredLeft, 2, 0.9f);
         g.setColour(t.getSecondaryTextColour());
         g.setFont(UiStyle::ui(12.5f));
@@ -131,7 +131,7 @@ void CartwallView::mouseExit(const juce::MouseEvent&) {
 juce::PopupMenu CartwallView::createAssignMenu(const CartPlayer& player, int firstItemId) {
     juce::PopupMenu menu;
     for (int i = 0; i < CartPlayer::numCarts; ++i) {
-        const auto current = player.isAssigned(i) ? juce::String::fromUTF8(player.getTrack(i).title.c_str())
+        const auto current = player.isAssigned(i) ? TrackNaming::display(player.getTrack(i).title)
                                                   : TRANS("cartwall_free");
         menu.addItem(firstItemId + i, "F" + juce::String(i + 1) + juce::String(juce::CharPointer_UTF8("  \xc2\xb7  ")) + current);
     }

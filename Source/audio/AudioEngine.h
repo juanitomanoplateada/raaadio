@@ -2,6 +2,7 @@
 #include <JuceHeader.h>
 #include "Mixer.h"
 #include "Deck.h"
+#include "PreviewPlayer.h"
 #include "../library/Playlist.h"
 
 class AudioEngine {
@@ -18,6 +19,7 @@ public:
     
     Mixer& getMixer() { return mixer; }
     Deck& getDeck(int index) { return *decks[(size_t) index]; }
+    PreviewPlayer& getPreview() { return *preview; }  // revisión: suena solo por cue
     juce::AudioFormatManager& getFormatManager() { return formatManager; }
     juce::AudioThumbnailCache& getThumbnailCache() { return thumbnailCache; }
 
@@ -31,6 +33,7 @@ private:
     
     Mixer mixer;
     std::vector<std::unique_ptr<Deck>> decks;
+    std::unique_ptr<PreviewPlayer> preview;
     juce::AudioSourcePlayer sourcePlayer;
     juce::AudioSourcePlayer cueSourcePlayer;
     

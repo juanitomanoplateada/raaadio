@@ -8,6 +8,7 @@
 #include "../network/StreamEncoder.h"
 #include "../network/NowPlayingPublisher.h"
 #include "../helpers/BackupService.h"
+#include "../network/OnlineIdentifier.h"
 
 class SettingsDialog : public juce::Component {
 public:
@@ -15,6 +16,8 @@ public:
                    StationConfig& station, StreamEncoder& streamEncoder, NowPlayingPublisher* nowPlaying,
                    BackupService* backups, juce::File airLogFolder);
     ~SettingsDialog();
+    // La búsqueda en línea de la emisora (puede no haber).
+    void setOnlineIdentifier(OnlineIdentifier* identifier);
     
     void resized() override;
     void paint(juce::Graphics& g) override;
@@ -55,6 +58,7 @@ private:
         static int getIdealHeight();
 
         std::function<void()> onLibraryReset;
+        void setOnlineIdentifier(OnlineIdentifier* identifier);
 
     private:
         void changeListenerCallback(juce::ChangeBroadcaster*) override { updateStatus(); }
@@ -69,12 +73,22 @@ private:
         juce::GroupComponent labGroup;
         juce::GroupComponent dataGroup;
         juce::GroupComponent migrationGroup;
+        juce::GroupComponent onlineGroup;
+
+        // Identificar canciones en línea (AcoustID y MusicBrainz)
+        OnlineIdentifier* onlineIdentifier = nullptr;
+        juce::ToggleButton onlineToggle;
+        juce::Label onlineKeyCaption, onlineStatusLabel, onlineNoteLabel;
+        juce::TextEditor onlineKeyEditor;
+        void updateOnlineStatus();
         juce::GroupComponent dangerGroup;
 
         // Lab Root management
         juce::Label labPathLabel;
         juce::Label labNextLabel;  // la carpeta que regirá desde el próximo inicio, si cambió
         juce::TextButton changeLabButton { "CHANGE LAB ROOT" };
+        // Artistas y títulos en MAYÚSCULAS en pantalla y en la transmisión (lo guardado no cambia).
+        juce::ToggleButton uppercaseToggle;
 
         // Respaldos
         juce::ToggleButton autoBackupToggle;

@@ -139,7 +139,7 @@ void PlaylistComponent::paint(juce::Graphics& g) {
             g.drawText(next.source, right.withTrimmedRight(84.0f), juce::Justification::centredRight, false);
         }
 
-        const juce::String artist(next.track.artist), trackTitle(next.track.title);
+        const auto artist = TrackNaming::display(next.track.artist), trackTitle = TrackNaming::display(next.track.title);
         g.setColour(t.getPrimaryTextColour());
         g.setFont(UiStyle::semibold(15.0f));
         g.drawText(artist.isNotEmpty() ? trackTitle + juce::String(juce::CharPointer_UTF8("  \xe2\x80\x94  ")) + artist : trackTitle,
@@ -246,12 +246,12 @@ void PlaylistComponent::paintCell(juce::Graphics& g, int rowNumber, int columnId
         case colTitle:
             g.setColour(t.getPrimaryTextColour());
             g.setFont(rowNumber == 1 ? UiStyle::semibold(14.5f) : UiStyle::ui(14.5f));
-            g.drawText(juce::String(track.title), area, juce::Justification::centredLeft, true);
+            g.drawText(TrackNaming::display(track.title), area, juce::Justification::centredLeft, true);
             break;
         case colArtist:
             g.setColour(t.getSecondaryTextColour());
             g.setFont(UiStyle::ui(14.0f));
-            g.drawText(juce::String(track.artist), area, juce::Justification::centredLeft, true);
+            g.drawText(TrackNaming::display(track.artist), area, juce::Justification::centredLeft, true);
             break;
         case colLength:
             g.setColour(t.getSecondaryTextColour());
@@ -354,7 +354,7 @@ void PlaylistComponent::openTrackDetails(const TrackInfo& track) {
     opt.useNativeTitleBar = true;
     opt.resizable = true;
     auto* w = opt.launchAsync();
-    w->centreWithSize(520, 640);
+    w->centreWithSize(dialog->getWidth(), dialog->getHeight());
 
     dialog->onSave = [this] { updateCache(); };
     dialog->onCancel = [w] { w->closeButtonPressed(); };

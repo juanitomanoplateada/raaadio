@@ -1,4 +1,5 @@
 #include "StatusBar.h"
+#include "../library/TrackNaming.h"
 #include "BinaryData.h"
 #include "../helpers/ThemeManager.h"
 #include "../helpers/UiStyle.h"
@@ -52,7 +53,7 @@ void StatusBar::refreshState()
         auto& current = (aOnAir && bOnAir) ? (a.getLastPlayTime() > b.getLastPlayTime() ? a : b)
                                            : (aOnAir ? a : b);
         const auto track = current.getCurrentTrack();
-        const juce::String artist(track.artist), title(track.title);
+        const auto artist = TrackNaming::display(track.artist), title = TrackNaming::display(track.title);
         playing = artist.isNotEmpty() ? artist + juce::String::fromUTF8("  \xe2\x80\x94  ") + title : title;
     }
 

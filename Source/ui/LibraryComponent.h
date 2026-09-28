@@ -8,9 +8,11 @@
 #include "../library/AdvertisingManager.h"
 #include "AdvertisingComponent.h"
 #include "CartwallView.h"
+#include "ImportReviewView.h"
 
 class Deck;
 class Playlist;
+class PreviewPlayer;
 
 // Pestañas que se abren solas al pasar por encima arrastrando una pista: así una canción
 // de la biblioteca llega a la botonera, que está en otra pestaña del mismo panel.
@@ -40,6 +42,10 @@ public:
     void setDecks(Deck* dA, Deck* dB);
     void setPlaylist(Playlist* p);
     void refreshLibrary();  // tras cambios hechos fuera del panel (p. ej., borrar la biblioteca)
+    void setPreviewPlayer(PreviewPlayer* player) { previewPlayer = player; }
+    void setOnlineIdentifier(OnlineIdentifier* identifier) { onlineIdentifier = identifier; }
+    // Abre la revisión de canciones (o la trae al frente si ya estaba abierta).
+    void openReview(ImportReview::Scope scope);
 
 private:
     MusicLibrary& library;
@@ -54,6 +60,13 @@ private:
 
     juce::TextButton advancedImportButton;
     juce::TextButton importAnunciosButton;
+    // "Por revisar (N)": lo importado que espera, o la biblioteca que nadie ha confirmado.
+    juce::TextButton reviewButton;
+    int pendingCount = 0, unreviewedCount = 0, catalogVersionSeen = -1;
+    PreviewPlayer* previewPlayer = nullptr;
+    OnlineIdentifier* onlineIdentifier = nullptr;
+    std::unique_ptr<ImportReviewWindow> reviewWindow;
+    void updateReviewButton();
 
     double progress = 0.0;
     juce::ProgressBar progressBar;

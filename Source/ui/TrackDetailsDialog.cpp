@@ -10,15 +10,14 @@ TrackDetailsDialog::TrackDetailsDialog(MusicLibrary& lib, const TrackInfo& t)
     addAndMakeVisible(detailsSectionHeader);
     addAndMakeVisible(systemSectionHeader);
 
-     
-    addAndMakeVisible(artistLabel);
-    addAndMakeVisible(artistEditor);
-    artistEditor.setText(trackInfo.artist);
-    
-    addAndMakeVisible(titleLabel);
-    addAndMakeVisible(titleEditor);
-    titleEditor.setText(trackInfo.title);
-    
+    // Las cuñas, identificaciones y separadores no llevan créditos ni se ordenan en Musica.
+    systemTrack = library.getSystemRolesByTrack().count(trackInfo.id) > 0;
+    namingContext = library.makeNamingContext({});
+    addAndMakeVisible(creditsEditor);
+    creditsEditor.setContext(&namingContext);
+    creditsEditor.setCreditsVisible(!systemTrack);
+    creditsEditor.onCommit = [this] { saveData(); };
+
      
     addAndMakeVisible(durationLabel);
     addAndMakeVisible(playCountLabel);
@@ -58,7 +57,7 @@ TrackDetailsDialog::TrackDetailsDialog(MusicLibrary& lib, const TrackInfo& t)
     saveButton.onClick = [this] { saveData(); };
     cancelButton.onClick = [this] { if (onCancel) onCancel(); };
 
-    setSize(520, 640);
+    setSize(540, systemTrack ? 600 : 700);
     lookAndFeelChanged();
 }
 
@@ -71,27 +70,13 @@ void TrackDetailsDialog::lookAndFeelChanged() {
     detailsSectionHeader.setText(TRANS("header_details"), juce::dontSendNotification);
     systemSectionHeader.setText(TRANS("header_system"), juce::dontSendNotification);
     categoryFilterLabel.setText(TRANS("label_filter_categories"), juce::dontSendNotification);
-    artistLabel.setText(TRANS("label_artist"), juce::dontSendNotification);
-    titleLabel.setText(TRANS("label_title"), juce::dontSendNotification);
 
     for (auto* l : { &infoSectionHeader, &detailsSectionHeader, &systemSectionHeader, &categoryFilterLabel }) {
         l->setFont(UiStyle::caption(12.0f));
         l->setColour(juce::Label::textColourId, secondaryCol);
         l->setBorderSize({ 0, 0, 0, 0 });
     }
-
-    for (auto* l : { &artistLabel, &titleLabel }) {
-        l->setFont(UiStyle::ui(13.0f));
-        l->setColour(juce::Label::textColourId, secondaryCol);
-        l->setBorderSize({ 0, 0, 0, 0 });
-    }
-
-    for (auto* e : { &artistEditor, &titleEditor }) {
-        e->setFont(UiStyle::semibold(17.0f));
-        e->applyFontToAllText(UiStyle::semibold(17.0f));
-        e->setIndents(10, 0);
-        e->setJustification(juce::Justification::centredLeft);
-    }
+    creditsEditor.sendLookAndFeelChange();
     categorySearch.setFont(UiStyle::ui(14.0f));
     categorySearch.setIndents(10, 0);
     categorySearch.setJustification(juce::Justification::centredLeft);
@@ -135,10 +120,15 @@ void TrackDetailsDialog::lookAndFeelChanged() {
 
 void TrackDetailsDialog::refreshMetadata() {
     trackInfo = library.getTrackById(trackInfo.id);
-    
-    artistEditor.setText(trackInfo.artist);
-    titleEditor.setText(trackInfo.title);
-    
+    // Una canción que nadie ha confirmado (de versiones anteriores, todo en mayúsculas) se
+    // propone en Tipo Título; al guardar queda confirmada y ordenada en Musica.
+    auto values = library.getTrackCredits(trackInfo);
+    if (trackInfo.confirmedAt.empty() && !systemTrack) {
+        values.artist = TrackNaming::smartCase(values.artist);
+        values.title = TrackNaming::smartCase(values.title);
+    }
+    creditsEditor.setValues(values);
+
     int mins = (int)trackInfo.duration / 60;
     int secs = (int)trackInfo.duration % 60;
     durationLabel.setText(TRANS("label_duration") + " " + juce::String::formatted("%02d:%02d", mins, secs), juce::NotificationType::dontSendNotification);
@@ -208,7 +198,6 @@ void TrackDetailsDialog::paint(juce::Graphics& g) {
 
 void TrackDetailsDialog::resized() {
     auto area = getLocalBounds().reduced(20, 16);
-    const int fieldH = 36;
 
     // Botones: acciones secundarias a la izquierda, confirmar/cancelar a la derecha.
     auto buttonRow = area.removeFromBottom(36);
@@ -232,12 +221,8 @@ void TrackDetailsDialog::resized() {
     // Datos editables
     infoSectionHeader.setBounds(area.removeFromTop(18));
     area.removeFromTop(8);
-    titleLabel.setBounds(area.removeFromTop(18));
-    titleEditor.setBounds(area.removeFromTop(fieldH));
-    area.removeFromTop(10);
-    artistLabel.setBounds(area.removeFromTop(18));
-    artistEditor.setBounds(area.removeFromTop(fieldH));
-    area.removeFromTop(18);
+    creditsEditor.setBounds(area.removeFromTop(creditsEditor.getIdealHeight()));
+    area.removeFromTop(8);
 
     // Detalles y sistema al pie; las categorías ocupan el espacio restante.
     auto systemArea = area.removeFromBottom(18 + 6 + 20 * 3);
@@ -282,60 +267,33 @@ void TrackDetailsDialog::playLocal() {
 void TrackDetailsDialog::saveData() {
     if (isSaving) return;
 
-    juce::String newArtist = artistEditor.getText();
-    juce::String newTitle = titleEditor.getText();
-    
-    if (newArtist.trim().isEmpty() || newTitle.trim().isEmpty()) {
+    const auto values = creditsEditor.getValues();
+    if (values.title.isEmpty() || (!systemTrack && values.artist.isEmpty())) {
         juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, TRANS("error_validation"), TRANS("error_validation_msg"));
         return;
     }
 
     isSaving = true;
     repaint();
-    
-     
-    artistEditor.setEnabled(false);
-    titleEditor.setEnabled(false);
-    saveButton.setEnabled(false);
-    cancelButton.setEnabled(false);
-    
-     
-    int trackId = trackInfo.id;
-    std::vector<int> catIds = selectedCategoryIds;
-    juce::Component::SafePointer<TrackDetailsDialog> safeThis(this);
 
-     
-    if (library.updateTrackMetadata(trackId, newArtist, newTitle)) {
-         
-        artistEditor.setText(library.forceUpperCase(newArtist.trim()));
-        titleEditor.setText(library.forceUpperCase(newTitle.trim()));
-    } else {
-        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, TRANS("error_title"), TRANS("error_title"));
-        isSaving = false;
-        artistEditor.setEnabled(true);
-        titleEditor.setEnabled(true);
-        saveButton.setEnabled(true);
-        cancelButton.setEnabled(true);
+    // Primero las categorías: dicen si es música (se ordena en Musica) o una cuña.
+    library.setTrackCategories(trackInfo.id, selectedCategoryIds);
+    const auto result = library.confirmTrack(trackInfo.id, values);
+    isSaving = false;
+
+    if (!result.ok) {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, TRANS("error_title"), TRANS("error_track_save"));
         repaint();
         return;
     }
-    
-     
-    library.setTrackCategories(trackId, catIds);
+    if (result.moveDeferred)
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, TRANS("track_saved_title"), TRANS("track_move_deferred"));
 
-    if (onSave) {
-        onSave();
-    }
-
-    isSaving = false;
-    artistEditor.setEnabled(true);
-    titleEditor.setEnabled(true);
-    saveButton.setEnabled(true);
-    cancelButton.setEnabled(true);
-    repaint();
+    if (onSave) onSave();
 
     // Guardar cierra el diálogo; se hace de forma asíncrona porque cerrar la
     // ventana destruye este componente.
+    juce::Component::SafePointer<TrackDetailsDialog> safeThis(this);
     juce::MessageManager::callAsync([safeThis] {
         if (safeThis != nullptr && safeThis->onCancel)
             safeThis->onCancel();

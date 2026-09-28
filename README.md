@@ -93,6 +93,16 @@ en una carpeta que se puede llevar en un disco externo.
       <img src="docs/screenshots/ajustes-emision.png" alt="Ajustes de emisión" width="420"/>
       <br/><sub><b>Emisión</b> · protección contra silencio, registro de lo emitido y streaming</sub>
     </td>
+    <td width="50%" align="center">
+      <img src="docs/screenshots/revision.png" alt="Revisión de canciones importadas"/>
+      <br/><sub><b>Revisión</b> · formato detectado por carpeta, créditos, dudas y duplicados antes de sonar</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="docs/screenshots/artistas.png" alt="Artistas"/>
+      <br/><sub><b>Artistas</b> · renombrar y fusionar en todas sus canciones, con alias y parecidos</sub>
+    </td>
     <td width="50%"></td>
   </tr>
 </table>
@@ -197,8 +207,54 @@ nombre: renombrar o traducir la interfaz no rompe la publicidad.
 ### Biblioteca
 
 - **Importación** de archivos o carpetas eligiendo la categoría. Los archivos se copian tal
-  cual (MP3, FLAC, OGG, WAV, AIFF; un WMA se pasa a FLAC, sin pérdida). Artista y título salen
-  de las etiquetas (ID3, Vorbis, INFO de WAV) o del nombre `Artista - Título`.
+  cual (MP3, FLAC, OGG, WAV, AIFF; un WMA se pasa a FLAC, sin pérdida).
+- **Revisión antes de sonar.** La música importada entra *por revisar*: se puede poner al
+  aire a mano, pero AutoDJ y el generador no la usan hasta que alguien confirma artista,
+  título y categoría. Las cuñas, identificaciones y separadores entran directo.
+  - **El formato de cada carpeta se detecta solo.** `Artista - Título` o `Título - Artista`:
+    los artistas se repiten con títulos distintos; los títulos, no. Una carpeta sin pistas
+    se marca para que el operador elija con un clic.
+  - **Créditos**: intérprete principal, invitados (`feat.`, `canta`), compositores entre
+    paréntesis, año, versión (`En vivo`, `Remix`) y el género que venía pegado al nombre.
+    Se quitan el número de pista, `(Video Oficial)`, direcciones web y sufijos de copias.
+  - **Artistas únicos**: cada artista se guarda una vez, con una clave que no distingue
+    mayúsculas ni tildes; las correcciones se recuerdan como alias y se sugiere *¿Es…?*
+    cuando un nombre se parece a otro ya conocido o al que más se repite en el lote.
+  - **Duplicados** por contenido (SHA-256), por artista, título y duración, y **por su
+    sonido**: una huella acústica propia (10 s de la canción en 33 bandas) reconoce la misma
+    grabación en otro formato, más baja o con otro nombre. Quitar una copia pasa sus
+    categorías a la otra. Nada se borra: lo quitado va a `Library/_Descartadas`.
+  - **Deshacer una importación**: lo que sigue por revisar de ese lote sale de la
+    biblioteca; lo ya confirmado se queda.
+  - **Identificación en línea** (opcional, *Configuración → Biblioteca y datos*): con una
+    clave gratuita de [AcoustID](https://acoustid.org/new-application), cada canción por
+    revisar se reconoce por su sonido (Chromaprint) y se completan sus datos desde
+    [MusicBrainz](https://musicbrainz.org): artista con invitados, título, año, compositores
+    e ISRC. Aparece como sugerencia con su porcentaje de seguridad ("Usar datos en línea"),
+    nunca se aplica sola; si coincide con lo propuesto, confirma el formato de la carpeta y
+    devuelve las tildes que el nombre del archivo había perdido. Solo se envían la huella y
+    la duración, nunca el audio; sin conexión todo funciona igual.
+  - **Acciones por lote** (intercambiar artista y título, categoría, mayúsculas), preescucha
+    por la salida de cue y atajos de teclado. Lo corregido queda guardado aunque se cierre
+    la ventana.
+  - **Biblioteca sin revisar**: la misma ventana sanea lo importado con versiones
+    anteriores, sin sacarlo del aire.
+- **Archivos ordenados desde la base.** Al confirmar, cada canción queda en
+  `Library/Musica/<Artista>/<Artista> - <Título>`; editarla después la mueve. Si el archivo
+  está sonando, se mueve al próximo inicio. Tras restaurar un respaldo viejo, los archivos
+  se vuelven a encontrar por su huella.
+- **Artistas** (pestaña de la ventana de revisión): cada uno con sus canciones como
+  intérprete, invitado o compositor y sus alias. Renombrar uno cambia todas sus canciones y
+  archivos; fusionar dos que son el mismo ("Wilfridovargas" y "Wilfrido Vargas") junta sus
+  canciones y deja el nombre equivocado como alias. La vista sugiere los parecidos.
+- **Separación de artistas por intérprete**: el generador no pone seguidas
+  "Eddy Herrera" y "Eddy Herrera feat. Liz".
+- **Mayúsculas a gusto**: los nombres se guardan bien escritos (`Juan Luis Guerra`) y se
+  pueden mostrar en MAYÚSCULAS en pantalla y en la transmisión (*Configuración → Biblioteca
+  y datos*).
+- **Búsqueda rápida** (FTS5 de SQLite) sin mayúsculas ni tildes, por partes de palabras y
+  también por invitados, compositores, versión, año y el nombre original del archivo:
+  `carino` encuentra `Cariño`; `wilf` encuentra a Wilfrido Vargas.
 - **Sin duplicados.** El mismo archivo, o la misma canción en otro formato, no se copia dos
   veces: importarla en otra categoría solo la suma a esa categoría.
 - **Análisis en segundo plano** de lo importado con versiones anteriores, adelantando lo que
@@ -210,7 +266,8 @@ nombre: renombrar o traducir la interfaz no rompe la publicidad.
 - Temas **claro** y **oscuro**, iconos vectoriales y una distribución que funciona desde
   1366 × 768.
 - **Bilingüe** (español e inglés), conmutable en caliente. Los textos van dentro del
-  ejecutable: basta copiar `RAAADIO.exe` (y `libmp3lame.dll` para transmitir en MP3).
+  ejecutable: basta copiar `RAAADIO.exe` (y `libmp3lame.dll` para transmitir en MP3, y
+  `chromaprint.dll` para identificar canciones en línea).
 
 ---
 
@@ -235,7 +292,8 @@ Build Tools con la carga de trabajo "Desarrollo de escritorio con C++".
 
 ## Instalación
 
-RAAADIO usa `FetchContent`: CMake descarga JUCE 8.0.3, SQLite, libebur128 y LAME 3.100 por su cuenta.
+RAAADIO usa `FetchContent`: CMake descarga JUCE 8.0.3, SQLite, libebur128, LAME 3.100 y
+Chromaprint 1.5.1 por su cuenta.
 
 ```bash
 git clone https://github.com/juanitomanoplateada/raaadio.git
@@ -247,7 +305,8 @@ cmake --build build --config Release --parallel
 El ejecutable queda en `build/RAAADIO_artefacts/Release/RAAADIO.exe` y es autónomo: para
 instalarlo en la máquina de aire basta copiar ese archivo. Al lado quedan `libmp3lame.dll` y su
 licencia (`libmp3lame-COPYING.txt`): cópialos junto al `.exe` para transmitir en MP3. Sin ellos
-RAAADIO funciona igual y transmite en Ogg Vorbis.
+RAAADIO funciona igual y transmite en Ogg Vorbis. Lo mismo con `chromaprint.dll` (y
+`chromaprint-LICENSE.md`): sin ella todo funciona menos la identificación en línea.
 
 <details>
 <summary><b>La primera compilación tarda</b></summary>
@@ -291,7 +350,9 @@ la biblioteca de LAME del sistema (`libmp3lame`; en Debian y Ubuntu, `sudo apt i
 2. **Configura el audio.** En *Configuración → Audio*, la salida **Main** (al aire) y, si
    tienes una segunda interfaz, la salida **Cue** (audífonos).
 3. **Importa la música** con *Importar*, eligiendo la categoría (crea tus géneros con el
-   botón **+** de la barra de categorías). Las cuñas van con *Importar cuñas*.
+   botón **+** de la barra de categorías), y **revísala** en la ventana que se abre al
+   terminar: *Confirmar listas* pasa a AutoDJ todo lo que no tiene dudas. Las cuñas van con
+   *Importar cuñas* y no necesitan revisión.
 4. **Carga las identificaciones y separadores** en sus categorías fijas.
 5. **Programa la pauta** en la pestaña *Publicidad*: escribe el número de la cuña y marca
    sus franjas. Activa *Pauta automática* para que las tandas entren solas.
@@ -309,7 +370,9 @@ otra ubicación se usa `raaadio_lab` dentro de ella):
 raaadio_lab/
 ├── Database/      # raaadio.db: toda la emisora (pistas, categorías, pauta, cola, botonera,
 │                  # ajustes, plantillas y registro de emisión)
-├── Library/       # la música y las cuñas, copiadas tal cual al importarlas
+├── Library/       # la música y las cuñas, copiadas tal cual al importarlas:
+│                  # Musica/<Artista>/ (confirmada), _Entrada/ (por revisar),
+│                  # _Descartadas/ (quitada en la revisión) y una carpeta por categoría fija
 ├── Recordings/    # grabaciones; AirLog/ guarda el registro de lo emitido
 ├── Backups/       # respaldos verificados: AAAA/MM/DD/HH_MM_SS/{raaadio.db, manifest.json}
 ├── Logs/          # raaadio.log (se recorta a 5 MB al iniciar)
@@ -521,6 +584,8 @@ Source/
 │   ├── MasterLimiter.h       # Limitador de pico
 │   ├── TrackAnalyzer.*       # Sonoridad (LUFS), pico real y puntos de entrada/salida
 │   ├── CartPlayer.*          # Botonera F1–F12
+│   ├── PreviewPlayer.*       # Preescucha de la revisión, solo por Cue
+│   ├── AcousticFingerprint.* # Huella acústica: la misma grabación en otro formato o nombre
 │   ├── AirLogRecorder.*      # Registro de lo emitido, un archivo por hora
 │   └── RecordingManager.*    # Grabación en un hilo propio
 ├── autodj/
@@ -530,15 +595,23 @@ Source/
 │   ├── AdScheduler.*         # Tandas y pauta automática
 │   └── DeadAirGuard.*        # Protección contra silencio
 ├── generator/                # Generador de listas por reglas y plantillas
-├── library/                  # Biblioteca, etiquetas, cola, historial y pauta
+├── library/
+│   ├── MusicLibrary.*        # Importación, análisis, confirmar y ordenar archivos
+│   ├── TrackNaming.*         # Nombres: formato por carpeta, créditos, claves, mayúsculas
+│   ├── ImportReview.*        # Revisión: propuestas, dudas, duplicados y borradores
+│   └── ...                   # Etiquetas, cola, historial y pauta
 ├── database/
 │   ├── Database.*            # SQLite: esquema, migraciones y consultas preparadas
-│   └── StationState.cpp      # Pauta, cola, botonera, ajustes y plantillas en la base
+│   ├── StationState.cpp      # Pauta, cola, botonera, ajustes y plantillas en la base
+│   └── Catalog.cpp           # Artistas, alias, créditos, lotes, huellas y búsqueda (FTS5)
 ├── network/
 │   ├── ApiServer.*           # "Now playing" en 127.0.0.1:8080 (texto y JSON)
 │   ├── StreamEncoder.*       # Transmisión a Icecast (MP3 u Ogg Vorbis) y títulos
 │   ├── Mp3Encoder.*          # MP3 con LAME (libmp3lame.dll, cargada al transmitir)
 │   ├── NowPlaying.*          # Anterior, actual y siguientes: armado y JSON
+│   ├── Chromaprint.*         # Huella de AcoustID (chromaprint.dll, cargada al buscar)
+│   ├── OnlineMetadata.*      # Pedidos y respuestas de AcoustID y MusicBrainz
+│   ├── OnlineIdentifier.*    # Identificación en línea en segundo plano
 │   └── NowPlayingPublisher.* # Título del stream, API y envío a la página web
 ├── helpers/
 │   ├── PersistenceManager.*  # Carpeta de la emisora, respaldos verificados, restauración
@@ -574,10 +647,11 @@ docs/screenshots/             # Capturas del README (generadas con --ui-snapshot
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Más de 600 comprobaciones cubren la base de datos y sus migraciones, el análisis de audio,
-las etiquetas, la importación, los decks, la cola, la pauta, la protección contra silencio,
-la botonera, el streaming (Ogg, MP3 y títulos), lo que suena, los respaldos (verificación,
-retención, destino externo, recuperación de una base dañada), el candado y "reproducir ahora".
+Más de 800 comprobaciones cubren la base de datos y sus migraciones, el análisis de audio,
+las etiquetas, la importación y su revisión (con nombres reales de una emisora), los decks,
+la cola, la pauta, la protección contra silencio, la botonera, el streaming (Ogg, MP3 y
+títulos), lo que suena, los respaldos (verificación, retención, destino externo, recuperación
+de una base dañada), el candado y "reproducir ahora".
 Corren en laboratorios temporales, sin tocar la emisora real. La integración continua compila
 y prueba cada cambio en Windows.
 
@@ -624,7 +698,11 @@ Distribuido bajo licencia MIT. Consulta [LICENSE](LICENSE).
 
 Para transmitir en MP3, RAAADIO carga `libmp3lame.dll`, compilada sin cambios desde
 [LAME 3.100](https://lame.sourceforge.io/) (LGPL 2): va aparte del ejecutable, con su licencia
-(`libmp3lame-COPYING.txt`), y se puede reemplazar por otra compilación de LAME.
+(`libmp3lame-COPYING.txt`), y se puede reemplazar por otra compilación de LAME. Para
+identificar canciones en línea carga `chromaprint.dll`, compilada sin cambios desde
+[Chromaprint 1.5.1](https://acoustid.org/chromaprint) (LGPL 2.1 por el código de FFmpeg que
+incluye; el resto es MIT), también aparte y reemplazable. Los datos de MusicBrainz son de
+dominio público (CC0); el servicio de AcoustID es gratuito para uso no comercial.
 
 ---
 

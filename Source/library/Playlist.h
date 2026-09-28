@@ -27,7 +27,10 @@ public:
     // Quita las filas que sigan coincidiendo; devuelve cuántas quitó.
     int removeTracksIfMatching(const std::vector<RowRef>& rows);
     std::vector<int> findIndicesForIds(const std::vector<int>& ids) const;
-    int findIndexForId(int id) const;  
+    int findIndexForId(int id) const;
+    // El archivo de una pista cambió de lugar (se confirmó en la revisión): las filas de la
+    // cola que la tienen apuntan al nuevo. Devuelve cuántas cambió.
+    int updatePath(int id, const std::string& newPath);
     
     std::vector<TrackInfo> getQueue() const;
     uint64_t getLastModified() const;
