@@ -29,6 +29,10 @@
 #include "../Source/network/ApiServer.h"
 #include "../Source/helpers/StationSettings.h"
 #include "../Source/helpers/SecretStore.h"
+#include "../Source/helpers/BackupService.h"
+#include "../Source/helpers/StationHealth.h"
+#include "../Source/helpers/StationLock.h"
+#include "../Source/generator/TemplateManager.h"
 #include "../Source/ui/DragFormats.h"
 #include <thread>
 
@@ -415,23 +419,21 @@ public:
             const auto a = fx.add("Library/A.ogg", "A");
             const auto b = fx.add("Library/B.ogg", "B");
             const auto c = fx.add("Library/C.ogg", "C");
-            const auto queueFile = fx.lab.root.getChildFile("Config/queue.json");
-
             {
                 Playlist p;
-                PlaylistStore store(p, fx.library, queueFile);
+                PlaylistStore store(p, fx.library);
                 auto inBreak = b;
                 inBreak.breakKey = "2026-09-22 12:00";
                 p.insertTracks({ c, a, inBreak }, 0);
                 store.saveIfChanged();
             }
-            expect(queueFile.existsAsFile());
+            expectEquals((int) fx.library.getDatabase().loadQueue().size(), 3, "la cola queda en la base de datos");
 
             // Entre el cierre y el reinicio se borra una pista: se omite sin romper la cola.
             fx.library.deleteTrack(a.id, false);
 
             Playlist restored;
-            PlaylistStore store(restored, fx.library, queueFile);
+            PlaylistStore store(restored, fx.library);
             expectEquals(store.restore(), 2);
             auto q = restored.getQueue();
             expectEquals((int) q.size(), 2);
@@ -1340,7 +1342,7 @@ public:
             fx.library.setTrackCategories(id.id, { fx.library.getSystemCategory(CategoryRole::StationIds).id });
 
             AdvertisingManager ads;
-            ads.initialise(fx.lab.root.getChildFile("Config/ads.json"));
+            ads.initialise(fx.library);
             ads.setCueNumber(ad1.id, 1);
             ads.setCueNumber(ad2.id, 2);
             ads.addSchedule(1, "12:00");
@@ -1385,7 +1387,7 @@ public:
             LibraryFixture fx;
             const auto ad = fx.add("Library/AD.wav", "CUNA");
             AdvertisingManager ads;
-            ads.initialise(fx.lab.root.getChildFile("Config/ads.json"));
+            ads.initialise(fx.library);
             ads.setCueNumber(ad.id, 7);
             ads.addSchedule(7, "12:00");
 
@@ -1398,11 +1400,10 @@ public:
             formats.registerBasicFormats();
             juce::AudioThumbnailCache cache(4);
             Deck deckA(1, fx.library, formats, cache), deckB(2, fx.library, formats, cache);
-            const auto stateFile = fx.lab.root.getChildFile("Config/ad_breaks_done.json");
 
             const juce::Time now(2026, 8, 22, 11, 50, 0, 0, true);
             {
-                AdScheduler scheduler(fx.library, ads, playlist, deckA, deckB, stateFile);
+                AdScheduler scheduler(fx.library, ads, playlist, deckA, deckB);
                 scheduler.checkNow(now);
                 expectEquals(playlist.getQueue().size(), queue.size(), "sin la pauta automática activada no hace nada");
 
@@ -1417,7 +1418,7 @@ public:
                 scheduler.checkNow(now + juce::RelativeTime::minutes(1));
                 expectEquals((int) playlist.getQueue().size(), (int) queue.size() + 1, "no se inserta dos veces");
             }
-            AdScheduler restarted(fx.library, ads, playlist, deckA, deckB, stateFile);
+            AdScheduler restarted(fx.library, ads, playlist, deckA, deckB);
             restarted.checkNow(now + juce::RelativeTime::minutes(2));
             expectEquals((int) playlist.getQueue().size(), (int) queue.size() + 1, "ni después de reiniciar la emisora");
         }
@@ -1427,7 +1428,7 @@ public:
             LibraryFixture fx;
             const auto ad = fx.add("Library/AD.wav", "CUNA");
             AdvertisingManager ads;
-            ads.initialise(fx.lab.root.getChildFile("Config/ads.json"));
+            ads.initialise(fx.library);
             ads.setCueNumber(ad.id, 7);
             ads.addSchedule(7, "12:00");
             ads.setAutoScheduleEnabled(true);
@@ -1441,7 +1442,7 @@ public:
             formats.registerBasicFormats();
             juce::AudioThumbnailCache cache(4);
             Deck deckA(1, fx.library, formats, cache), deckB(2, fx.library, formats, cache);
-            AdScheduler scheduler(fx.library, ads, playlist, deckA, deckB, fx.lab.root.getChildFile("Config/done.json"));
+            AdScheduler scheduler(fx.library, ads, playlist, deckA, deckB);
             auto adsInQueue = [&playlist, &ad] {
                 int n = 0;
                 for (const auto& t : playlist.getQueue()) n += t.id == ad.id ? 1 : 0;
@@ -1572,7 +1573,7 @@ public:
         Station()
         {
             PersistenceManager::setLabRootOverride(lab.root);
-            for (auto* folder : { "Database", "Config", "Library", "Templates", "Recordings", "Backups" })
+            for (auto* folder : { "Database", "Library", "Recordings", "Backups" })
                 lab.root.getChildFile(folder).createDirectory();
             open();
         }
@@ -1584,11 +1585,15 @@ public:
         }
 
         juce::File dbFile() const { return lab.root.getChildFile("Database/raaadio.db"); }
+        juce::File backups() const { return lab.root.getChildFile("Backups"); }
 
-        void addTrack(const juce::String& title)
+        TrackInfo addTrack(const juce::String& title)
         {
-            const auto file = lab.touch("Library/GENERAL/" + title + ".ogg");
+            const auto file = lab.root.getChildFile("Library/GENERAL/" + title + ".ogg");
+            file.getParentDirectory().createDirectory();
+            file.replaceWithText("audio de " + title);
             library->getDatabase().addTrack(makeTrack(file.getFullPathName(), "ARTISTA", title));
+            return library->getTrackByPath(file.getFullPathName());
         }
 
         juce::StringArray titles() const
@@ -1618,99 +1623,240 @@ public:
         return result;
     }
 
+    // Daña una base como lo haría un corte de luz a mitad de escritura en un disco sin
+    // protección: se conserva la cabecera, el resto de la primera página queda basura.
+    static void corrupt(const juce::File& database)
+    {
+        juce::MemoryBlock data;
+        database.loadFileAsData(data);
+        for (size_t i = 1024; i + 1024 < data.getSize(); ++i)
+            data[i] = (char) 0xAB;
+        database.replaceWithData(data.getData(), data.getSize());
+    }
+
     void runTest() override
     {
-        beginTest("Un respaldo guarda una copia de la base abierta, los ajustes y las plantillas");
+        beginTest("Un respaldo es la base completa, revisada y con manifiesto; si se altera, no verifica");
         {
             Station station;
-            station.addTrack("A");
-            station.lab.root.getChildFile("Config/station.json").replaceWithText("{}");
-            station.lab.root.getChildFile("Config/cartwall.json").replaceWithText("[]");
-            station.lab.root.getChildFile("Templates/MAÑANA.json").replaceWithText("{}");
+            const auto a = station.addTrack("A");
+            station.library->withDatabase([&a](Database& db) {
+                db.saveTemplate(juce::String::fromUTF8("MAÑANA").toStdString(), "{}");
+                Database::AdPlan plan;
+                plan.numberByTrack[a.id] = 7;
+                return db.saveAdPlan(plan);
+            });
 
             juce::File first, second;
             expect(PersistenceManager::createBackup(station.snapshot(), &first).wasOk());
-            expect(first.isAChildOf(station.lab.root.getChildFile("Backups")));
+            expect(first.isAChildOf(station.backups()));
             expect(titlesIn(first.getChildFile("raaadio.db")) == juce::StringArray { "A" },
                    "la copia se abre y tiene lo que había, aunque la base estaba en uso");
-            expect(first.getChildFile("Config/station.json").existsAsFile() && first.getChildFile("Config/cartwall.json").existsAsFile(),
-                   "incluye los ajustes de emisión y la botonera, no solo la pauta");
-            expect(first.getChildFile(utf8("Templates/MAÑANA.json")).existsAsFile(), "y las plantillas del generador");
+
+            const auto manifest = juce::JSON::parse(first.getChildFile("manifest.json").loadFileAsString());
+            expectEquals(manifest["integrity"].toString(), juce::String("ok"));
+            expectEquals((int) manifest["schemaVersion"], 2);
+            expectEquals(manifest["files"][0]["sha256"].toString(), juce::SHA256(first.getChildFile("raaadio.db")).toHexString());
+            expect(PersistenceManager::verifyBackup(first).wasOk());
+            {
+                Database copy;
+                copy.open(first.getChildFile("raaadio.db").getFullPathName().toStdString());
+                expectEquals(copy.loadAdPlan().numberByTrack[a.id], 7, "la pauta va dentro de la base");
+                expectEquals(juce::String(copy.loadTemplate(juce::String::fromUTF8("MAÑANA").toStdString())), juce::String("{}"),
+                             "y las plantillas");
+            }
 
             expect(PersistenceManager::createBackup(station.snapshot(), &second).wasOk());
             expect(second != first, "dos respaldos en el mismo segundo no se pisan");
-
             expect(PersistenceManager::createBackup({}, nullptr).failed(), "sin copia de la base no hay respaldo");
+
+            // Un respaldo que cambió después de hecho (un disco que falla) ya no sirve.
+            first.getChildFile("raaadio.db").appendText("x");
+            expect(PersistenceManager::verifyBackup(first).failed());
+            expect(PersistenceManager::stageRestore(first).failed(), "no se restaura un respaldo alterado");
+            expect(!PersistenceManager::hasPendingRestore());
+            expect(PersistenceManager::findLatestVerifiedBackup(station.backups()) == second);
         }
 
-        beginTest("Se borran los respaldos de más de 30 días, dejando siempre los 10 más recientes");
+        beginTest("Retención escalonada: todos los días de dos semanas, un respaldo por semana y uno por mes");
         {
-            Station station;
-            const auto backups = station.lab.root.getChildFile("Backups");
             const juce::Time now(2026, 8, 23, 12, 0, 0, 0, true);
-            auto make = [&backups](juce::Time t) {
-                const auto folder = backups.getChildFile(t.formatted("%Y/%m/%d/%H_%M_%S"));
+            auto dayAt = [&now](int daysAgo) {
+                const auto d = now - juce::RelativeTime::days(daysAgo);
+                return juce::Time(d.getYear(), d.getMonth(), d.getDayOfMonth(), 3, 0, 0, 0, true);
+            };
+            std::vector<juce::Time> times;
+            for (int d = 0; d < 400; ++d) times.push_back(dayAt(d));  // uno por día, del más reciente al más viejo
+            std::set<size_t> pruned;
+            for (auto i : PersistenceManager::backupsToPrune(times, now)) pruned.insert(i);
+            auto kept = [&pruned](int d) { return pruned.count((size_t) d) == 0; };
+            auto lastOfMonth = [&](int d) { return d == 0 || times[(size_t) d].getMonth() != times[(size_t) d - 1].getMonth(); };
+            auto sunday = [&](int d) { return times[(size_t) d].getDayOfWeek() == 0; };
+
+            bool days = true, weeks = true, months = true, old = true;
+            for (int d = 0; d < 14; ++d) days = days && kept(d);
+            for (int d = 20; d < 50; ++d) weeks = weeks && (kept(d) == (sunday(d) || lastOfMonth(d)));
+            for (int d = 70; d < 360; ++d) months = months && (kept(d) == lastOfMonth(d));
+            for (int d = 380; d < 400; ++d) old = old && !kept(d);
+            expect(days, "las dos últimas semanas, completas");
+            expect(weeks, "hasta dos meses atrás, el último de cada semana (y de cada mes)");
+            expect(months, "hasta un año atrás, el último de cada mes");
+            expect(old, "más de un año: se borran");
+            expect(times.size() - pruned.size() < 45);
+
+            // En disco: carpetas vacías fuera, lo que no es un respaldo se deja.
+            Station station;
+            auto make = [&station](juce::Time t) {
+                const auto folder = station.backups().getChildFile(t.formatted("%Y/%m/%d/%H_%M_%S"));
                 folder.getChildFile("raaadio.db").create();
                 return folder;
             };
-
-            juce::Array<juce::File> recent, old;
-            for (int d = 1; d <= 5; ++d) recent.add(make(now - juce::RelativeTime::days(d)));
-            for (int d = 40; d <= 47; ++d) old.add(make(now - juce::RelativeTime::days(d)));
-            const auto other = backups.getChildFile("copia manual");
+            const auto recent = make(dayAt(1));
+            for (int d = 2; d <= 12; ++d) make(dayAt(d));  // más de los 10 que siempre se guardan
+            const auto veryOld = make(dayAt(390));
+            const auto other = station.backups().getChildFile("copia manual");
             other.getChildFile("raaadio.db").create();
-
-            PersistenceManager::pruneBackups(now);
-
-            bool recentKept = true;
-            for (const auto& f : recent) recentKept = recentKept && f.isDirectory();
-            expect(recentKept);
-            expect(old[0].isDirectory() && old[4].isDirectory(), "los 5 viejos más nuevos completan los 10 que se guardan");
-            expect(!old[5].exists() && !old[6].exists() && !old[7].exists(), "los más viejos se borran");
-            expect(!old[7].getParentDirectory().exists(), "sin dejar carpetas de día vacías");
-            expect(other.isDirectory(), "lo que no es un respaldo de RAAADIO no se toca");
-            expect(PersistenceManager::getLatestBackupTime() == now - juce::RelativeTime::days(1));
+            const auto partial = station.backups().getChildFile(dayAt(2).formatted("%Y/%m/%d/%H_%M_%S") + ".partial");
+            partial.createDirectory();
+            PersistenceManager::pruneBackups(station.backups(), now);
+            expect(recent.isDirectory() && !veryOld.exists() && !veryOld.getParentDirectory().exists(),
+                   "sin dejar carpetas de día vacías");
+            expect(other.isDirectory() && partial.isDirectory(), "lo que no es un respaldo de RAAADIO no se toca");
+            expect(PersistenceManager::getLatestBackupTime(station.backups()) == dayAt(1));
         }
 
-        beginTest("Restaurar se prepara ahora y se aplica al abrir la emisora, después de respaldar lo que había");
+        beginTest("Destino externo: el respaldo llega completo y verificado; la música solo suma lo nuevo y nunca borra");
         {
             Station station;
-            const auto ads = station.lab.root.getChildFile("Config/ads_data.json");
-            const auto queue = station.lab.root.getChildFile("Config/queue.json");
-            station.addTrack("ANTES");
-            ads.replaceWithText("pauta del respaldo");
-            queue.replaceWithText("cola del respaldo");
+            station.addTrack("A");
+            station.addTrack("B");
+            TempLab external;
+            juce::File backup;
+            expect(PersistenceManager::createBackup(station.snapshot(), &backup).wasOk());
+
+            const auto externalStation = PersistenceManager::getExternalStationFolder(external.root, "1a2b3c4d");
+            expectEquals(externalStation.getFileName(), juce::String("RAAADIO-1a2b3c4d"));
+            const auto externalBackups = externalStation.getChildFile("Backups");
+            expect(PersistenceManager::copyBackupTo(backup, station.backups(), externalBackups).wasOk());
+            const auto copy = externalBackups.getChildFile(backup.getRelativePathFrom(station.backups()));
+            expect(PersistenceManager::verifyBackup(copy).wasOk(), "la copia externa verifica");
+            expect(!copy.getSiblingFile(copy.getFileName() + ".partial").exists());
+            expect(PersistenceManager::copyBackupTo(backup, station.backups(), externalBackups).wasOk(), "si ya está, no se repite");
+
+            const auto music = station.lab.root.getChildFile("Library");
+            const auto mirror = externalStation.getChildFile("Library");
+            auto realHash = [](const juce::File& f) { return juce::SHA256(f).toHexString(); };
+            auto first = PersistenceManager::mirrorFolder(music, mirror, realHash, {});
+            expect(first.copied == 2 && first.failed == 0, juce::String(first.copied) + " / " + juce::String(first.failed));
+            auto second = PersistenceManager::mirrorFolder(music, mirror, realHash, {});
+            expect(second.copied == 0 && second.unchanged == 2, "lo que ya está no se copia de nuevo");
+
+            station.addTrack("C");
+            music.getChildFile("GENERAL/A.ogg").deleteFile();
+            auto third = PersistenceManager::mirrorFolder(music, mirror, realHash, {});
+            expectEquals(third.copied, 1);
+            expect(mirror.getChildFile("GENERAL/A.ogg").existsAsFile(), "lo borrado en la emisora sigue en la copia");
+
+            // Una copia que no coincide con el hash de la base no se da por buena.
+            music.getChildFile("GENERAL/D.ogg").replaceWithText("audio de D");
+            auto bad = PersistenceManager::mirrorFolder(music, mirror, [](const juce::File& f) {
+                return f.getFileName() == "D.ogg" ? juce::String("0000") : juce::String();
+            }, {});
+            expect(bad.failed == 1 && bad.failures.contains("GENERAL" + juce::File::getSeparatorString() + "D.ogg"), bad.failures.joinIntoString(","));
+            expect(!mirror.getChildFile("GENERAL/D.ogg").exists() && !mirror.getChildFile("GENERAL/D.ogg.partial").exists());
+
+            auto cancelled = PersistenceManager::mirrorFolder(music, mirror, {}, [] { return false; });
+            expect(cancelled.cancelled);
+        }
+
+        beginTest("Una base dañada se reemplaza al abrir por el último respaldo verificado; la dañada se guarda aparte");
+        {
+            Station station;
+            station.addTrack("BUENA");
+            expect(PersistenceManager::createBackup(station.snapshot()).wasOk());
+            station.library = nullptr;
+
+            expect(!PersistenceManager::checkDatabase(station.dbFile()).damaged, "una base sana no se toca");
+            corrupt(station.dbFile());
+            const auto health = PersistenceManager::checkDatabase(station.dbFile());
+            expect(health.damaged && health.recovered, health.problem);
+            expect(health.damagedCopy.existsAsFile() && health.damagedCopy.getFileName().startsWith("raaadio.db.damaged-"));
+            station.open();
+            expect(station.titles() == juce::StringArray { "BUENA" });
+
+            Station unprotected;  // sin respaldos
+            unprotected.addTrack("UNICA");
+            unprotected.library = nullptr;
+            corrupt(unprotected.dbFile());
+            const auto alone = PersistenceManager::checkDatabase(unprotected.dbFile());
+            expect(alone.damaged && !alone.recovered, "sin respaldo verificado se deja como está y se avisa");
+            expect(unprotected.dbFile().existsAsFile());
+
+            // Si el único respaldo es de una versión anterior, la pauta que trae en archivos
+            // también vuelve (la base del respaldo la importa al abrirse).
+            Station legacy;
+            const auto spot = legacy.addTrack("CUNA");
+            const auto oldBackup = legacy.backups().getChildFile("2026/09/20/10_00_00");
+            oldBackup.createDirectory();
+            expect(legacy.library->backupDatabaseTo(oldBackup.getChildFile("raaadio.db")));
+            sqlite3* raw = nullptr;
+            sqlite3_open(oldBackup.getChildFile("raaadio.db").getFullPathName().toRawUTF8(), &raw);
+            sqlite3_exec(raw, "PRAGMA user_version = 1;", nullptr, nullptr, nullptr);
+            sqlite3_close(raw);
+            oldBackup.getChildFile("Config").createDirectory();
+            oldBackup.getChildFile("Config/ads_data.json").replaceWithText(
+                "{ \"assignments\": [ { \"tid\": " + juce::String(spot.id) + ", \"num\": 6 } ] }");
+            legacy.library = nullptr;
+            corrupt(legacy.dbFile());
+            expect(PersistenceManager::checkDatabase(legacy.dbFile()).recovered);
+            legacy.open();
+            const auto recoveredPlan = legacy.library->getDatabase().loadAdPlan();
+            expect(recoveredPlan.numberByTrack.count(spot.id) == 1 && recoveredPlan.numberByTrack.at(spot.id) == 6,
+                   "la pauta del respaldo anterior también se recupera");
+        }
+
+        beginTest("Restaurar trae la base del respaldo; la cola y las tandas ya insertadas quedan como estaban");
+        {
+            Station station;
+            const auto before = station.addTrack("ANTES");
+            station.library->withDatabase([&before](Database& db) {
+                Database::AdPlan plan;
+                plan.numberByTrack[before.id] = 5;
+                return db.saveAdPlan(plan) && db.saveQueue({ { before.id, {} } }) && db.saveAdBreaksDone({ "2026-09-23 12:00" });
+            });
             juce::File backup;
             expect(PersistenceManager::createBackup(station.snapshot(), &backup).wasOk());
 
             // Después del respaldo la emisora siguió.
-            station.addTrack("DESPUES");
-            ads.replaceWithText("pauta nueva");
-            queue.replaceWithText("cola actual");
+            const auto after = station.addTrack("DESPUES");
+            station.library->withDatabase([&before, &after](Database& db) {
+                Database::AdPlan plan;
+                plan.numberByTrack[before.id] = 9;
+                return db.saveAdPlan(plan) && db.saveQueue({ { before.id, {} }, { after.id, {} } })
+                    && db.saveAdBreaksDone({ "2026-09-23 12:00", "2026-09-23 13:00" });
+            });
 
             expect(PersistenceManager::stageRestore(backup).wasOk());
             expect(PersistenceManager::hasPendingRestore());
             expect(station.titles() == juce::StringArray { "ANTES", "DESPUES" }, "la emisora en marcha no cambia");
-
-            // Al cerrar, la app guarda la pauta que tiene en memoria: antes esto deshacía la restauración.
-            ads.replaceWithText("pauta guardada al cerrar");
             station.library = nullptr;
 
-            expect(PersistenceManager::applyPendingRestore().wasOk());
+            juce::File previous;
+            expect(PersistenceManager::applyPendingRestore(&previous).wasOk());
             expect(!PersistenceManager::hasPendingRestore());
-            station.open();
-            expect(station.titles() == juce::StringArray { "ANTES" });
-            expectEquals(ads.loadFileAsString(), juce::String("pauta del respaldo"), "la pauta restaurada queda");
-            expectEquals(queue.loadFileAsString(), juce::String("cola actual"), "la cola es del momento: no se restaura");
+            expect(titlesIn(previous) == juce::StringArray { "ANTES", "DESPUES" }, "lo que había quedó respaldado");
 
-            // Lo que había antes de restaurar quedó en un respaldo.
-            bool previousSaved = false;
-            for (const auto& db : station.lab.root.getChildFile("Backups").findChildFiles(juce::File::findFiles, true, "raaadio.db"))
-                previousSaved = previousSaved || titlesIn(db) == juce::StringArray { "ANTES", "DESPUES" };
-            expect(previousSaved);
+            station.open();
+            station.library->withDatabase([&previous](Database& db) { return db.carryOverLiveState(previous); });
+            expect(station.titles() == juce::StringArray { "ANTES" });
+            auto& db = station.library->getDatabase();
+            expectEquals(db.loadAdPlan().numberByTrack[before.id], 5, "la pauta es la del respaldo");
+            const auto queue = db.loadQueue();
+            expect(queue.size() == 1 && queue[0].trackId == before.id, "la cola es la del momento, sin pistas que no existen");
+            expect(db.loadAdBreaksDone().count("2026-09-23 13:00") == 1, "las tandas ya insertadas no se repiten");
         }
 
-        beginTest("Solo se prepara una restauración desde un respaldo válido; los de versiones anteriores sirven");
+        beginTest("Los respaldos de versiones anteriores (con la pauta en un archivo) se restauran e importan");
         {
             Station station;
             TempLab outside;
@@ -1719,15 +1865,28 @@ public:
             expect(PersistenceManager::stageRestore(outside.root).failed(), "un archivo que no es SQLite");
             expect(!PersistenceManager::hasPendingRestore());
 
-            // Formato anterior: raaadio.db y ads_data.json juntos, sin carpeta Config.
-            station.addTrack("VIEJA");
+            // Formato anterior: base del esquema 1 y ads_data.json junto a ella, sin manifiesto.
+            const auto old = station.addTrack("VIEJA");
             outside.root.getChildFile("raaadio.db").deleteFile();
             expect(station.library->backupDatabaseTo(outside.root.getChildFile("raaadio.db")));
-            outside.root.getChildFile("ads_data.json").replaceWithText("pauta vieja");
+            sqlite3* raw = nullptr;
+            sqlite3_open(outside.root.getChildFile("raaadio.db").getFullPathName().toRawUTF8(), &raw);
+            sqlite3_exec(raw, "PRAGMA user_version = 1;", nullptr, nullptr, nullptr);
+            sqlite3_close(raw);
+            outside.root.getChildFile("ads_data.json").replaceWithText(
+                "{ \"assignments\": [ { \"tid\": " + juce::String(old.id) + ", \"num\": 4 } ], "
+                "\"schedules\": [ { \"num\": 4, \"times\": [ \"08:00\" ] } ], \"autoSchedule\": true }");
+
             expect(PersistenceManager::stageRestore(outside.root).wasOk());
             station.library = nullptr;
             expect(PersistenceManager::applyPendingRestore().wasOk());
-            expectEquals(station.lab.root.getChildFile("Config/ads_data.json").loadFileAsString(), juce::String("pauta vieja"));
+            station.open();
+
+            const auto plan = station.library->getDatabase().loadAdPlan();
+            expectEquals(plan.numberByTrack.count(old.id) ? plan.numberByTrack.at(old.id) : -1, 4);
+            expect(plan.autoSchedule && plan.slotsByNumber.count(4) && plan.slotsByNumber.at(4) == std::vector<std::string> { "08:00" });
+            expect(station.lab.root.getChildFile("Config/ads_data.json.migrated").existsAsFile()
+                   && !station.lab.root.getChildFile("Config/ads_data.json").exists(), "el archivo queda como constancia");
         }
 
         beginTest("Mover la emisora copia todo a la carpeta nueva; si no está vacía o se cancela, no se usa");
@@ -1735,9 +1894,9 @@ public:
             Station station;
             station.addTrack("A");
             station.lab.touch("Recordings/2026/09/23/programa.wav");
-            station.lab.touch("Config/station.json");
             station.lab.touch("Backups/2026/09/22/08_00_00/raaadio.db");
             station.lab.touch("Logs/raaadio.log");
+            station.lab.touch("raaadio.lock");
 
             TempLab destination;
             const auto target = PersistenceManager::labFolderFor(destination.root);
@@ -1748,9 +1907,10 @@ public:
             expect(PersistenceManager::containsStation(target));
             expect(titlesIn(target.getChildFile("Database/raaadio.db")) == juce::StringArray { "A" });
             expect(target.getChildFile("Library/GENERAL/A.ogg").existsAsFile() && target.getChildFile("Recordings/2026/09/23/programa.wav").existsAsFile()
-                   && target.getChildFile("Config/station.json").existsAsFile() && target.getChildFile("Backups/2026/09/22/08_00_00/raaadio.db").existsAsFile(),
-                   "música, grabaciones, ajustes y respaldos");
+                   && target.getChildFile("Backups/2026/09/22/08_00_00/raaadio.db").existsAsFile(),
+                   "música, grabaciones y respaldos");
             expect(!target.getChildFile("Logs/raaadio.log").exists(), "el registro de la app no hace falta");
+            expect(!target.getChildFile("raaadio.lock").exists(), "el candado es de este equipo");
             expect(skipped.isEmpty());
             expectWithinAbsoluteError(lastProgress, 1.0, 1.0e-9);
 
@@ -1934,7 +2094,6 @@ public:
         const auto file = writeWav(fx.lab.root.getChildFile("Library/IDS/CORTINILLA.wav"), 6.0, toneBetween({ { 0.5, 5.0 } }));
         fx.library.processAndAddTrack(file);
         const auto jingle = fx.library.search("", "").front();
-        const auto stateFile = fx.lab.root.getChildFile("Config/cartwall.json");
 
         juce::AudioFormatManager formats;
         formats.registerBasicFormats();
@@ -1942,7 +2101,7 @@ public:
         beginTest("Un cartucho suena directo al aire, por encima de los decks");
         {
             AudioEngine engine(fx.library, false);
-            CartPlayer carts(fx.library, formats, stateFile);
+            CartPlayer carts(fx.library, formats);
             auto& mixer = engine.getMixer();
             mixer.setCartSource(&carts);
             mixer.prepareToPlay(512, 44100.0);
@@ -1980,7 +2139,7 @@ public:
             fx.library.getDatabase().addTrack(makeTrack(legacyFile.getFullPathName(), "RAAADIO", "VIEJA"));
             const auto legacy = fx.library.getTrackByPath(legacyFile.getFullPathName());
 
-            CartPlayer carts(fx.library, formats, fx.lab.root.getChildFile("Config/otra_botonera.json"));
+            CartPlayer carts(fx.library, formats, false);  // de prueba: no pisa la botonera guardada
             expect(carts.assignFromLibrary(0, legacy));
             expectWithinAbsoluteError(carts.getRemainingSeconds(0), 3.04, 0.05, "se analiza al asignarla: arranca en su punto de entrada");
             expectEquals(fx.library.getTrackByPath(legacyFile.getFullPathName()).analysisVersion, TrackAnalyzer::version);
@@ -1988,13 +2147,13 @@ public:
 
         beginTest("La botonera se recuerda al reiniciar");
         {
-            CartPlayer restored(fx.library, formats, stateFile);
+            CartPlayer restored(fx.library, formats);
             expect(restored.isAssigned(3));
             expectEquals(restored.getTrack(3).id, jingle.id);
             expect(!restored.isAssigned(0));
 
             restored.clear(3);
-            CartPlayer cleared(fx.library, formats, stateFile);
+            CartPlayer cleared(fx.library, formats);
             expect(!cleared.isAssigned(3), "quitar también se guarda");
         }
     }
@@ -2328,55 +2487,72 @@ class StationSettingsTests : public juce::UnitTest
 public:
     StationSettingsTests() : juce::UnitTest("Ajustes de emisión", "RAAADIO") {}
 
+    static juce::String storedText(MusicLibrary& library)
+    {
+        return juce::String(library.withDatabase([](Database& db) { return db.getSetting("station"); }));
+    }
+
+    static void store(MusicLibrary& library, const juce::String& json)
+    {
+        library.withDatabase([&json](Database& db) { return db.setSetting("station", json.toStdString()); });
+    }
+
     void runTest() override
     {
-        beginTest("Se guardan y se leen; los valores fuera de rango se corrigen");
-        TempLab lab;
-        const auto file = lab.root.getChildFile("Config/station.json");
+        beginTest("Se guardan en la base y se leen; los valores fuera de rango se corrigen");
         {
-            StationConfig config(file);
-            auto s = config.get();
-            expect(s.deadAirEnabled && s.deadAirSeconds == 20 && !s.streamEnabled, "valores por defecto");
-            s.deadAirSeconds = 45;
-            s.airLogEnabled = true;
-            s.streamHost = "radio.example.org";
-            s.streamPassword = juce::String::fromUTF8("contraseña");
-            config.set(s);
-        }
-        StationConfig reopened(file);
-        expectEquals(reopened.get().deadAirSeconds, 45);
-        expect(reopened.get().airLogEnabled);
-        expectEquals(reopened.get().streamHost, juce::String("radio.example.org"));
-        expectEquals(reopened.get().streamPassword, juce::String::fromUTF8("contraseña"));
+            LibraryFixture fx;
+            {
+                StationConfig config(&fx.library);
+                auto s = config.get();
+                expect(s.deadAirEnabled && s.deadAirSeconds == 20 && !s.streamEnabled, "valores por defecto");
+                expect(s.backupEnabled && s.backupHour == 3 && s.backupExternalFolder.isEmpty() && s.backupMirrorLibrary,
+                       "respaldo diario a las 03:00, sin destino externo");
+                s.deadAirSeconds = 45;
+                s.airLogEnabled = true;
+                s.streamHost = "radio.example.org";
+                s.streamPassword = juce::String::fromUTF8("contraseña");
+                s.backupHour = 22;
+                s.backupExternalFolder = "F:\\Respaldos";
+                s.backupMirrorLibrary = false;
+                config.set(s);
+            }
+            StationConfig reopened(&fx.library);
+            expectEquals(reopened.get().deadAirSeconds, 45);
+            expect(reopened.get().airLogEnabled);
+            expectEquals(reopened.get().streamHost, juce::String("radio.example.org"));
+            expectEquals(reopened.get().streamPassword, juce::String::fromUTF8("contraseña"));
+            expectEquals(reopened.get().backupHour, 22);
+            expectEquals(reopened.get().backupExternalFolder, juce::String("F:\\Respaldos"));
+            expect(!reopened.get().backupMirrorLibrary);
 
-       #if JUCE_WINDOWS
-        expect(!file.loadFileAsString().contains(juce::String::fromUTF8("contraseña")), "la clave no queda en claro en el archivo");
-        expect(!file.loadFileAsString().contains("streamPassword\""), "ni con el nombre de antes");
-       #endif
+           #if JUCE_WINDOWS
+            expect(!storedText(fx.library).contains(juce::String::fromUTF8("contraseña")), "la clave no queda en claro en la base");
+            expect(!storedText(fx.library).contains("streamPassword\""), "ni con el nombre de antes");
+           #endif
+        }
 
         beginTest("Clave: la de versiones anteriores se cifra al abrir; la de otro equipo se conserva hasta reescribirla");
         {
-            TempLab other;
-            const auto legacy = other.root.getChildFile("legacy.json");
-            legacy.replaceWithText(R"({ "streamHost": "radio.example.org", "streamPassword": "vieja" })");
-            StationConfig fromLegacy(legacy);
+            LibraryFixture fx;
+            store(fx.library, R"({ "streamHost": "radio.example.org", "streamPassword": "vieja" })");
+            StationConfig fromLegacy(&fx.library);
             expectEquals(fromLegacy.get().streamPassword, juce::String("vieja"));
            #if JUCE_WINDOWS
-            expect(!legacy.loadFileAsString().contains("vieja"), "se reescribe cifrada enseguida");
+            expect(!storedText(fx.library).contains("vieja"), "se reescribe cifrada enseguida");
            #endif
 
-            const auto moved = other.root.getChildFile("moved.json");
-            moved.replaceWithText(R"({ "streamHost": "radio.example.org", "streamPasswordProtected": "dpapi:AAAAAAAA" })");
-            StationConfig fromOtherPc(moved);
+            store(fx.library, R"({ "streamHost": "radio.example.org", "streamPasswordProtected": "dpapi:AAAAAAAA" })");
+            StationConfig fromOtherPc(&fx.library);
             expect(fromOtherPc.get().streamPassword.isEmpty() && fromOtherPc.get().isStreamPasswordUnreadable(),
                    "cifrada en otro equipo: hay que volver a escribirla");
             auto changed = fromOtherPc.get();
             changed.deadAirSeconds = 30;
             fromOtherPc.set(changed);
-            expect(moved.loadFileAsString().contains("dpapi:AAAAAAAA"), "guardar otro ajuste no la borra");
+            expect(storedText(fx.library).contains("dpapi:AAAAAAAA"), "guardar otro ajuste no la borra");
             changed.streamPassword = "nueva";
             fromOtherPc.set(changed);
-            StationConfig reread(moved);
+            StationConfig reread(&fx.library);
             expectEquals(reread.get().streamPassword, juce::String("nueva"));
             expect(!reread.get().isStreamPasswordUnreadable());
 
@@ -2387,10 +2563,9 @@ public:
 
         beginTest("Formato, datos de la emisora y envío de lo que suena; las emisoras de antes siguen en Ogg");
         {
-            TempLab other;
-            const auto stationFile = other.root.getChildFile("station.json");
+            LibraryFixture fx;
             {
-                StationConfig config(stationFile);
+                StationConfig config(&fx.library);
                 expect(config.get().streamFormat == StationSettings::StreamFormat::Mp3, "una emisora nueva transmite en MP3");
                 expectEquals(config.get().streamBitrate, 128);
                 auto s = config.get();
@@ -2404,7 +2579,7 @@ public:
                 s.nowPlayingPushUrl = "https://radio.example.org/ahora.php";
                 config.set(s);
             }
-            StationConfig reread(stationFile);
+            StationConfig reread(&fx.library);
             const auto& r = reread.get();
             expect(r.streamFormat == StationSettings::StreamFormat::OggVorbis);
             expectEquals(r.streamBitrate, 192);
@@ -2421,9 +2596,10 @@ public:
             const auto withoutServer = StationSettings::fromVar(juce::JSON::parse(R"({ "deadAirSeconds": 30 })"));
             expect(withoutServer.streamFormat == StationSettings::StreamFormat::Mp3, "sin servidor configurado, MP3");
 
-            const auto clamped = StationSettings::fromVar(juce::JSON::parse(R"({ "streamBitrate": 999, "streamMetadataDelay": -5 })"));
+            const auto clamped = StationSettings::fromVar(juce::JSON::parse(R"({ "streamBitrate": 999, "streamMetadataDelay": -5, "backupHour": 30 })"));
             expectEquals(clamped.streamBitrate, 320);
             expectEquals(clamped.streamMetadataDelay, 0);
+            expectEquals(clamped.backupHour, 23);
 
             expect(NowPlayingPublisher::isValidPushUrl("https://radio.example.org/ahora.php"));
             expect(!NowPlayingPublisher::isValidPushUrl("radio.example.org") && !NowPlayingPublisher::isValidPushUrl("ftp://x.org/a")
@@ -2666,6 +2842,265 @@ public:
 };
 
 //==============================================================================
+class StationDataTests : public juce::UnitTest
+{
+public:
+    StationDataTests() : juce::UnitTest("Estado de la emisora en la base de datos", "RAAADIO") {}
+
+    void runTest() override
+    {
+        beginTest("Al abrir una emisora de una versión anterior, sus archivos pasan a la base una sola vez");
+        {
+            TempLab lab;
+            PersistenceManager::setLabRootOverride(lab.root);
+            const auto dbFile = lab.root.getChildFile("Database/raaadio.db");
+            dbFile.getParentDirectory().createDirectory();
+            TrackInfo a, b, c;
+            {
+                MusicLibrary library;
+                library.initialise(dbFile);
+                for (auto* name : { "A", "B", "C" }) {
+                    const auto file = lab.touch(juce::String("Library/") + name + ".ogg");
+                    library.getDatabase().addTrack(makeTrack(file.getFullPathName(), "ARTISTA", name));
+                }
+                a = library.getTrackByPath(lab.root.getChildFile("Library/A.ogg").getFullPathName());
+                b = library.getTrackByPath(lab.root.getChildFile("Library/B.ogg").getFullPathName());
+                c = library.getTrackByPath(lab.root.getChildFile("Library/C.ogg").getFullPathName());
+            }
+            // Así quedaba una emisora de una versión anterior: esquema 1 y los datos en archivos.
+            sqlite3* raw = nullptr;
+            sqlite3_open(dbFile.getFullPathName().toRawUTF8(), &raw);
+            sqlite3_exec(raw, "PRAGMA user_version = 1;", nullptr, nullptr, nullptr);
+            sqlite3_close(raw);
+
+            const auto id = [](const TrackInfo& t) { return juce::String(t.id); };
+            lab.root.getChildFile("Config").createDirectory();
+            lab.root.getChildFile("Config/ads_data.json").replaceWithText(
+                "{ \"assignments\": [ { \"tid\": " + id(a) + ", \"num\": 3 }, { \"tid\": 9999, \"num\": 4 } ], "
+                "\"schedules\": [ { \"num\": 3, \"times\": [ \"07:00\", \"12:00\" ] } ], \"autoSchedule\": true }");
+            lab.root.getChildFile("Config/queue.json").replaceWithText(
+                "{ \"tracks\": [ { \"id\": " + id(b) + " }, { \"id\": 424242, \"path\": \""
+                + juce::String(c.path).replace("\\", "\\\\") + "\" }, { \"id\": " + id(a) + ", \"break\": \"2026-09-23 12:00\" } ] }");
+            lab.root.getChildFile("Config/cartwall.json").replaceWithText("[ -1, " + id(c) + ", 9999 ]");
+            lab.root.getChildFile("Config/ad_breaks_done.json").replaceWithText("[ \"2026-09-23 12:00\" ]");
+            lab.root.getChildFile("Config/station.json").replaceWithText(R"({ "streamHost": "radio.example.org", "streamName": "RADIO VIEJA" })");
+            lab.root.getChildFile("Templates").createDirectory();
+            lab.root.getChildFile(juce::String::fromUTF8("Templates/MAÑANA.json")).replaceWithText(juce::JSON::toString(GeneratorSettings().toVar()));
+            lab.root.getChildFile("Templates/ROTA.json").replaceWithText("esto no es JSON");
+
+            MusicLibrary library;
+            library.initialise(dbFile);
+            auto& db = library.getDatabase();
+            expectEquals(db.getSchemaVersion(), 2);
+
+            AdvertisingManager ads;
+            ads.initialise(library);
+            expectEquals(ads.getCueNumber(a.id), 3);
+            expectEquals(ads.getCueNumber(9999), -1, "una pista que ya no existe no entra a la pauta");
+            expect(ads.getSchedules(3) == juce::StringArray { "07:00", "12:00" } && ads.isAutoScheduleEnabled());
+
+            Playlist playlist;
+            PlaylistStore store(playlist, library);
+            expectEquals(store.restore(), 3);
+            const auto queue = playlist.getQueue();
+            expect(queue.size() == 3 && queue[0].id == b.id && queue[1].id == c.id && queue[2].id == a.id,
+                   "en orden; la pista que cambió de id se reconoce por la ruta");
+            if (queue.size() == 3) expectEquals(juce::String(queue[2].breakKey), juce::String("2026-09-23 12:00"));
+
+            const auto carts = db.loadCartwall(CartPlayer::numCarts);
+            expect(carts[0] == -1 && carts[1] == c.id && carts[2] == -1, "la botonera, sin la pista que no existe");
+            expect(db.loadAdBreaksDone().count("2026-09-23 12:00") == 1);
+
+            StationConfig station(&library);
+            expectEquals(station.get().streamName, juce::String("RADIO VIEJA"));
+            expect(station.get().streamFormat == StationSettings::StreamFormat::OggVorbis, "ya transmitía: sigue en Ogg");
+
+            TemplateManager templates(library);
+            expect(templates.getTemplateNames().contains(juce::String::fromUTF8("MAÑANA")) && !templates.getTemplateNames().contains("ROTA"));
+
+            const auto config = lab.root.getChildFile("Config");
+            expect(config.getChildFile("ads_data.json.migrated").existsAsFile() && !config.getChildFile("ads_data.json").exists(),
+                   "los archivos quedan como constancia, sin volver a leerse");
+            expect(lab.root.getChildFile("Templates/ROTA.json.unreadable").existsAsFile(), "uno ilegible se aparta, no se pierde");
+
+            // Una sola vez: un archivo nuevo en Config ya no se importa.
+            config.getChildFile("ads_data.json").replaceWithText("{ \"assignments\": [ { \"tid\": " + id(a) + ", \"num\": 9 } ] }");
+            MusicLibrary reopened;
+            reopened.initialise(dbFile);
+            AdvertisingManager again;
+            again.initialise(reopened);
+            expectEquals(again.getCueNumber(a.id), 3);
+        }
+
+        beginTest("Borrar una pista la quita de la pauta, la cola y la botonera; guardar después la omite sin fallar");
+        {
+            LibraryFixture fx;
+            const auto a = fx.add("Library/A.ogg", "A");
+            const auto b = fx.add("Library/B.ogg", "B");
+            auto& db = fx.library.getDatabase();
+            Database::AdPlan plan;
+            plan.numberByTrack = { { a.id, 1 }, { b.id, 2 } };
+            expect(db.saveAdPlan(plan) && db.saveQueue({ { a.id, {} }, { b.id, {} } }) && db.saveCartwall({ a.id, -1, b.id }));
+
+            fx.library.deleteTrack(a.id, false);
+            expect(db.loadAdPlan().numberByTrack.count(a.id) == 0 && db.loadAdPlan().numberByTrack.count(b.id) == 1);
+            expect(db.loadQueue().size() == 1 && db.loadQueue()[0].trackId == b.id);
+            const auto carts = db.loadCartwall(3);
+            expect(carts[0] == -1 && carts[2] == b.id);
+
+            // Lo que hay en memoria todavía la nombra: se guarda lo demás.
+            expect(db.saveQueue({ { a.id, {} }, { b.id, "2026-09-23 12:00" } }));
+            expect(db.loadQueue().size() == 1 && db.loadQueue()[0].breakKey == "2026-09-23 12:00");
+            expect(db.saveAdPlan(plan));
+            expect(db.loadAdPlan().numberByTrack.size() == 1);
+        }
+
+        beginTest("Plantillas con cualquier nombre; identificador de la emisora estable; base sana");
+        {
+            LibraryFixture fx;
+            TemplateManager templates(fx.library);
+            GeneratorSettings settings;
+            settings.targetDurationVal = 95;
+            const auto name = juce::String::fromUTF8("MAÑANA / TARDE: 2");
+            templates.saveTemplate(name, settings);
+            expect(templates.getTemplateNames().contains(name), "barras y dos puntos no son un problema");
+            expectEquals(templates.loadTemplate(name).targetDurationVal, 95);
+            templates.deleteTemplate(name);
+            expect(templates.getTemplateNames().isEmpty());
+
+            auto& db = fx.library.getDatabase();
+            const auto id = db.getStationId();
+            expect(id.size() == 8 && db.getStationId() == id);
+            expectEquals(juce::String(db.quickCheck()), juce::String("ok"));
+        }
+    }
+};
+
+//==============================================================================
+class StationSafetyTests : public juce::UnitTest
+{
+public:
+    StationSafetyTests() : juce::UnitTest("Respaldo programado, candado y alertas", "RAAADIO") {}
+
+    void runTest() override
+    {
+        beginTest("El respaldo diario toca a su hora, y al abrir si esa hora pasó sin respaldo");
+        {
+            auto at = [](int day, int h, int m) { return juce::Time(2026, 8, day, h, m, 0, 0, true); };
+            expect(BackupService::lastScheduledTime(at(23, 11, 0), 3) == at(23, 3, 0));
+            expect(BackupService::lastScheduledTime(at(23, 2, 0), 3) == at(22, 3, 0), "antes de la hora, la de ayer");
+            expect(BackupService::isDue(at(23, 11, 0), 3, at(22, 11, 0)), "abrió a las 11: el de las 3 no se hizo");
+            expect(!BackupService::isDue(at(23, 11, 0), 3, at(23, 3, 1)));
+            expect(!BackupService::isDue(at(23, 2, 0), 3, at(22, 11, 0)), "todavía no son las 3");
+            expect(BackupService::isDue(at(23, 3, 0), 3, at(22, 11, 0)));
+            expect(BackupService::isDue(at(23, 3, 0), 3, juce::Time()), "sin ningún respaldo");
+        }
+
+        beginTest("Respaldar ahora: la base aquí y en el destino externo, con la música");
+        {
+            TempLab lab, external;
+            PersistenceManager::setLabRootOverride(lab.root);
+            lab.root.getChildFile("Database").createDirectory();
+            MusicLibrary library;
+            library.initialise(lab.root.getChildFile("Database/raaadio.db"));
+            const auto song = lab.touch("Library/GENERAL/uno.ogg");
+            library.getDatabase().addTrack(makeTrack(song.getFullPathName(), "A", "UNO"));
+
+            StationConfig station(&library);
+            auto s = station.get();
+            s.backupExternalFolder = external.root.getFullPathName();
+            station.set(s);
+
+            BackupService service(library, station);
+            service.runNow();
+            for (int i = 0; i < 500 && service.getStatus().running; ++i)
+                juce::Thread::sleep(20);
+            const auto status = service.getStatus();
+            expect(!status.running && status.lastOk && status.externalOk, status.lastError + status.externalError);
+            expect(PersistenceManager::getLatestBackupTime().toMilliseconds() > 0);
+            const auto folder = service.getExternalStationFolder();
+            expect(folder.getChildFile("Library/GENERAL/uno.ogg").existsAsFile(), "la música quedó en el destino");
+            expect(PersistenceManager::findLatestVerifiedBackup(folder.getChildFile("Backups")) != juce::File(),
+                   "y un respaldo verificado");
+            expectEquals(status.mirror.copied, 1);
+
+            // Un destino que no está (un USB desconectado) queda como error, sin afectar lo local.
+            s.backupExternalFolder = external.root.getChildFile("no_existe").getFullPathName();
+            station.set(s);
+            service.runNow();
+            for (int i = 0; i < 500 && service.getStatus().running; ++i)
+                juce::Thread::sleep(20);
+            expect(service.getStatus().lastOk && !service.getStatus().externalOk);
+        }
+
+        beginTest("Candado: otro equipo con la emisora abierta se detecta; un latido viejo o de este equipo, no");
+        {
+            TempLab lab;
+            StationLock lock(lab.root);
+            expect(!lock.otherOwner().has_value(), "sin candado");
+
+            const auto now = juce::Time::getCurrentTime();
+            lab.root.getChildFile("raaadio.lock").replaceWithText(StationLock::describe({ "CABINA-2", "operador", now }));
+            const auto other = lock.otherOwner(now);
+            expect(other.has_value() && other->computer == "CABINA-2" && other->user == "operador");
+            expect(!lock.otherOwner(now + juce::RelativeTime::minutes(5)).has_value(), "se cerró mal hace rato: se toma");
+
+            lab.root.getChildFile("raaadio.lock").replaceWithText(StationLock::describe({ StationLock::thisComputer(), "yo", now }));
+            expect(!lock.otherOwner(now).has_value(), "el de este equipo (quedó de un cierre inesperado)");
+
+            lock.acquire();
+            expect(StationLock::parse(lab.root.getChildFile("raaadio.lock").loadFileAsString())->computer == StationLock::thisComputer());
+            lock.release();
+            expect(!lab.root.getChildFile("raaadio.lock").exists(), "al cerrar se libera");
+            expect(!StationLock::parse("basura").has_value());
+        }
+
+        beginTest("Alertas: disco casi lleno y respaldos atrasados o fallidos");
+        {
+            using namespace StationHealth;
+            const juce::int64 gb = (juce::int64) 1 << 30;
+            expect(diskLevel(500 * gb, 1000 * gb) == Level::Ok);
+            expect(diskLevel(4 * gb, 1000 * gb) == Level::Warning);
+            expect(diskLevel(20 * gb, 1000 * gb) == Level::Warning, "menos del 5 %");
+            expect(diskLevel(gb / 2, 1000 * gb) == Level::Critical);
+            expect(diskLevel(-1, -1) == Level::Ok, "si no se sabe, no se alarma");
+
+            Inputs in;
+            in.now = juce::Time(2026, 8, 23, 12, 0, 0, 0, true);
+            in.diskFree = 500 * gb;
+            in.diskTotal = 1000 * gb;
+            in.latestBackup = in.now - juce::RelativeTime::hours(9);
+            expect(evaluate(in).level == Level::Ok);
+
+            in.latestBackup = in.now - juce::RelativeTime::hours(40);
+            expect(evaluate(in).level == Level::Warning && evaluate(in).text == TRANS("health_backup_old"));
+            in.backupEnabled = false;
+            expect(evaluate(in).level == Level::Ok, "con el respaldo automático apagado no se reclama");
+
+            in.backupEnabled = true;
+            in.latestBackup = in.now;
+            in.externalConfigured = in.externalAttempted = true;
+            in.externalOk = false;
+            in.externalError = "sin USB";
+            in.diskFree = gb / 4;
+            const auto alert = evaluate(in);
+            expect(alert.level == Level::Critical && alert.text == TRANS("health_disk_full"), "lo más grave manda");
+            expectEquals(alert.details.size(), 2, "el detalle trae las dos");
+        }
+
+        beginTest("La carpeta Recordings/Registro pasa a Recordings/AirLog");
+        {
+            TempLab lab;
+            PersistenceManager::setLabRootOverride(lab.root);
+            lab.touch("Recordings/Registro/2026/09/23/10.ogg");
+            PersistenceManager::migrateLegacyFolders();
+            expect(PersistenceManager::getAirLogFolder().getChildFile("2026/09/23/10.ogg").existsAsFile());
+            expect(!lab.root.getChildFile("Recordings/Registro").exists());
+        }
+    }
+};
+
+//==============================================================================
 
 static PortablePathTests portablePathTests;
 static PlayLogTests playLogTests;
@@ -2687,6 +3122,8 @@ static CartwallTests cartwallTests;
 static StreamingTests streamingTests;
 static StationSettingsTests stationSettingsTests;
 static NowPlayingTests nowPlayingTests;
+static StationDataTests stationDataTests;
+static StationSafetyTests stationSafetyTests;
 
 #if JUCE_WINDOWS
 extern "C" __declspec(dllimport) int __stdcall SetConsoleOutputCP(unsigned int codePage);

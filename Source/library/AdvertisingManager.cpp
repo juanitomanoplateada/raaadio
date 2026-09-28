@@ -1,6 +1,7 @@
  
 
 #include "AdvertisingManager.h"
+#include "MusicLibrary.h"
 
 AdvertisingManager::AdvertisingManager()
 {
@@ -8,106 +9,42 @@ AdvertisingManager::AdvertisingManager()
 
 AdvertisingManager::~AdvertisingManager()
 {
-    saveData();
 }
 
-void AdvertisingManager::initialise(const juce::File& dataFile)
+void AdvertisingManager::initialise(MusicLibrary& lib)
 {
-    persistenceFile = dataFile;
+    library = &lib;
     loadData();
 }
 
 void AdvertisingManager::loadData()
 {
     juce::ScopedLock sl(dataLock);
-    
-    if (!persistenceFile.exists())
-        return;
+    if (library == nullptr) return;
 
-    auto json = juce::JSON::parse(persistenceFile);
-    if (!json.isObject())
-        return;
-
-     
-    auto assignments = json["assignments"];
-    if (assignments.isArray())
-    {
-        for (auto& item : *assignments.getArray())
-        {
-            if (item.hasProperty("tid") && item.hasProperty("num"))
-            {
-                int tid = item["tid"];
-                int num = item["num"];
-                if (num >= 0 && num <= 99)
-                    trackToNumber[tid] = num;
-            }
-        }
-    }
-
-     
-    autoSchedule = (bool) json.getProperty("autoSchedule", false);
-
-    auto schedules = json["schedules"];
-    if (schedules.isArray())
-    {
-        for (auto& item : *schedules.getArray())
-        {
-            if (item.hasProperty("num") && item.hasProperty("times"))
-            {
-                int num = item["num"];
-                auto times = item["times"];
-                if (times.isArray())
-                {
-                    juce::StringArray sa;
-                    for (auto& t : *times.getArray())
-                        sa.add(t.toString());
-                    
-                    numberToSchedule[num] = sa;
-                }
-            }
-        }
-    }
+    const auto plan = library->withDatabase([](Database& db) { return db.loadAdPlan(); });
+    trackToNumber = plan.numberByTrack;
+    numberToSchedule.clear();
+    for (const auto& [number, slots] : plan.slotsByNumber)
+        for (const auto& slot : slots)
+            numberToSchedule[number].add(juce::String(slot));
+    autoSchedule = plan.autoSchedule;
 }
 
 void AdvertisingManager::saveData()
 {
     juce::ScopedLock sl(dataLock);
+    if (library == nullptr) return;
 
-    juce::DynamicObject* root = new juce::DynamicObject();
-    
-     
-    juce::Array<juce::var> assignArray;
-    for (auto const& [tid, num] : trackToNumber)
-    {
-        juce::DynamicObject* obj = new juce::DynamicObject();
-        obj->setProperty("tid", tid);
-        obj->setProperty("num", num);
-        assignArray.add(juce::var(obj));
-    }
-    root->setProperty("assignments", assignArray);
+    Database::AdPlan plan;
+    plan.numberByTrack = trackToNumber;
+    for (const auto& [number, times] : numberToSchedule)
+        for (const auto& t : times)
+            plan.slotsByNumber[number].push_back(t.toStdString());
+    plan.autoSchedule = autoSchedule;
 
-     
-    juce::Array<juce::var> schedArray;
-    for (auto const& [num, times] : numberToSchedule)
-    {
-        if (times.isEmpty()) continue;
-        
-        juce::DynamicObject* obj = new juce::DynamicObject();
-        obj->setProperty("num", num);
-        
-        juce::Array<juce::var> timeArray;
-        for (auto& t : times)
-            timeArray.add(t);
-            
-        obj->setProperty("times", timeArray);
-        schedArray.add(juce::var(obj));
-    }
-    root->setProperty("schedules", schedArray);
-    root->setProperty("autoSchedule", autoSchedule);
-
-     
-    juce::String jsonString = juce::JSON::toString(juce::var(root));
-    persistenceFile.replaceWithText(jsonString);
+    if (!library->withDatabase([&plan](Database& db) { return db.saveAdPlan(plan); }))
+        juce::Logger::writeToLog("AdvertisingManager: could not save the ad plan");
 }
 
 void AdvertisingManager::setCueNumber(int trackId, int number)

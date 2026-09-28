@@ -6,12 +6,13 @@ class MusicLibrary;
 
 // Botonera de jingles (cartwall): 12 cartuchos que suenan directo al aire con F1-F12 o
 // un clic, por encima de lo que esté sonando. Cada uno usa la ganancia y los puntos de
-// entrada/salida del análisis de su pista. Lo asignado se guarda en Config/cartwall.json.
+// entrada/salida del análisis de su pista. Lo asignado se guarda en la base de datos (con
+// rememberAssignments en false, no se lee ni se guarda: una botonera de prueba).
 class CartPlayer : public juce::AudioSource, public juce::ChangeBroadcaster, private juce::Timer {
 public:
     static constexpr int numCarts = 12;
 
-    CartPlayer(MusicLibrary& library, juce::AudioFormatManager& formats, juce::File stateFile = {});
+    CartPlayer(MusicLibrary& library, juce::AudioFormatManager& formats, bool rememberAssignments = true);
     ~CartPlayer() override;
 
     bool assign(int slot, const TrackInfo& track);  // false si el archivo no se puede leer
@@ -57,7 +58,7 @@ private:
 
     MusicLibrary& library;
     juce::AudioFormatManager& formats;
-    juce::File stateFile;
+    const bool rememberAssignments;
     juce::TimeSliceThread readAheadThread { "Cartwall read-ahead" };
     std::atomic<bool> prepared { false };
     std::array<Cart, numCarts> carts;

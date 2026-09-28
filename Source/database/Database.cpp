@@ -13,6 +13,10 @@ bool Database::open(const std::string& dbPath) {
         std::cerr << "Can't open database: " << sqlite3_errmsg(db) << std::endl;
         return false;
     }
+    // Resistente a cortes de luz: diario clásico (no WAL, que falla en discos de red y en
+    // algunos USB) y cada transacción escrita en disco antes de darla por hecha.
+    sqlite3_exec(db, "PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;",
+                 nullptr, nullptr, nullptr);
     return true;
 }
 
@@ -127,7 +131,15 @@ bool Database::initSchema() {
         "deck TEXT"
         ");";
     if (!execute(sqlPlayLog)) return false;
-    return execute("CREATE INDEX IF NOT EXISTS idx_play_log_played_at ON play_log(played_at);");
+    execute("CREATE INDEX IF NOT EXISTS idx_play_log_played_at ON play_log(played_at);");
+
+    createStationTables();
+
+    // Claves foráneas: la pauta, la cola y la botonera no pueden apuntar a una pista borrada.
+    // Antes se limpian las filas huérfanas que dejaran versiones anteriores.
+    execute("DELETE FROM track_categories WHERE track_id NOT IN (SELECT id FROM tracks) "
+            "OR category_id NOT IN (SELECT id FROM categories);");
+    return execute("PRAGMA foreign_keys = ON;");
 }
 
 //==============================================================================

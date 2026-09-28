@@ -1,51 +1,31 @@
 #include "TemplateManager.h"
-#include "../helpers/PersistenceManager.h"
+#include "../library/MusicLibrary.h"
 
-TemplateManager::TemplateManager() {
-    templatesDir = PersistenceManager::getTemplatesFolder();
-}
-
-void TemplateManager::ensureTemplatesDirExists() {
-    if (!templatesDir.exists()) {
-        templatesDir.createDirectory();
-    }
-}
+TemplateManager::TemplateManager(MusicLibrary& lib) : library(lib) {}
 
 void TemplateManager::saveTemplate(const juce::String& name, const GeneratorSettings& settings) {
-    ensureTemplatesDirExists();
-    
-    juce::File file = templatesDir.getChildFile(name + ".json");
-    juce::var json = settings.toVar();
-    juce::String jsonString = juce::JSON::toString(json);
-    
-    file.replaceWithText(jsonString);
+    const auto json = juce::JSON::toString(settings.toVar(), true).toStdString();
+    const auto key = name.trim().toStdString();
+    if (key.empty()) return;
+    if (!library.withDatabase([&](Database& db) { return db.saveTemplate(key, json); }))
+        juce::Logger::writeToLog("TemplateManager: could not save template " + name);
 }
 
 GeneratorSettings TemplateManager::loadTemplate(const juce::String& name) {
-    ensureTemplatesDirExists();
-    
-    juce::File file = templatesDir.getChildFile(name + ".json");
-    if (!file.exists()) return GeneratorSettings();
-    
-    juce::var json = juce::JSON::parse(file);
-    return GeneratorSettings::fromVar(json);
+    const auto key = name.trim().toStdString();
+    const auto json = library.withDatabase([&key](Database& db) { return db.loadTemplate(key); });
+    if (json.empty()) return GeneratorSettings();
+    return GeneratorSettings::fromVar(juce::JSON::parse(juce::String(json)));
 }
 
 juce::StringArray TemplateManager::getTemplateNames() {
-    ensureTemplatesDirExists();
-    
     juce::StringArray names;
-    auto files = templatesDir.findChildFiles(juce::File::findFiles, false, "*.json");
-    
-    for (auto& f : files) {
-        names.add(f.getFileNameWithoutExtension());
-    }
-    
+    for (const auto& name : library.withDatabase([](Database& db) { return db.getTemplateNames(); }))
+        names.add(juce::String(name));
     return names;
 }
 
 void TemplateManager::deleteTemplate(const juce::String& name) {
-    ensureTemplatesDirExists();
-    juce::File file = templatesDir.getChildFile(name + ".json");
-    if (file.exists()) file.deleteFile();
+    const auto key = name.trim().toStdString();
+    library.withDatabase([&key](Database& db) { return db.deleteTemplate(key); });
 }

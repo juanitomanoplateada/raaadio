@@ -3,6 +3,7 @@
 #include "../helpers/ThemeManager.h"
 #include "../helpers/UiStyle.h"
 #include "../network/Mp3Encoder.h"
+#include "../helpers/StationHealth.h"
 
  
 SettingsDialog::AudioTab::AudioTab(juce::AudioDeviceManager& m, juce::AudioDeviceManager& c)
@@ -114,65 +115,95 @@ namespace
     };
 }
 
-SettingsDialog::LibraryTab::LibraryTab(MusicLibrary& lib, AdvertisingManager& ads) : library(lib), adsManager(ads) {
+SettingsDialog::LibraryTab::LibraryTab(MusicLibrary& lib, AdvertisingManager& ads, StationConfig& st, BackupService* backups)
+    : library(lib), adsManager(ads), station(st), backupService(backups)
+{
     addAndMakeVisible(labGroup);
     addAndMakeVisible(dataGroup);
     addAndMakeVisible(migrationGroup);
     addAndMakeVisible(dangerGroup);
 
-    addAndMakeVisible(labPathLabel);
-    labPathLabel.setJustificationType(juce::Justification::centredLeft);
-    labPathLabel.setFont(UiStyle::mono(13.0f));
-    labPathLabel.setMinimumHorizontalScale(0.6f);
+    for (auto* label : { &labPathLabel, &externalPathLabel }) {
+        addAndMakeVisible(*label);
+        label->setJustificationType(juce::Justification::centredLeft);
+        label->setFont(UiStyle::mono(13.0f));
+        label->setMinimumHorizontalScale(0.6f);
+    }
 
-    for (auto* label : { &labNextLabel, &dataStatusLabel, &warningLabel }) {
+    for (auto* label : { &labNextLabel, &dataStatusLabel, &externalStatusLabel, &diskStatusLabel, &retentionLabel, &warningLabel }) {
         addAndMakeVisible(*label);
         label->setFont(UiStyle::ui(12.5f));
         label->setMinimumHorizontalScale(0.7f);
+        label->setJustificationType(juce::Justification::centredLeft);
     }
-    labNextLabel.setJustificationType(juce::Justification::centredLeft);
-    dataStatusLabel.setJustificationType(juce::Justification::centredLeft);
     warningLabel.setJustificationType(juce::Justification::centred);
+    addAndMakeVisible(externalCaption);
+    externalCaption.setFont(UiStyle::caption(12.0f));
+    externalCaption.setBorderSize({ 0, 0, 0, 0 });
 
-    addAndMakeVisible(changeLabButton);
+    for (auto* button : { &changeLabButton, &chooseExternalButton, &clearExternalButton, &backupButton, &restoreButton,
+                          &exportButton, &importButton, &resetButton })
+        addAndMakeVisible(*button);
     addAndMakeVisible(autoBackupToggle);
-    addAndMakeVisible(backupButton);
-    addAndMakeVisible(restoreButton);
-    addAndMakeVisible(exportButton);
-    addAndMakeVisible(importButton);
-    addAndMakeVisible(resetButton);
+    addAndMakeVisible(backupHour);
+    addAndMakeVisible(mirrorToggle);
 
     UiStyle::setVariant(resetButton, "danger");
+    UiStyle::setVariant(clearExternalButton, "ghost");
     UiStyle::setIcon(changeLabButton, "folder");
+    UiStyle::setIcon(chooseExternalButton, "folder");
+
+    const auto& s = station.get();
+    autoBackupToggle.setToggleState(s.backupEnabled, juce::dontSendNotification);
+    for (int hour = 0; hour < 24; ++hour)
+        backupHour.addItem(juce::String(hour).paddedLeft('0', 2) + ":00", hour + 1);
+    backupHour.setSelectedId(s.backupHour + 1, juce::dontSendNotification);
+    mirrorToggle.setToggleState(s.backupMirrorLibrary, juce::dontSendNotification);
+
+    autoBackupToggle.onClick = [this] { applyBackupSettings(); };
+    backupHour.onChange = [this] { applyBackupSettings(); };
+    mirrorToggle.onClick = [this] { applyBackupSettings(); };
+    chooseExternalButton.onClick = [this] { chooseExternalFolder(); };
+    clearExternalButton.onClick = [this] { setExternalFolder({}); };
 
     changeLabButton.onClick = [this] { changeLabRoot(); };
-
-    autoBackupToggle.setToggleState(PersistenceManager::isAutoBackupEnabled(), juce::dontSendNotification);
-    autoBackupToggle.onClick = [this] {
-        PersistenceManager::setAutoBackupEnabled(autoBackupToggle.getToggleState());
-    };
-
     backupButton.onClick = [this] { performBackup(); };
     restoreButton.onClick = [this] { performRestore(); };
     exportButton.onClick = [this] { performExport(); };
     importButton.onClick = [this] { performImport(); };
     resetButton.onClick = [this] { resetLibrary(); };
 
+    if (backupService != nullptr) backupService->addChangeListener(this);
     lookAndFeelChanged();
+    startTimer(2000);  // el espacio libre y un respaldo en curso
+}
+
+SettingsDialog::LibraryTab::~LibraryTab() {
+    if (backupService != nullptr) backupService->removeChangeListener(this);
 }
 
 PersistenceManager::DatabaseSnapshot SettingsDialog::LibraryTab::databaseSnapshot() {
     return [&lib = library](const juce::File& target) { return lib.backupDatabaseTo(target); };
 }
 
-void SettingsDialog::LibraryTab::resized() {
-    auto area = getLocalBounds().reduced(15);
-    auto groupPadding = 20;
-    auto btnH = 35;
-    auto gap = 10;
+namespace {
+    // Medidas de la pestaña, compartidas por resized() y getIdealHeight().
+    constexpr int libMargin = 15, libGap = 15, labHeight = 118, migrationHeight = 90, dangerHeight = 120;
+    constexpr int backupHeight = 30 + 35 + 8 + 18 + 4 + 30 + 8 + 30 + 8 + 35 + 8 + 4 * 20 + 20;
+}
 
-    // 0. Lab Root Group
-    auto labArea = area.removeFromTop(118);
+int SettingsDialog::LibraryTab::getIdealHeight() {
+    return libMargin * 2 + labHeight + libGap + backupHeight + libGap + migrationHeight + libGap + dangerHeight;
+}
+
+void SettingsDialog::LibraryTab::resized() {
+    auto area = getLocalBounds().reduced(libMargin);
+    const int groupPadding = 20;
+    const int btnH = 35;
+    const int gap = 10;
+
+    // 0. Carpeta de la emisora
+    auto labArea = area.removeFromTop(labHeight);
     labGroup.setBounds(labArea);
     auto labContent = labArea.reduced(groupPadding);
     labContent.removeFromTop(10);
@@ -182,26 +213,44 @@ void SettingsDialog::LibraryTab::resized() {
     labContent.removeFromTop(3);
     changeLabButton.setBounds(labContent.removeFromTop(30).reduced(50, 0));
 
-    area.removeFromTop(15);
+    area.removeFromTop(libGap);
 
-    // 1. Data Group
-    auto dataArea = area.removeFromTop(140);
+    // 1. Respaldos
+    auto dataArea = area.removeFromTop(backupHeight);
     dataGroup.setBounds(dataArea);
-    auto dataContent = dataArea.reduced(groupPadding);
-    dataContent.removeFromTop(10);
+    auto data = dataArea.withTrimmedTop(30).reduced(groupPadding, 0);
 
-    autoBackupToggle.setBounds(dataContent.removeFromTop(btnH));
-    dataContent.removeFromTop(gap/2);
+    auto row = data.removeFromTop(btnH);
+    backupHour.setBounds(row.removeFromRight(100).withSizeKeepingCentre(100, 30));
+    row.removeFromRight(8);
+    autoBackupToggle.setBounds(row);
+    data.removeFromTop(8);
 
-    auto r1 = dataContent.removeFromTop(btnH);
-    backupButton.setBounds(r1.removeFromLeft(dataContent.getWidth() / 2 - gap/2));
-    restoreButton.setBounds(r1.removeFromRight(dataContent.getWidth() / 2 - gap/2));
-    dataStatusLabel.setBounds(dataContent.removeFromTop(20));
+    externalCaption.setBounds(data.removeFromTop(18));
+    data.removeFromTop(4);
+    row = data.removeFromTop(30);
+    clearExternalButton.setBounds(row.removeFromRight(juce::jmax(80, clearExternalButton.getBestWidthForHeight(30) + 12)));
+    row.removeFromRight(6);
+    chooseExternalButton.setBounds(row.removeFromRight(juce::jmax(110, chooseExternalButton.getBestWidthForHeight(30) + 16)));
+    row.removeFromRight(8);
+    externalPathLabel.setBounds(row);
+    data.removeFromTop(8);
 
-    area.removeFromTop(15);
+    mirrorToggle.setBounds(data.removeFromTop(30));
+    data.removeFromTop(8);
 
-    // 2. Migration Group
-    auto migArea = area.removeFromTop(90);
+    row = data.removeFromTop(btnH);
+    backupButton.setBounds(row.removeFromLeft(row.getWidth() / 2 - gap / 2));
+    restoreButton.setBounds(row.removeFromRight(row.getWidth() - gap));
+    data.removeFromTop(8);
+
+    for (auto* label : { &dataStatusLabel, &externalStatusLabel, &diskStatusLabel, &retentionLabel })
+        label->setBounds(data.removeFromTop(20));
+
+    area.removeFromTop(libGap);
+
+    // 2. Migración
+    auto migArea = area.removeFromTop(migrationHeight);
     migrationGroup.setBounds(migArea);
     auto migContent = migArea.reduced(groupPadding);
     migContent.removeFromTop(10);
@@ -210,10 +259,10 @@ void SettingsDialog::LibraryTab::resized() {
     exportButton.setBounds(r2.removeFromLeft(migContent.getWidth() / 2 - gap/2));
     importButton.setBounds(r2.removeFromRight(migContent.getWidth() / 2 - gap/2));
 
-    area.removeFromTop(15);
+    area.removeFromTop(libGap);
 
-    // 3. Danger Zone
-    auto dangerArea = area.removeFromTop(120);
+    // 3. Zona de peligro
+    auto dangerArea = area.removeFromTop(dangerHeight);
     dangerGroup.setBounds(dangerArea);
     auto dangerContent = dangerArea.reduced(groupPadding);
     dangerContent.removeFromTop(10);
@@ -226,9 +275,13 @@ void SettingsDialog::LibraryTab::lookAndFeelChanged() {
     auto& t = ThemeManager::getInstance();
     warningLabel.setColour(juce::Label::textColourId, t.getMutedTextColour());
     labNextLabel.setColour(juce::Label::textColourId, t.getWarningColour());
-    labPathLabel.setColour(juce::Label::backgroundColourId, t.getRaisedColour());
-    labPathLabel.setColour(juce::Label::outlineColourId, t.getStrongOutlineColour());
-    labPathLabel.setColour(juce::Label::textColourId, t.getSecondaryTextColour());
+    for (auto* label : { &labPathLabel, &externalPathLabel }) {
+        label->setColour(juce::Label::backgroundColourId, t.getRaisedColour());
+        label->setColour(juce::Label::outlineColourId, t.getStrongOutlineColour());
+        label->setColour(juce::Label::textColourId, t.getSecondaryTextColour());
+    }
+    externalCaption.setColour(juce::Label::textColourId, t.getSecondaryTextColour());
+    retentionLabel.setColour(juce::Label::textColourId, t.getMutedTextColour());
     updateTexts();
 }
 
@@ -244,19 +297,17 @@ void SettingsDialog::LibraryTab::updateTexts() {
     labNextLabel.setText(next != current ? TRANS("lab_next_start").replace("%1", next.getFullPathName()) : juce::String(),
                          juce::dontSendNotification);
     changeLabButton.setButtonText(TRANS("btn_change_lab_root"));
-    autoBackupToggle.setButtonText(TRANS("label_auto_backup").replace("%1", juce::String(PersistenceManager::backupKeepDays)));
 
-    auto& t = ThemeManager::getInstance();
-    if (PersistenceManager::hasPendingRestore()) {
-        dataStatusLabel.setText(TRANS("restore_pending_status"), juce::dontSendNotification);
-        dataStatusLabel.setColour(juce::Label::textColourId, t.getWarningColour());
-    } else {
-        const auto latest = PersistenceManager::getLatestBackupTime();
-        dataStatusLabel.setText(latest.toMilliseconds() == 0 ? TRANS("backup_status_none")
-                                                             : TRANS("backup_status").replace("%1", latest.formatted("%d/%m/%Y %H:%M")),
-                                juce::dontSendNotification);
-        dataStatusLabel.setColour(juce::Label::textColourId, t.getMutedTextColour());
-    }
+    autoBackupToggle.setButtonText(TRANS("label_auto_backup"));
+    externalCaption.setText(TRANS("backup_external_caption"), juce::dontSendNotification);
+    chooseExternalButton.setButtonText(TRANS("backup_external_choose"));
+    clearExternalButton.setButtonText(TRANS("backup_external_clear"));
+    mirrorToggle.setButtonText(TRANS("backup_mirror_music"));
+    mirrorToggle.setTooltip(TRANS("tip_backup_mirror_music"));
+    retentionLabel.setText(TRANS("backup_retention").replace("%1", juce::String(PersistenceManager::keepDays))
+                                                    .replace("%2", juce::String(PersistenceManager::keepWeeks))
+                                                    .replace("%3", juce::String(PersistenceManager::keepMonths)),
+                           juce::dontSendNotification);
 
     resetButton.setButtonText(TRANS("db_reset"));
     warningLabel.setText(TRANS("reset_hint"), juce::dontSendNotification);
@@ -265,10 +316,131 @@ void SettingsDialog::LibraryTab::updateTexts() {
     restoreButton.setButtonText(TRANS("btn_restore"));
     exportButton.setButtonText(TRANS("btn_export"));
     importButton.setButtonText(TRANS("btn_import"));
+    updateStatus();
+}
+
+void SettingsDialog::LibraryTab::updateStatus() {
+    auto& t = ThemeManager::getInstance();
+    const auto& s = station.get();
+    const auto status = backupService != nullptr ? backupService->getStatus() : BackupService::Status();
+
+    // Destino externo elegido
+    externalPathLabel.setText(s.backupExternalFolder.isNotEmpty() ? s.backupExternalFolder : TRANS("backup_external_none"),
+                              juce::dontSendNotification);
+    clearExternalButton.setEnabled(s.backupExternalFolder.isNotEmpty());
+    mirrorToggle.setEnabled(s.backupExternalFolder.isNotEmpty());
+    backupButton.setEnabled(!status.running);
+
+    // Respaldo local
+    if (PersistenceManager::hasPendingRestore()) {
+        dataStatusLabel.setText(TRANS("restore_pending_status"), juce::dontSendNotification);
+        dataStatusLabel.setColour(juce::Label::textColourId, t.getWarningColour());
+    } else if (status.running) {
+        dataStatusLabel.setText(status.step, juce::dontSendNotification);
+        dataStatusLabel.setColour(juce::Label::textColourId, t.getWarningColour());
+    } else if (!status.lastOk) {
+        dataStatusLabel.setText(TRANS("health_backup_failed") + ": " + status.lastError.upToFirstOccurrenceOf("\n", false, false),
+                                juce::dontSendNotification);
+        dataStatusLabel.setColour(juce::Label::textColourId, t.getErrorColour());
+    } else {
+        const auto latest = PersistenceManager::getLatestBackupTime();
+        dataStatusLabel.setText(latest.toMilliseconds() == 0 ? TRANS("backup_status_none")
+                                                             : TRANS("backup_status").replace("%1", latest.formatted("%d/%m/%Y %H:%M")),
+                                juce::dontSendNotification);
+        dataStatusLabel.setColour(juce::Label::textColourId, t.getMutedTextColour());
+    }
+
+    // Destino externo y música
+    juce::String external;
+    auto externalColour = t.getMutedTextColour();
+    if (s.backupExternalFolder.isEmpty()) {
+        external = TRANS("backup_external_off");
+        externalColour = t.getWarningColour();
+    } else if (!status.externalAttempted) {
+        external = TRANS("backup_external_pending");
+    } else if (!status.externalOk) {
+        external = TRANS("health_external_failed") + ": " + status.externalError.upToFirstOccurrenceOf("\n", false, false);
+        externalColour = t.getErrorColour();
+    } else {
+        external = TRANS("backup_external_ok").replace("%1", status.lastExternalOk.formatted("%d/%m/%Y %H:%M"));
+        if (s.backupMirrorLibrary)
+            external << "  \xc2\xb7  " << TRANS("backup_mirror_status").replace("%1", juce::String(status.mirror.copied + status.mirror.unchanged))
+                                                                        .replace("%2", juce::String(status.mirror.copied));
+        externalColour = t.getSuccessColour();
+    }
+    externalStatusLabel.setText(external, juce::dontSendNotification);
+    externalStatusLabel.setColour(juce::Label::textColourId, externalColour);
+
+    // Disco de la emisora
+    const auto lab = PersistenceManager::getLabRoot();
+    const auto free = lab.getBytesFreeOnVolume();
+    const auto total = lab.getVolumeTotalSize();
+    const auto level = StationHealth::diskLevel(free, total);
+    diskStatusLabel.setText(TRANS("backup_disk_status").replace("%1", juce::File::descriptionOfSizeInBytes(free))
+                                                       .replace("%2", juce::File::descriptionOfSizeInBytes(total)),
+                            juce::dontSendNotification);
+    diskStatusLabel.setColour(juce::Label::textColourId, level == StationHealth::Level::Critical ? t.getErrorColour()
+                                                         : level == StationHealth::Level::Warning ? t.getWarningColour()
+                                                                                                  : t.getMutedTextColour());
+}
+
+void SettingsDialog::LibraryTab::applyBackupSettings() {
+    auto s = station.get();
+    s.backupEnabled = autoBackupToggle.getToggleState();
+    if (backupHour.getSelectedId() > 0) s.backupHour = backupHour.getSelectedId() - 1;
+    s.backupMirrorLibrary = mirrorToggle.getToggleState();
+    station.set(s);
+    updateStatus();
+}
+
+void SettingsDialog::LibraryTab::setExternalFolder(const juce::File& folder) {
+    auto s = station.get();
+    s.backupExternalFolder = folder == juce::File() ? juce::String() : folder.getFullPathName();
+    station.set(s);
+    updateStatus();
+    if (folder != juce::File() && backupService != nullptr)
+        backupService->runNow();  // la primera copia, enseguida
+}
+
+void SettingsDialog::LibraryTab::chooseExternalFolder() {
+    fileChooser = std::make_unique<juce::FileChooser>(TRANS("backup_external_choose"),
+                                                      juce::File::getSpecialLocation(juce::File::userHomeDirectory));
+    fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+        [this](const juce::FileChooser& fc) {
+            const auto folder = fc.getResult();
+            if (!folder.isDirectory()) return;
+
+            const auto lab = PersistenceManager::getLabRoot();
+            if (folder == lab || folder.isAChildOf(lab) || lab.isAChildOf(folder)) {
+                showError(TRANS("backup_err_external_inside"));
+                return;
+            }
+
+            // En el mismo disco no protege si el disco falla: se avisa, pero se permite.
+            const bool sameDisk = folder.getVolumeSerialNumber() != 0
+                               && folder.getVolumeSerialNumber() == lab.getVolumeSerialNumber();
+            if (!sameDisk) {
+                setExternalFolder(folder);
+                return;
+            }
+            juce::Component::SafePointer<LibraryTab> safeThis(this);
+            juce::AlertWindow::showOkCancelBox(juce::AlertWindow::WarningIcon, TRANS("backup_title"),
+                TRANS("backup_external_same_disk"), TRANS("backup_external_use_anyway"), TRANS("cancel"), nullptr,
+                juce::ModalCallbackFunction::create([safeThis, folder](int result) {
+                    if (result == 1 && safeThis != nullptr) safeThis->setExternalFolder(folder);
+                }));
+        });
 }
 
 void SettingsDialog::LibraryTab::performBackup()
 {
+    // En segundo plano: la base, el destino externo y la música. El avance queda a la vista.
+    if (backupService != nullptr) {
+        backupService->runNow();
+        updateStatus();
+        return;
+    }
+
     juce::File folder;
     const auto res = PersistenceManager::createBackup(databaseSnapshot(), &folder);
     if (res.wasOk())
@@ -933,10 +1105,12 @@ void SettingsDialog::ScrollingTab::resized() {
 
 //==============================================================================
 SettingsDialog::SettingsDialog(juce::AudioDeviceManager& m, juce::AudioDeviceManager& c, MusicLibrary& lib, AdvertisingManager& ads,
-                               StationConfig& station, StreamEncoder& streamEncoder, NowPlayingPublisher* nowPlaying, juce::File airLogFolder)
+                               StationConfig& station, StreamEncoder& streamEncoder, NowPlayingPublisher* nowPlaying,
+                               BackupService* backups, juce::File airLogFolder)
 {
     audioTab = std::make_unique<AudioTab>(m, c);
-    libraryTab = std::make_unique<LibraryTab>(lib, ads);
+    libraryTab = std::make_unique<LibraryTab>(lib, ads, station, backups);
+    libraryScroller = std::make_unique<ScrollingTab>(*libraryTab, LibraryTab::getIdealHeight());
     libraryTab->onLibraryReset = [this] { if (onLibraryReset) onLibraryReset(); };
     broadcastTab = std::make_unique<BroadcastTab>(station, streamEncoder, nowPlaying, airLogFolder);
     broadcastScroller = std::make_unique<ScrollingTab>(*broadcastTab, BroadcastTab::getIdealHeight());
@@ -946,7 +1120,7 @@ SettingsDialog::SettingsDialog(juce::AudioDeviceManager& m, juce::AudioDeviceMan
 
 
     tabs.addTab(TRANS("audio_settings"), juce::Colour(0x00000000), audioTab.get(), false);
-    tabs.addTab(TRANS("library_settings"), juce::Colour(0x00000000), libraryTab.get(), false);
+    tabs.addTab(TRANS("library_settings"), juce::Colour(0x00000000), libraryScroller.get(), false);
     tabs.addTab(TRANS("broadcast_settings"), juce::Colour(0x00000000), broadcastScroller.get(), false);
     tabs.addTab(TRANS("language"), juce::Colour(0x00000000), languageTab.get(), false);
     tabs.addTab(TRANS("tab_updates"), juce::Colour(0x00000000), updatesTab.get(), false);

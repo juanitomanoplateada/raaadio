@@ -2,6 +2,8 @@
 #include <sqlite3.h>
 #include <string>
 #include <vector>
+#include <map>
+#include <set>
 #include <unordered_map>
 #include <iostream>
 #include <JuceHeader.h>
@@ -139,6 +141,58 @@ public:
     bool addPlayLogEntry(const PlayLogEntry& entry);
     std::vector<PlayLogEntry> getRecentPlayLog(int limit);  // la más reciente primero
 
+    // Salud de la base: "ok" o la descripción del daño (PRAGMA quick_check).
+    std::string quickCheck();
+    int getSchemaVersion();  // PRAGMA user_version
+
+    //--------------------------------------------------------------------------
+    // Estado de la emisora (StationState.cpp). Antes vivía en Config/*.json y
+    // Templates/*.json; aquí se guarda con transacciones, sobrevive a un corte de luz y
+    // sale entero en cada respaldo. Las filas que apuntan a una pista se borran solas si la
+    // pista se borra (claves foráneas), y al guardar se omiten las que ya no existen.
+
+    // Ajustes sueltos: clave → texto (los de emisión van como JSON bajo "station").
+    std::string getSetting(const std::string& key, const std::string& fallback = {});
+    bool setSetting(const std::string& key, const std::string& value);
+    // Identificador de esta emisora, creado la primera vez: nombra su carpeta en el destino
+    // externo de respaldo, aunque la emisora cambie de nombre o de disco.
+    std::string getStationId();
+
+    // Pauta: el N.º de cuña de cada pista y las franjas "HH:MM" de cada número.
+    struct AdPlan {
+        std::map<int, int> numberByTrack;
+        std::map<int, std::vector<std::string>> slotsByNumber;
+        bool autoSchedule = false;
+    };
+    AdPlan loadAdPlan();
+    bool saveAdPlan(const AdPlan& plan);
+
+    struct QueueItem { int trackId = -1; std::string breakKey; };
+    std::vector<QueueItem> loadQueue();
+    bool saveQueue(const std::vector<QueueItem>& items);
+
+    std::vector<int> loadCartwall(int slots);  // id de pista por botón; -1 = libre
+    bool saveCartwall(const std::vector<int>& trackIds);
+
+    std::set<std::string> loadAdBreaksDone();  // tandas ya insertadas ("AAAA-MM-DD HH:MM")
+    bool saveAdBreaksDone(const std::set<std::string>& keys);
+
+    // Plantillas del generador: nombre → ajustes en JSON.
+    std::vector<std::string> getTemplateNames();
+    std::string loadTemplate(const std::string& name);  // vacío si no existe
+    bool saveTemplate(const std::string& name, const std::string& json);
+    bool deleteTemplate(const std::string& name);
+
+    // Una sola vez (esquema 2): pasa a la base los archivos de Config y Templates de las
+    // versiones anteriores (o de un respaldo viejo que se restauró) y los deja como
+    // *.migrated. Todo en una transacción: si algo falla, no cambia nada. Devuelve cuántos
+    // archivos importó, o -1 si falló.
+    int importLegacyStationFiles(const juce::File& configFolder, const juce::File& templatesFolder);
+
+    // Después de restaurar un respaldo, la cola y las tandas ya insertadas se traen de la
+    // base que había antes: son del momento, no del día del respaldo.
+    bool carryOverLiveState(const juce::File& previousDatabase);
+
 private:
     sqlite3* db = nullptr;
     juce::File pathBase;
@@ -162,4 +216,9 @@ private:
     std::vector<TrackInfo> queryTracks(const std::string& whereClause,
                                        const std::function<void(sqlite3_stmt*)>& bind);
     TrackInfo readTrackRow(sqlite3_stmt* stmt) const;
+
+    // Consulta preparada que devuelve filas: bind asigna los parámetros y row recibe cada una.
+    bool each(const char* sql, const std::function<void(sqlite3_stmt*)>& bind,
+              const std::function<void(sqlite3_stmt*)>& row);
+    void createStationTables();
 };

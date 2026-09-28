@@ -1,9 +1,9 @@
 #pragma once
 #include <JuceHeader.h>
 
-// Ajustes de emisión que se guardan en Config/station.json (dentro del laboratorio, así
-// viajan con la emisora): protección contra silencio, registro de lo emitido por hora,
-// transmisión a un servidor Icecast y publicación de lo que suena.
+// Ajustes de emisión, guardados en la base de datos de la emisora (así viajan con ella y
+// salen en cada respaldo): protección contra silencio, registro de lo emitido por hora,
+// transmisión a un servidor Icecast, publicación de lo que suena y respaldos.
 struct StationSettings {
     // Protección contra silencio
     bool deadAirEnabled = true;
@@ -39,6 +39,14 @@ struct StationSettings {
     // además se envía a esta dirección (POST) en cada cambio, si hay una.
     juce::String nowPlayingPushUrl;
 
+    // Respaldos: uno diario a backupHour (y al abrir, si se pasó la hora sin respaldar),
+    // copiado también a backupExternalFolder (otro disco, un USB, una carpeta de OneDrive o
+    // Google Drive) junto con la música si backupMirrorLibrary.
+    bool backupEnabled = true;
+    int backupHour = 3;
+    juce::String backupExternalFolder;
+    bool backupMirrorLibrary = true;
+
     // La clave se cifró en otro equipo o con otro usuario de Windows (la emisora se movió):
     // hay que volver a escribirla. Mientras tanto se conserva tal cual en el archivo.
     bool isStreamPasswordUnreadable() const { return streamPassword.isEmpty() && unreadablePassword.isNotEmpty(); }
@@ -48,10 +56,13 @@ struct StationSettings {
     static StationSettings fromVar(const juce::var& v);
 };
 
-// Dueño de los ajustes: los carga, los guarda y avisa cuando cambian.
+class MusicLibrary;
+
+// Dueño de los ajustes: los carga de la base, los guarda y avisa cuando cambian. Sin
+// biblioteca (nullptr) solo viven en memoria.
 class StationConfig : public juce::ChangeBroadcaster {
 public:
-    explicit StationConfig(juce::File file = {});
+    explicit StationConfig(MusicLibrary* library);
 
     const StationSettings& get() const { return settings; }
     void set(const StationSettings& newSettings);  // guarda y avisa
@@ -59,6 +70,6 @@ public:
 private:
     void save();
 
-    juce::File file;
+    MusicLibrary* library;
     StationSettings settings;
 };

@@ -10,30 +10,37 @@ MainComponent::MainComponent(MainComponentOptions opts)
     juce::Logger::writeToLog("MainComponent::MainComponent body entry");
     
     auto raaadioDir = PersistenceManager::getLabRoot();
-    
+
     raaadioDir.createDirectory();
     PersistenceManager::getDatabaseFolder().createDirectory();
-    PersistenceManager::getConfigFolder().createDirectory();
     PersistenceManager::getLibraryFolder().createDirectory();
     PersistenceManager::getRecordingsFolder().createDirectory();
-    PersistenceManager::getTemplatesFolder().createDirectory();
     PersistenceManager::getBackupsFolder().createDirectory();
+    PersistenceManager::migrateLegacyFolders();
 
     juce::File dbFile = PersistenceManager::getDatabaseFolder().getChildFile("raaadio.db");
-    
-    // Legacy migration check
+
+    // Versiones muy anteriores guardaban la base y la pauta en Documentos. La pauta se
+    // copia a Config para que la base la importe al abrirse.
     if (!PersistenceManager::isLabRootConfigured())
     {
         auto docDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
         juce::File oldDb = docDir.getChildFile("djradio.db");
         if (oldDb.exists() && !dbFile.exists()) {
-            oldDb.copyFileTo(dbFile); 
+            oldDb.copyFileTo(dbFile);
+        }
+        const auto oldAds = docDir.getChildFile("ads_data.json");
+        const auto adsFile = PersistenceManager::getConfigFolder().getChildFile("ads_data.json");
+        if (oldAds.existsAsFile() && !adsFile.exists() && !adsFile.withFileExtension("json.migrated").exists()) {
+            PersistenceManager::getConfigFolder().createDirectory();
+            oldAds.copyFileTo(adsFile);
         }
     }
-    
+
     // Un respaldo que se pidió restaurar se aplica ahora, con la base de datos todavía cerrada.
+    juce::File databaseBeforeRestore;
     if (PersistenceManager::hasPendingRestore()) {
-        const auto restored = PersistenceManager::applyPendingRestore();
+        const auto restored = PersistenceManager::applyPendingRestore(&databaseBeforeRestore);
         juce::Logger::writeToLog("Pending restore: " + (restored.wasOk() ? juce::String("applied") : restored.getErrorMessage()));
         juce::MessageManager::callAsync([restored] {
             juce::AlertWindow::showMessageBoxAsync(restored.wasOk() ? juce::AlertWindow::InfoIcon : juce::AlertWindow::WarningIcon,
@@ -42,33 +49,33 @@ MainComponent::MainComponent(MainComponentOptions opts)
         });
     }
 
+    // Una base dañada (un corte de luz en mal momento, un disco que falla) se reemplaza por el
+    // último respaldo verificado antes de abrirla; la dañada se guarda aparte.
+    const auto health = PersistenceManager::checkDatabase(dbFile);
+    if (health.damaged) {
+        juce::MessageManager::callAsync([health] {
+            const auto message = health.recovered
+                ? TRANS("db_recovered").replace("%1", health.restoredFrom.getFullPathName())
+                                       .replace("%2", health.damagedCopy.getFileName())
+                : TRANS("db_damaged_no_backup").replace("%1", health.problem);
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, TRANS("db_damaged_title"), message);
+        });
+    }
+
     juce::Logger::writeToLog("Step 2.1: Initialising Library at " + dbFile.getFullPathName());
     library.initialise(dbFile);
     juce::Logger::writeToLog("Step 2.1: Library Initialised.");
 
+    // Después de restaurar, la cola y las tandas ya insertadas son las de antes de restaurar.
+    if (databaseBeforeRestore.existsAsFile())
+        library.withDatabase([&databaseBeforeRestore](Database& db) { return db.carryOverLiveState(databaseBeforeRestore); });
+
     // Historial desde el registro de emisión, y la cola que quedó al cerrar la última vez.
     historyManager.initialise(library);
-    playlistStore = std::make_unique<PlaylistStore>(playlist, library,
-                                                    PersistenceManager::getConfigFolder().getChildFile("queue.json"));
+    playlistStore = std::make_unique<PlaylistStore>(playlist, library);
     playlistStore->restore();
 
-    juce::File adsFile = PersistenceManager::getConfigFolder().getChildFile("ads_data.json");
-    
-    // Legacy migration check for ads
-    if (!PersistenceManager::isLabRootConfigured())
-    {
-        auto docDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-        juce::File oldAds = docDir.getChildFile("ads_data.json");
-        if (oldAds.exists() && !adsFile.exists()) {
-             oldAds.copyFileTo(adsFile);
-        }
-    }
-    
-    adsManager.initialise(adsFile);
-
-    // Auto-Backup
-    if (options.runAutoBackup)
-        PersistenceManager::performAutoBackupIfNeeded([this](const juce::File& target) { return library.backupDatabaseTo(target); });
+    adsManager.initialise(library);
 
     // Sonoridad y puntos de entrada/salida de lo importado con versiones anteriores.
     if (options.analyseLibrary)
@@ -77,25 +84,29 @@ MainComponent::MainComponent(MainComponentOptions opts)
     recordingManager.initialise(audioEngine.getFormatManager());
     audioEngine.getMixer().addOutputTap(&recordingManager);
 
-    // Emisión: botonera, registro por hora, transmisión, protección contra silencio y
-    // pauta automática. Los ajustes viven en Config/station.json.
-    const auto configFolder = PersistenceManager::getConfigFolder();
-    stationConfig = std::make_unique<StationConfig>(configFolder.getChildFile("station.json"));
+    // Emisión: botonera, registro por hora, transmisión, protección contra silencio, pauta
+    // automática y respaldos. Los ajustes viven en la base de datos.
+    stationConfig = std::make_unique<StationConfig>(&library);
 
-    cartPlayer = std::make_unique<CartPlayer>(library, audioEngine.getFormatManager(), configFolder.getChildFile("cartwall.json"));
+    // Respaldos: el diario a su hora (o al abrir, si esa hora pasó sin respaldo), al destino
+    // externo y con la música. En modo de captura de UI no se respalda nada.
+    backupService = std::make_unique<BackupService>(library, *stationConfig);
+    if (options.runAutoBackup)
+        backupService->start();
+
+    cartPlayer = std::make_unique<CartPlayer>(library, audioEngine.getFormatManager());
     cartPlayer->onCartPlayed = [this](const TrackInfo& track) {
         if (track.id != -1) library.incrementPlayCount(track.id);
         historyManager.addEntry(track, TRANS("tab_cartwall"));
     };
     audioEngine.getMixer().setCartSource(cartPlayer.get());
 
-    airLog.setFolder(PersistenceManager::getRecordingsFolder().getChildFile("Registro"));
+    airLog.setFolder(PersistenceManager::getAirLogFolder());
     audioEngine.getMixer().addOutputTap(&airLog);
     audioEngine.getMixer().addOutputTap(&streamEncoder);
 
     deadAirGuard = std::make_unique<DeadAirGuard>(audioEngine, autoDJ, playlist, library);
-    adScheduler = std::make_unique<AdScheduler>(library, adsManager, playlist, audioEngine.getDeck(0), audioEngine.getDeck(1),
-                                                configFolder.getChildFile("ad_breaks_done.json"));
+    adScheduler = std::make_unique<AdScheduler>(library, adsManager, playlist, audioEngine.getDeck(0), audioEngine.getDeck(1));
 
     auto& d1 = audioEngine.getDeck(0);
     auto& d2 = audioEngine.getDeck(1);
@@ -141,6 +152,7 @@ MainComponent::MainComponent(MainComponentOptions opts)
 
     statusBar = std::make_unique<StatusBar>(audioEngine, autoDJ, recordingManager, *deadAirGuard, streamEncoder);
     statusBar->onSettingsRequested = [this] { openSettings(); };
+    statusBar->healthSource = [this] { return evaluateHealth(); };
 
     addAndMakeVisible(*statusBar);
     addAndMakeVisible(*deckA);
@@ -244,6 +256,7 @@ MainComponent::~MainComponent() {
     deckA = nullptr;
     deckB = nullptr;
 
+    backupService = nullptr;  // espera a que termine un respaldo en curso (la copia de música se corta)
     playlistStore = nullptr;  // guarda la cola por última vez
     stationConfig->removeChangeListener(this);
     nowPlaying = nullptr;  // antes que los decks, la cola y el historial que observa
@@ -262,7 +275,7 @@ MainComponent::~MainComponent() {
 
 void MainComponent::openSettings() {
     auto* dialog = new SettingsDialog(audioEngine.getDeviceManager(), audioEngine.getCueDeviceManager(), library, adsManager,
-                                      *stationConfig, streamEncoder, nowPlaying.get(), PersistenceManager::getRecordingsFolder().getChildFile("Registro"));
+                                      *stationConfig, streamEncoder, nowPlaying.get(), backupService.get(), PersistenceManager::getAirLogFolder());
     // Al borrar la biblioteca, la cola y la botonera apuntarían a pistas que ya no existen.
     // Lo que suena en los decks sigue: el archivo no se borra.
     dialog->onLibraryReset = [this] {
@@ -309,4 +322,30 @@ void MainComponent::resized() {
     playlistComp->setBounds(area.removeFromLeft((area.getWidth() - gap) / 2));
     area.removeFromLeft(gap);
     libraryComp->setBounds(area);
+}
+
+StationHealth::Alert MainComponent::evaluateHealth() {
+    const auto nowMs = juce::Time::getMillisecondCounter();
+    if (diskCheckedAt == 0 || nowMs - diskCheckedAt > 60 * 1000) {
+        const auto lab = PersistenceManager::getLabRoot();
+        diskFree = lab.getBytesFreeOnVolume();
+        diskTotal = lab.getVolumeTotalSize();
+        diskCheckedAt = nowMs;
+    }
+
+    const auto& s = stationConfig->get();
+    const auto backup = backupService->getStatus();
+    StationHealth::Inputs in;
+    in.now = juce::Time::getCurrentTime();
+    in.diskFree = diskFree;
+    in.diskTotal = diskTotal;
+    in.backupEnabled = s.backupEnabled && options.runAutoBackup;
+    in.latestBackup = PersistenceManager::getLatestBackupTime();
+    in.lastBackupOk = backup.lastOk;
+    in.lastBackupError = backup.lastError;
+    in.externalConfigured = s.backupExternalFolder.isNotEmpty();
+    in.externalAttempted = backup.externalAttempted;
+    in.externalOk = backup.externalOk;
+    in.externalError = backup.externalError;
+    return StationHealth::evaluate(in);
 }

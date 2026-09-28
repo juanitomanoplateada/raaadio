@@ -2,8 +2,8 @@
 #include "../library/MusicLibrary.h"
 #include "Deck.h"
 
-CartPlayer::CartPlayer(MusicLibrary& lib, juce::AudioFormatManager& fm, juce::File file)
-    : library(lib), formats(fm), stateFile(std::move(file))
+CartPlayer::CartPlayer(MusicLibrary& lib, juce::AudioFormatManager& fm, bool remember)
+    : library(lib), formats(fm), rememberAssignments(remember)
 {
     readAheadThread.startThread(juce::Thread::Priority::high);
     for (auto& cart : carts)
@@ -168,23 +168,21 @@ void CartPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToF
 }
 
 void CartPlayer::saveState() const {
-    if (stateFile == juce::File()) return;
-    juce::Array<juce::var> ids;
+    if (!rememberAssignments) return;
+    std::vector<int> ids;
     for (const auto& cart : carts)
-        ids.add(cart.reader != nullptr ? cart.track.id : -1);
-    stateFile.getParentDirectory().createDirectory();
-    stateFile.replaceWithText(juce::JSON::toString(juce::var(ids)));
+        ids.push_back(cart.reader != nullptr ? cart.track.id : -1);
+    if (!library.withDatabase([&ids](Database& db) { return db.saveCartwall(ids); }))
+        juce::Logger::writeToLog("CartPlayer: could not save the cartwall");
 }
 
 void CartPlayer::loadState() {
     for (auto& cart : carts) cart.track.id = -1;
 
-    const auto json = juce::JSON::parse(stateFile);
-    const auto* ids = json.getArray();
-    if (ids == nullptr) return;
-
-    for (int slot = 0; slot < juce::jmin(numCarts, ids->size()); ++slot) {
-        const int id = (*ids)[slot];
+    if (!rememberAssignments) return;
+    const auto ids = library.withDatabase([](Database& db) { return db.loadCartwall(numCarts); });
+    for (int slot = 0; slot < juce::jmin(numCarts, (int) ids.size()); ++slot) {
+        const int id = ids[(size_t) slot];
         if (id < 0) continue;
         const auto track = library.getTrackById(id);
         if (track.id != -1) assign(slot, track);  // una pista borrada deja el cartucho libre

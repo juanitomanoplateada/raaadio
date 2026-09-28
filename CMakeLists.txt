@@ -177,6 +177,7 @@ target_sources(RAAADIO PRIVATE
     Source/library/PlaylistStore.cpp
     Source/database/Database.h
     Source/database/Database.cpp
+    Source/database/StationState.cpp
     Source/helpers/LanguageManager.h
     Source/helpers/LanguageManager.cpp
     Source/helpers/PersistenceManager.h
@@ -193,6 +194,12 @@ target_sources(RAAADIO PRIVATE
     Source/helpers/StationSettings.cpp
     Source/helpers/SecretStore.h
     Source/helpers/SecretStore.cpp
+    Source/helpers/BackupService.h
+    Source/helpers/BackupService.cpp
+    Source/helpers/StationHealth.h
+    Source/helpers/StationHealth.cpp
+    Source/helpers/StationLock.h
+    Source/helpers/StationLock.cpp
     Source/generator/GeneratorSettings.h
     Source/generator/TemplateManager.h
     Source/generator/TemplateManager.cpp
@@ -269,6 +276,7 @@ if(RAAADIO_BUILD_TESTS)
     target_sources(RAAADIO_Tests PRIVATE
         Tests/RaaadioTests.cpp
         Source/database/Database.cpp
+        Source/database/StationState.cpp
         Source/library/MusicLibrary.cpp
         Source/library/Playlist.cpp
         Source/library/PlaylistStore.cpp
@@ -296,6 +304,10 @@ if(RAAADIO_BUILD_TESTS)
         Source/network/NowPlayingPublisher.cpp
         Source/helpers/StationSettings.cpp
         Source/helpers/SecretStore.cpp
+        Source/helpers/BackupService.cpp
+        Source/helpers/StationHealth.cpp
+        Source/helpers/StationLock.cpp
+        Source/generator/TemplateManager.cpp
     )
 
     target_compile_features(RAAADIO_Tests PRIVATE cxx_std_17)

@@ -307,24 +307,52 @@ otra ubicación se usa `raaadio_lab` dentro de ella):
 
 ```
 raaadio_lab/
-├── Database/      # raaadio.db: pistas, categorías y registro de emisión (play_log)
-├── Config/        # ads_data.json (pauta), station.json (emisión), cartwall.json (botonera),
-│                  # queue.json (cola) y ad_breaks_done.json (tandas ya insertadas)
+├── Database/      # raaadio.db: toda la emisora (pistas, categorías, pauta, cola, botonera,
+│                  # ajustes, plantillas y registro de emisión)
 ├── Library/       # la música y las cuñas, copiadas tal cual al importarlas
-├── Recordings/    # grabaciones; Recordings/Registro guarda el registro de lo emitido
-├── Templates/     # plantillas del generador
-├── Backups/       # respaldos: AAAA/MM/DD/HH_MM_SS/
-└── Logs/          # raaadio.log (se recorta a 5 MB al iniciar)
+├── Recordings/    # grabaciones; AirLog/ guarda el registro de lo emitido
+├── Backups/       # respaldos verificados: AAAA/MM/DD/HH_MM_SS/{raaadio.db, manifest.json}
+├── Logs/          # raaadio.log (se recorta a 5 MB al iniciar)
+└── raaadio.lock   # mientras está abierta: en qué equipo
 ```
+
+**Una sola fuente de verdad.** Todo el estado de la emisora está en SQLite, no en archivos
+sueltos: cada cambio es una transacción que sobrevive a un corte de luz (diario clásico y
+`synchronous=FULL`, que también funciona en un USB o un disco de red), la pauta, la cola y la
+botonera no pueden apuntar a una pista borrada (claves foráneas) y un respaldo es un solo
+archivo coherente. Las versiones anteriores guardaban la pauta, la cola, la botonera, los
+ajustes y las plantillas en `Config/` y `Templates/`: al abrir la emisora por primera vez con
+esta versión se importan a la base una sola vez y quedan como `*.migrated`. JSON queda para
+exportar e intercambiar datos, nunca como fuente de verdad.
 
 Las rutas de la biblioteca se guardan relativas a esta carpeta: sigue funcionando si el disco
 cambia de letra o se lleva a otro equipo.
 
-- **Respaldos.** Copia consistente de la base de datos (aunque la emisora esté al aire), la
-  pauta, los ajustes, la botonera y las plantillas. Hay un respaldo automático diario al abrir
-  (activado por defecto); se guardan 30 días y siempre los 10 más recientes.
+**Respaldos** (*Configuración → Biblioteca y datos*):
+
+- **Diario a una hora fija** (03:00 por defecto) mientras la emisora está al aire, y al abrir
+  si esa hora pasó sin respaldo. Corre en otro hilo con prioridad baja: no compite con los
+  decks.
+- **Verificados.** Cada respaldo es una copia consistente de la base (aunque esté al aire), que
+  pasa `PRAGMA quick_check` antes de contarse, con un `manifest.json` (versión, fecha y
+  SHA-256). Al restaurar se comprueba de nuevo: un respaldo alterado no se usa.
+- **Destino externo**: otro disco, un USB o una carpeta de OneDrive o Google Drive. Cada
+  respaldo se copia a `RAAADIO-<id>/Backups/` (aparece completo o no aparece) y la música a
+  `RAAADIO-<id>/Library/`: solo lo nuevo, verificando cada archivo con el SHA-256 que la base
+  guarda de la pista, y sin borrar nunca nada allá. Si el destino no está conectado, se
+  reintenta cada 30 minutos.
+- **Retención escalonada**, igual aquí y en el destino externo: siempre los 10 más recientes,
+  el último de cada día (14 días), de cada semana (8 semanas) y de cada mes (12 meses).
+- **Recuperación automática.** Al abrir, si la base está dañada, se aparta
+  (`raaadio.db.damaged-FECHA`) y se pone la del último respaldo verificado, con un aviso.
+- **Alertas** en la barra superior: respaldo de más de 36 horas, respaldo o copia externa
+  fallidos y disco de la emisora casi lleno (menos de 5 GB o del 5 %; crítico con menos de 1 GB).
 - **Restaurar o importar** se prepara al momento y se aplica al volver a abrir RAAADIO, antes
-  de abrir la base de datos y después de respaldar lo que había.
+  de abrir la base de datos y después de respaldar lo que había. La cola y las tandas ya
+  insertadas siguen siendo las del momento. Los respaldos de versiones anteriores también
+  sirven.
+- **Un solo equipo a la vez.** Si la emisora está abierta en otro equipo (un USB o un disco de
+  red), RAAADIO avisa antes de abrirla; un candado de un equipo que se cerró mal se libera solo.
 - **Mover la emisora.** *Mover o cambiar la carpeta* copia la emisora entera a otro disco
   (con avance, comprobación de espacio y opción de cancelar) o apunta a una que ya existe.
   Rige desde el próximo inicio; la carpeta anterior no se borra.
@@ -503,14 +531,21 @@ Source/
 │   └── DeadAirGuard.*        # Protección contra silencio
 ├── generator/                # Generador de listas por reglas y plantillas
 ├── library/                  # Biblioteca, etiquetas, cola, historial y pauta
-├── database/Database.*       # SQLite: esquema, migraciones y consultas preparadas
+├── database/
+│   ├── Database.*            # SQLite: esquema, migraciones y consultas preparadas
+│   └── StationState.cpp      # Pauta, cola, botonera, ajustes y plantillas en la base
 ├── network/
 │   ├── ApiServer.*           # "Now playing" en 127.0.0.1:8080 (texto y JSON)
 │   ├── StreamEncoder.*       # Transmisión a Icecast (MP3 u Ogg Vorbis) y títulos
 │   ├── Mp3Encoder.*          # MP3 con LAME (libmp3lame.dll, cargada al transmitir)
 │   ├── NowPlaying.*          # Anterior, actual y siguientes: armado y JSON
 │   └── NowPlayingPublisher.* # Título del stream, API y envío a la página web
-├── helpers/                  # Idioma, temas, estilo, carpeta y respaldos, ajustes, claves
+├── helpers/
+│   ├── PersistenceManager.*  # Carpeta de la emisora, respaldos verificados, restauración
+│   ├── BackupService.*       # Respaldo diario, destino externo y copia de la música
+│   ├── StationHealth.*       # Alertas: disco y respaldos
+│   ├── StationLock.*         # Un solo equipo a la vez
+│   └── ...                   # Idioma, temas, estilo, ajustes, claves
 └── ui/                       # Componentes y diálogos
 Tests/RaaadioTests.cpp        # Pruebas automáticas (ctest)
 Assets/                       # Icono, textos es/en y arte (se incrustan en el .exe)
@@ -539,11 +574,12 @@ docs/screenshots/             # Capturas del README (generadas con --ui-snapshot
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Más de 500 comprobaciones cubren la base de datos y sus migraciones, el análisis de audio,
+Más de 600 comprobaciones cubren la base de datos y sus migraciones, el análisis de audio,
 las etiquetas, la importación, los decks, la cola, la pauta, la protección contra silencio,
-la botonera, el streaming (Ogg, MP3 y títulos), lo que suena, los respaldos y "reproducir
-ahora". Corren en laboratorios temporales, sin tocar la emisora real. La integración continua
-compila y prueba cada cambio en Windows.
+la botonera, el streaming (Ogg, MP3 y títulos), lo que suena, los respaldos (verificación,
+retención, destino externo, recuperación de una base dañada), el candado y "reproducir ahora".
+Corren en laboratorios temporales, sin tocar la emisora real. La integración continua compila
+y prueba cada cambio en Windows.
 
 El ejecutable también puede renderizar la interfaz a un PNG con datos de demostración, sin
 abrir dispositivos de audio (así se generan las capturas de este README):
@@ -564,7 +600,8 @@ RAAADIO.exe --ui-snapshot captura.png --size 1366x768 --theme dark --lang es --v
 - [x] Pauta de 24 horas con tandas automáticas
 - [x] Streaming integrado (Icecast y compatibles; MP3 u Ogg Vorbis)
 - [x] Lo que suena en JSON (anterior, actual y siguientes), local y enviado a la página web
-- [x] Respaldos consistentes y emisora portable
+- [x] Respaldos verificados, programados y en un destino externo (con la música); emisora portable
+- [x] Todo el estado de la emisora en la base de datos (sin JSON sueltos)
 - [ ] Exportar el registro de emisión para reportes al regulador
 - [ ] AAC y conexión cifrada (TLS) al servidor de streaming
 - [ ] RadioText (RDS) para el transmisor FM

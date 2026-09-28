@@ -3,7 +3,7 @@
 #include "../helpers/UiStyle.h"
 
 PlaylistGeneratorDialog::PlaylistGeneratorDialog(MusicLibrary& lib, Playlist& pl)
-    : library(lib), playlist(pl)
+    : library(lib), playlist(pl), templateManager(lib)
 {
     categoryList.setRowHeight(UiStyle::rowHeight);
     templatesDisplay.setRowHeight(UiStyle::rowHeight);

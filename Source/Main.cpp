@@ -5,6 +5,7 @@
 #include "helpers/PersistenceManager.h"
 #include "helpers/RaaadioLookAndFeel.h"
 #include "helpers/UiSnapshot.h"
+#include "helpers/StationLock.h"
 
 class RaaadioApplication  : public juce::JUCEApplication
 {
@@ -66,6 +67,31 @@ public:
             return;
         }
 
+        // Otro equipo con esta emisora abierta (un USB o un disco de red): abrirla aquí al
+        // mismo tiempo dañaría la base de datos. Se pregunta antes de abrir nada.
+        stationLock = std::make_unique<StationLock>(PersistenceManager::getLabRoot());
+        if (const auto other = stationLock->otherOwner())
+        {
+            juce::Logger::writeToLog("Station is open on " + other->computer + " (" + other->user + ")");
+            // Enter y Escape cierran: abrir igual tiene que ser una decisión explícita.
+            auto* dialog = new juce::AlertWindow(TRANS("lock_title"),
+                TRANS("lock_message").replace("%1", other->computer).replace("%2", other->user),
+                juce::AlertWindow::WarningIcon);
+            dialog->addButton(TRANS("lock_quit"), 0, juce::KeyPress(juce::KeyPress::returnKey), juce::KeyPress(juce::KeyPress::escapeKey));
+            dialog->addButton(TRANS("lock_open_anyway"), 1);
+            dialog->enterModalState(true, juce::ModalCallbackFunction::create([this](int result) {
+                if (result == 1) openStation();
+                else quit();
+            }), true);
+            return;
+        }
+        openStation();
+    }
+
+    void openStation()
+    {
+        stationLock->acquire();
+
         try {
             juce::Logger::writeToLog("Step 2: Creating MainWindow");
             mainWindow.reset (new MainWindow (getApplicationName()));
@@ -83,6 +109,7 @@ public:
     {
         snapshotRunner = nullptr;
         mainWindow = nullptr;
+        stationLock = nullptr;  // la emisora queda libre para otro equipo
         juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
         lookAndFeel.reset();
         juce::Logger::setCurrentLogger(nullptr);
@@ -155,6 +182,7 @@ private:
     std::unique_ptr<RaaadioLookAndFeel> lookAndFeel;
     std::unique_ptr<UiSnapshotRunner> snapshotRunner;
     std::unique_ptr<MainWindow> mainWindow;
+    std::unique_ptr<StationLock> stationLock;
     bool quitConfirmationOpen = false;
 };
 

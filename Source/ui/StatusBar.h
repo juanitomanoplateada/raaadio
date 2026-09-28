@@ -6,6 +6,7 @@
 #include "RecordingPanel.h"
 #include "../autodj/DeadAirGuard.h"
 #include "../network/StreamEncoder.h"
+#include "../helpers/StationHealth.h"
 
 // Barra superior: marca, estado global de la emisora (al aire / fuera del aire,
 // automático / manual, silencio al aire, transmisión y qué suena), grabación, reloj y
@@ -23,7 +24,11 @@ public:
 
     std::function<void()> onSettingsRequested;
 
-    juce::String getTooltip() override;  // motivo del error de transmisión
+    // Alertas de la emisora (disco, respaldos); se consultan cada 5 s. Clic: configuración.
+    std::function<StationHealth::Alert()> healthSource;
+
+    juce::String getTooltip() override;  // motivo del error de transmisión o de la alerta
+    void mouseUp(const juce::MouseEvent& e) override;
 
 private:
     void timerCallback() override;
@@ -44,6 +49,9 @@ private:
     bool blinkOn = true;
     StreamEncoder::Status streamStatus = StreamEncoder::Status::Off;
     juce::Rectangle<float> streamChipArea;
+    StationHealth::Alert health;
+    juce::Rectangle<float> healthChipArea;
+    int healthTicks = 0;
     juce::String nowPlaying;
     juce::String clockText;
     juce::String dateText;

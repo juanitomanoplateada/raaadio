@@ -1,5 +1,7 @@
 #include "StationSettings.h"
 #include "SecretStore.h"
+#include "PersistenceManager.h"
+#include "../library/MusicLibrary.h"
 
 namespace {
     const char* formatId(StationSettings::StreamFormat format) {
@@ -31,6 +33,10 @@ juce::var StationSettings::toVar() const {
     o->setProperty("streamPublic", streamPublic);
     o->setProperty("streamMetadataDelay", streamMetadataDelay);
     o->setProperty("nowPlayingPushUrl", nowPlayingPushUrl);
+    o->setProperty("backupEnabled", backupEnabled);
+    o->setProperty("backupHour", backupHour);
+    o->setProperty("backupExternalFolder", backupExternalFolder);
+    o->setProperty("backupMirrorLibrary", backupMirrorLibrary);
     return juce::var(o);
 }
 
@@ -74,16 +80,21 @@ StationSettings StationSettings::fromVar(const juce::var& v) {
     s.streamPublic = read("streamPublic", s.streamPublic);
     s.streamMetadataDelay = juce::jlimit(0, 60, (int) read("streamMetadataDelay", s.streamMetadataDelay));
     s.nowPlayingPushUrl = read("nowPlayingPushUrl", s.nowPlayingPushUrl).toString();
+    // Antes el respaldo automático se activaba en la configuración de Windows, no en la emisora.
+    s.backupEnabled = read("backupEnabled", PersistenceManager::legacyAutoBackupSetting());
+    s.backupHour = juce::jlimit(0, 23, (int) read("backupHour", s.backupHour));
+    s.backupExternalFolder = read("backupExternalFolder", s.backupExternalFolder).toString();
+    s.backupMirrorLibrary = read("backupMirrorLibrary", s.backupMirrorLibrary);
     return s;
 }
 
-StationConfig::StationConfig(juce::File f) : file(std::move(f)) {
-    if (file.existsAsFile()) {
-        const auto json = juce::JSON::parse(file);
-        settings = StationSettings::fromVar(json);
-        // Una clave que una versión anterior guardó en claro se cifra enseguida.
-        if (json.hasProperty("streamPassword")) save();
-    }
+StationConfig::StationConfig(MusicLibrary* lib) : library(lib) {
+    if (library == nullptr) return;
+    const auto text = library->withDatabase([](Database& db) { return db.getSetting("station"); });
+    const auto json = juce::JSON::parse(juce::String(text));
+    settings = StationSettings::fromVar(json);
+    // Una clave que una versión anterior guardó en claro se cifra enseguida.
+    if (json.hasProperty("streamPassword")) save();
 }
 
 void StationConfig::set(const StationSettings& newSettings) {
@@ -93,7 +104,8 @@ void StationConfig::set(const StationSettings& newSettings) {
 }
 
 void StationConfig::save() {
-    if (file == juce::File()) return;
-    file.getParentDirectory().createDirectory();
-    file.replaceWithText(juce::JSON::toString(settings.toVar()));
+    if (library == nullptr) return;
+    const auto text = juce::JSON::toString(settings.toVar(), true).toStdString();
+    if (!library->withDatabase([&text](Database& db) { return db.setSetting("station", text); }))
+        juce::Logger::writeToLog("StationConfig: could not save the station settings");
 }

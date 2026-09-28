@@ -93,6 +93,14 @@ public:
 
     Database& getDatabase() { return db; }
 
+    // La base con su candado tomado, para el estado de la emisora (pauta, cola, botonera,
+    // ajustes...) desde cualquier hilo: library.withDatabase([](Database& db) { ... }).
+    template <typename Fn>
+    auto withDatabase(Fn&& fn) {
+        const juce::ScopedLock sl(dbLock);
+        return fn(db);
+    }
+
     // Nombre de archivo o carpeta válido en Windows, macOS y Linux.
     static juce::String makeSafeFileName(const juce::String& name);
 

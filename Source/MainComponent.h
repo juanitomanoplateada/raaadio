@@ -21,6 +21,8 @@
 #include "network/StreamEncoder.h"
 #include "network/NowPlayingPublisher.h"
 #include "helpers/StationSettings.h"
+#include "helpers/BackupService.h"
+#include "helpers/StationHealth.h"
 
 // Qué servicios arranca la ventana principal. Todo activo en uso normal; el modo
 // de captura de UI (UiSnapshot) los apaga para no sonar ni tocar datos reales.
@@ -70,6 +72,7 @@ private:
     // Servicios de emisión. Se crean en el constructor, con la biblioteca ya abierta, y se
     // destruyen antes que AutoDJ, la cola y el motor de audio que usan.
     std::unique_ptr<StationConfig> stationConfig;
+    std::unique_ptr<BackupService> backupService;
     std::unique_ptr<CartPlayer> cartPlayer;
     AirLogRecorder airLog;
     StreamEncoder streamEncoder;
@@ -84,6 +87,12 @@ private:
     void openSettings();
     void changeListenerCallback(juce::ChangeBroadcaster*) override { applyStationSettings(); }
     void applyStationSettings();
+
+    // Alertas para la barra superior: disco de la emisora y respaldos. El espacio libre se
+    // mide una vez por minuto.
+    StationHealth::Alert evaluateHealth();
+    juce::int64 diskFree = -1, diskTotal = -1;
+    juce::uint32 diskCheckedAt = 0;
 
     // F1-F12 disparan la botonera. Se escuchan en la ventana principal, que recibe toda
     // tecla que ningún control usó (aunque nada tenga el foco).

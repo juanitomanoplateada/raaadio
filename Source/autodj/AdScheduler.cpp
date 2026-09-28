@@ -35,8 +35,8 @@ std::vector<TrackInfo> buildBreak(MusicLibrary& library, const AdvertisingManage
 
 //==============================================================================
 AdScheduler::AdScheduler(MusicLibrary& lib, AdvertisingManager& adsManager, Playlist& pl,
-                         Deck& a, Deck& b, juce::File file)
-    : library(lib), ads(adsManager), playlist(pl), deckA(a), deckB(b), stateFile(std::move(file))
+                         Deck& a, Deck& b)
+    : library(lib), ads(adsManager), playlist(pl), deckA(a), deckB(b)
 {
     loadState();
     startTimer(15000);
@@ -125,26 +125,22 @@ void AdScheduler::checkNow(juce::Time now) {
 }
 
 void AdScheduler::loadState() {
-    const auto json = juce::JSON::parse(stateFile);
-    if (auto* keys = json.getArray())
-        for (const auto& key : *keys)
-            done.insert(key.toString());
+    for (const auto& key : library.withDatabase([](Database& db) { return db.loadAdBreaksDone(); }))
+        done.insert(juce::String(key));
 }
 
 void AdScheduler::saveState(juce::Time now) {
     // Solo hace falta recordar los últimos dos días.
     const auto oldest = keyFor(now - juce::RelativeTime::days(2));
-    juce::Array<juce::var> keys;
+    std::set<std::string> keys;
     for (auto it = done.begin(); it != done.end();) {
         if (*it < oldest) {
             it = done.erase(it);
         } else {
-            keys.add(*it);
+            keys.insert(it->toStdString());
             ++it;
         }
     }
-    if (stateFile != juce::File()) {
-        stateFile.getParentDirectory().createDirectory();
-        stateFile.replaceWithText(juce::JSON::toString(juce::var(keys)));
-    }
+    if (!library.withDatabase([&keys](Database& db) { return db.saveAdBreaksDone(keys); }))
+        juce::Logger::writeToLog("AdScheduler: could not save the inserted breaks");
 }

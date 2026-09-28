@@ -4,14 +4,18 @@
 
 #include <JuceHeader.h>
 
+class MusicLibrary;
+
+// La pauta: el N.º de cuña de cada pista, las franjas de cada número y si la pauta
+// automática está activa. Vive en la base de datos de la emisora; cada cambio se guarda al
+// momento.
 class AdvertisingManager : public juce::ChangeBroadcaster
 {
 public:
     AdvertisingManager();
     ~AdvertisingManager();
 
-     
-    void initialise(const juce::File& dataFile);
+    void initialise(MusicLibrary& library);
     void saveData();
     void resetData();
 
@@ -43,7 +47,7 @@ public:
     void setAutoScheduleEnabled(bool enabled);
 
 private:
-    juce::File persistenceFile;
+    MusicLibrary* library = nullptr;
     
      
      

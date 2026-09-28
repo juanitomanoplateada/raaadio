@@ -64,9 +64,18 @@ void StatusBar::refreshState()
     const bool blink = (juce::Time::getMillisecondCounter() / 500) % 2 == 0;
     const auto stream = streamEncoder.getStatus();
 
+    bool healthChanged = false;
+    if (healthSource && healthTicks-- <= 0)
+    {
+        healthTicks = 20;
+        const auto latest = healthSource();
+        healthChanged = latest.level != health.level || latest.text != health.text;
+        health = latest;
+    }
+
     const bool changed = (aOnAir || bOnAir) != onAir || autoDJ.isEnabled() != autoMode
                       || playing != nowPlaying || clock != clockText || date != dateText
-                      || alarm != deadAir || (alarm && blink != blinkOn) || stream != streamStatus;
+                      || alarm != deadAir || (alarm && blink != blinkOn) || stream != streamStatus || healthChanged;
 
     onAir = aOnAir || bOnAir;
     autoMode = autoDJ.isEnabled();
@@ -86,6 +95,8 @@ juce::String StatusBar::getTooltip()
     const auto mouse = getMouseXYRelative().toFloat();
     if (streamStatus != StreamEncoder::Status::Off && streamChipArea.contains(mouse))
         return streamStatus == StreamEncoder::Status::Error ? streamEncoder.getLastError() : TRANS("tip_stream_status");
+    if (health.level != StationHealth::Level::Ok && healthChipArea.contains(mouse))
+        return health.details.joinIntoString("\n");
     if (deadAir && stateArea.toFloat().contains(mouse))
         return TRANS("tip_dead_air");
     return {};
@@ -181,6 +192,17 @@ void StatusBar::paint(juce::Graphics& g)
         streamChipArea = state.withWidth(w);
         state.removeFromLeft(w + 8.0f);
     }
+    // Alertas de la emisora: disco casi lleno, respaldos atrasados o fallidos.
+    healthChipArea = {};
+    if (health.level != StationHealth::Level::Ok)
+    {
+        const auto colour = health.level == StationHealth::Level::Critical ? t.getErrorColour() : t.getWarningColour();
+        const float w = health.level == StationHealth::Level::Critical
+            ? UiStyle::drawChip(g, state, health.text, colour, juce::Colours::white, true)
+            : UiStyle::drawChip(g, state, health.text, colour.withAlpha(0.18f), colour.interpolatedWith(t.getPrimaryTextColour(), 0.2f), true);
+        healthChipArea = state.withWidth(w);
+        state.removeFromLeft(w + 8.0f);
+    }
     state.removeFromLeft(6.0f);
 
     if (nowPlaying.isNotEmpty())
@@ -199,4 +221,10 @@ void StatusBar::paint(juce::Graphics& g)
     g.setColour(t.getPrimaryTextColour());
     g.setFont(UiStyle::mono(22.0f, true));
     g.drawText(clockText, clock.withTrimmedBottom(4.0f), juce::Justification::topRight, false);
+}
+
+void StatusBar::mouseUp(const juce::MouseEvent& e)
+{
+    if (health.level != StationHealth::Level::Ok && healthChipArea.contains(e.position) && onSettingsRequested)
+        onSettingsRequested();
 }

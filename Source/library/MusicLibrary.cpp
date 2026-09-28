@@ -30,6 +30,12 @@ void MusicLibrary::initialise(const juce::File& dbFile) {
     if (migrated > 0)
         juce::Logger::writeToLog("MusicLibrary: " + juce::String(migrated) + " track paths converted to lab-relative");
 
+    // Una sola vez: la pauta, la cola, la botonera, los ajustes y las plantillas pasan de
+    // Config/*.json y Templates/*.json a la base. También sirve para un respaldo viejo que
+    // se restauró (su base es del esquema 1 y trae esos archivos).
+    if (db.getSchemaVersion() < 2)
+        db.importLegacyStationFiles(PersistenceManager::getConfigFolder(), PersistenceManager::getTemplatesFolder());
+
     libraryFolder = PersistenceManager::getLibraryFolder();
     
     if (!libraryFolder.exists()) {

@@ -1,8 +1,8 @@
 #include "PlaylistStore.h"
 #include "MusicLibrary.h"
 
-PlaylistStore::PlaylistStore(Playlist& p, MusicLibrary& lib, const juce::File& f)
-    : playlist(p), library(lib), file(f)
+PlaylistStore::PlaylistStore(Playlist& p, MusicLibrary& lib)
+    : playlist(p), library(lib)
 {
     savedVersion = playlist.getLastModified();
     startTimer(1000);
@@ -16,22 +16,15 @@ PlaylistStore::~PlaylistStore()
 
 int PlaylistStore::restore()
 {
-    if (!file.existsAsFile()) return 0;
+    const auto items = library.withDatabase([](Database& db) { return db.loadQueue(); });
 
-    const auto json = juce::JSON::parse(file);
-    const auto* items = json["tracks"].getArray();
-    if (items == nullptr) return 0;
-
+    // Las filas de pistas borradas ya no están (la base las quita con la pista).
     std::vector<TrackInfo> tracks;
-    for (const auto& item : *items)
+    for (const auto& item : items)
     {
-        // El id es lo fiable; la ruta solo sirve si la pista ya no tiene ese id.
-        TrackInfo track = library.getTrackById((int) item["id"]);
-        if (track.id == -1 && item["path"].toString().isNotEmpty())
-            track = library.getTrackByPath(item["path"].toString());
-
+        TrackInfo track = library.getTrackById(item.trackId);
         if (track.id != -1) {
-            track.breakKey = item["break"].toString().toStdString();  // pieza de una tanda comercial
+            track.breakKey = item.breakKey;  // pieza de una tanda comercial
             tracks.push_back(track);
         }
     }
@@ -39,11 +32,11 @@ int PlaylistStore::restore()
     if (!tracks.empty())
         playlist.insertTracks(tracks, std::numeric_limits<int>::max());
 
-    // Lo recién restaurado ya está en disco.
+    // Lo recién restaurado ya está guardado.
     savedVersion = playlist.getLastModified();
 
     juce::Logger::writeToLog("PlaylistStore: restored " + juce::String((int) tracks.size()) + " of "
-                             + juce::String(items->size()) + " queued tracks");
+                             + juce::String((int) items.size()) + " queued tracks");
     return (int) tracks.size();
 }
 
@@ -52,26 +45,14 @@ void PlaylistStore::saveIfChanged()
     const auto version = playlist.getLastModified();
     if (version == savedVersion) return;
 
-    juce::Array<juce::var> items;
+    std::vector<Database::QueueItem> items;
     for (const auto& t : playlist.getQueue())
-    {
-        auto* item = new juce::DynamicObject();
-        item->setProperty("id", t.id);
-        item->setProperty("path", juce::String(t.path));
-        if (!t.breakKey.empty()) item->setProperty("break", juce::String(t.breakKey));
-        items.add(juce::var(item));
-    }
+        if (t.id != -1) items.push_back({ t.id, t.breakKey });
 
-    auto* root = new juce::DynamicObject();
-    root->setProperty("version", 1);
-    root->setProperty("savedAt", juce::Time::getCurrentTime().toISO8601(true));
-    root->setProperty("tracks", items);
-
-    file.getParentDirectory().createDirectory();
-    if (file.replaceWithText(juce::JSON::toString(juce::var(root))))
+    if (library.withDatabase([&items](Database& db) { return db.saveQueue(items); }))
         savedVersion = version;
     else
-        juce::Logger::writeToLog("PlaylistStore: could not write " + file.getFullPathName());
+        juce::Logger::writeToLog("PlaylistStore: could not save the queue");
 }
 
 void PlaylistStore::timerCallback()

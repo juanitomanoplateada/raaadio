@@ -26,7 +26,7 @@ namespace AdBreaks {
 class AdScheduler : private juce::Timer {
 public:
     AdScheduler(MusicLibrary& library, AdvertisingManager& ads, Playlist& playlist,
-                Deck& deckA, Deck& deckB, juce::File stateFile);
+                Deck& deckA, Deck& deckB);
     ~AdScheduler() override;
 
     // Se inserta con esta anticipación (la cola ya suele llegar hasta esa hora); si la
@@ -53,7 +53,6 @@ private:
     Playlist& playlist;
     Deck& deckA;
     Deck& deckB;
-    juce::File stateFile;
-    std::set<juce::String> done;  // tandas ya insertadas (sobrevive a un reinicio)
+    std::set<juce::String> done;  // tandas ya insertadas (en la base: sobrevive a un reinicio)
     juce::Random random;
 };

@@ -7,11 +7,13 @@
 #include "../helpers/StationSettings.h"
 #include "../network/StreamEncoder.h"
 #include "../network/NowPlayingPublisher.h"
+#include "../helpers/BackupService.h"
 
 class SettingsDialog : public juce::Component {
 public:
     SettingsDialog(juce::AudioDeviceManager& mainDevice, juce::AudioDeviceManager& cueDevice, MusicLibrary& lib, AdvertisingManager& ads,
-                   StationConfig& station, StreamEncoder& streamEncoder, NowPlayingPublisher* nowPlaying, juce::File airLogFolder);
+                   StationConfig& station, StreamEncoder& streamEncoder, NowPlayingPublisher* nowPlaying,
+                   BackupService* backups, juce::File airLogFolder);
     ~SettingsDialog();
     
     void resized() override;
@@ -42,17 +44,26 @@ private:
     };
     
      
-    class LibraryTab : public juce::Component {
+    // Biblioteca y datos: carpeta de la emisora, respaldos (diario, destino externo, copia
+    // de la música), migración y borrado. Es más alta que el diálogo: va en un Viewport.
+    class LibraryTab : public juce::Component, private juce::ChangeListener, private juce::Timer {
     public:
-        LibraryTab(MusicLibrary& lib, AdvertisingManager& ads);
+        LibraryTab(MusicLibrary& lib, AdvertisingManager& ads, StationConfig& station, BackupService* backups);
+        ~LibraryTab() override;
         void resized() override;
         void lookAndFeelChanged() override;
+        static int getIdealHeight();
 
         std::function<void()> onLibraryReset;
 
     private:
+        void changeListenerCallback(juce::ChangeBroadcaster*) override { updateStatus(); }
+        void timerCallback() override { updateStatus(); }
+
         MusicLibrary& library;
         AdvertisingManager& adsManager;
+        StationConfig& station;
+        BackupService* backupService;
 
         // Visual Sections
         juce::GroupComponent labGroup;
@@ -65,11 +76,19 @@ private:
         juce::Label labNextLabel;  // la carpeta que regirá desde el próximo inicio, si cambió
         juce::TextButton changeLabButton { "CHANGE LAB ROOT" };
 
-        // Data Management
-        juce::ToggleButton autoBackupToggle { "DAILY AUTO-BACKUP" };
+        // Respaldos
+        juce::ToggleButton autoBackupToggle;
+        juce::ComboBox backupHour;
+        juce::Label externalCaption;
+        juce::Label externalPathLabel;
+        juce::TextButton chooseExternalButton, clearExternalButton;
+        juce::ToggleButton mirrorToggle;
         juce::TextButton backupButton { "BACKUP" };
         juce::TextButton restoreButton { "RESTORE" };
-        juce::Label dataStatusLabel;  // último respaldo, o la restauración pendiente
+        juce::Label dataStatusLabel;      // último respaldo local, o la restauración pendiente
+        juce::Label externalStatusLabel;  // destino externo y música
+        juce::Label diskStatusLabel;      // espacio libre en el disco de la emisora
+        juce::Label retentionLabel;
 
         // Migration
         juce::TextButton exportButton { "EXPORT" };
@@ -80,6 +99,10 @@ private:
         juce::Label warningLabel;
 
         void updateTexts();
+        void updateStatus();
+        void applyBackupSettings();
+        void chooseExternalFolder();
+        void setExternalFolder(const juce::File& folder);
         PersistenceManager::DatabaseSnapshot databaseSnapshot();
         void performBackup();
         void performRestore();
@@ -175,6 +198,7 @@ private:
     
     std::unique_ptr<AudioTab> audioTab;
     std::unique_ptr<LibraryTab> libraryTab;
+    std::unique_ptr<ScrollingTab> libraryScroller;
     std::unique_ptr<BroadcastTab> broadcastTab;
     std::unique_ptr<ScrollingTab> broadcastScroller;
     std::unique_ptr<LanguageTab> languageTab;
