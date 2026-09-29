@@ -9,13 +9,17 @@ on:
 jobs:
   windows:
     name: Windows x64 (Release)
-    runs-on: windows-latest
+    # Imagen fija con Visual Studio 2022: windows-latest cambia de imagen cuando GitHub la
+    # actualiza y la nueva ya no trae VS 2022 (el generador de abajo no lo encontraba).
+    # JUCE 8.0.3 se compila y se prueba con VS 2022.
+    runs-on: windows-2022
     timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
 
-      # JUCE, SQLite, libebur128 y LAME se descargan con FetchContent: se guardan entre corridas.
+      # JUCE, SQLite, libebur128, LAME y Chromaprint se descargan con FetchContent: se guardan
+      # entre corridas.
       - name: Caché de dependencias
         uses: actions/cache@v4
         with:
@@ -39,4 +43,6 @@ jobs:
             build/RAAADIO_artefacts/Release/RAAADIO.exe
             build/RAAADIO_artefacts/Release/libmp3lame.dll
             build/RAAADIO_artefacts/Release/libmp3lame-COPYING.txt
+            build/RAAADIO_artefacts/Release/chromaprint.dll
+            build/RAAADIO_artefacts/Release/chromaprint-LICENSE.md
           if-no-files-found: error
