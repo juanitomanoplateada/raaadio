@@ -24,7 +24,7 @@ namespace UiStyle
     // Iconos vectoriales: "play", "pause", "stop", "skip", "loop", "eject", "info",
     // "settings", "folder", "record", "mic", "auto", "import", "search", "refresh",
     // "plus", "sparkle", "music", "drop", "chevron-up", "chevron-down", "close",
-    // "broadcast", "headphones", "list", "history", "megaphone", "grid".
+    // "broadcast", "headphones", "list", "history", "megaphone", "grid", "lock", "globe", "link".
     juce::Path icon(const juce::String& name, juce::Rectangle<float> area);
     void drawIcon(juce::Graphics& g, const juce::String& name, juce::Rectangle<float> area, juce::Colour colour);
 

@@ -152,6 +152,10 @@ MainComponent::MainComponent(MainComponentOptions opts)
     libraryComp->setPreviewPlayer(&audioEngine.getPreview());
     onlineIdentifier = std::make_unique<OnlineIdentifier>(library);
     libraryComp->setOnlineIdentifier(onlineIdentifier.get());
+    if (options.songDownloads) {
+        songDownloader = std::make_unique<SongDownloader>(library);
+        libraryComp->setSongDownloader(songDownloader.get());
+    }
 
     // Al confirmar una canción en la revisión su archivo cambia de lugar: la cola guarda la
     // ruta de cada fila, así que se le avisa.
@@ -261,6 +265,7 @@ MainComponent::~MainComponent() {
     statusBar = nullptr;
     libraryComp = nullptr;
     onlineIdentifier = nullptr;  // espera a que termine un pedido en curso
+    songDownloader = nullptr;    // cancela la descarga en curso (y cierra yt-dlp y FFmpeg)
     playlistComp = nullptr;
     mixerComp = nullptr;
     deckA = nullptr;

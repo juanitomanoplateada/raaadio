@@ -215,6 +215,22 @@ target_sources(RAAADIO PRIVATE
     Source/network/OnlineMetadata.cpp
     Source/network/OnlineIdentifier.h
     Source/network/OnlineIdentifier.cpp
+    Source/network/HttpTransport.h
+    Source/network/HttpTransport.cpp
+    Source/network/SongSearch.h
+    Source/network/SongSearch.cpp
+    Source/network/SongSearcher.h
+    Source/network/SongSearcher.cpp
+    Source/network/DownloadTools.h
+    Source/network/DownloadTools.cpp
+    Source/network/SongDownload.h
+    Source/network/SongDownload.cpp
+    Source/network/SongDownloader.h
+    Source/network/SongDownloader.cpp
+    Source/helpers/ProcessRunner.h
+    Source/helpers/ProcessRunner.cpp
+    Source/library/TagWriter.h
+    Source/library/TagWriter.cpp
     Source/library/MusicLibrary.h
     Source/library/MusicLibrary.cpp
     Source/library/TagReader.h
@@ -268,6 +284,8 @@ target_sources(RAAADIO PRIVATE
     Source/ui/ImportReviewView.cpp
     Source/ui/ArtistsView.h
     Source/ui/ArtistsView.cpp
+    Source/ui/OnlineSearchView.h
+    Source/ui/OnlineSearchView.cpp
 )
 
 target_compile_features(RAAADIO PRIVATE cxx_std_17)
@@ -380,6 +398,14 @@ if(RAAADIO_BUILD_TESTS)
         Source/network/Chromaprint.cpp
         Source/network/OnlineMetadata.cpp
         Source/network/OnlineIdentifier.cpp
+        Source/network/HttpTransport.cpp
+        Source/network/SongSearch.cpp
+        Source/network/SongSearcher.cpp
+        Source/network/DownloadTools.cpp
+        Source/network/SongDownload.cpp
+        Source/network/SongDownloader.cpp
+        Source/helpers/ProcessRunner.cpp
+        Source/library/TagWriter.cpp
         Source/helpers/StationSettings.cpp
         Source/helpers/SecretStore.cpp
         Source/helpers/BackupService.cpp

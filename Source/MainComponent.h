@@ -21,6 +21,7 @@
 #include "network/StreamEncoder.h"
 #include "network/NowPlayingPublisher.h"
 #include "network/OnlineIdentifier.h"
+#include "network/SongDownloader.h"
 #include "helpers/StationSettings.h"
 #include "helpers/BackupService.h"
 #include "helpers/StationHealth.h"
@@ -32,6 +33,7 @@ struct MainComponentOptions {
     bool startApiServer = true;
     bool runAutoBackup = true;
     bool analyseLibrary = true;  // análisis en segundo plano de pistas de versiones anteriores
+    bool songDownloads = true;   // descargas de la búsqueda en internet
 };
 
 class MainComponent : public juce::Component, public juce::DragAndDropContainer,
@@ -82,6 +84,7 @@ private:
     std::unique_ptr<DeadAirGuard> deadAirGuard;
     std::unique_ptr<AdScheduler> adScheduler;
     std::unique_ptr<OnlineIdentifier> onlineIdentifier;  // AcoustID y MusicBrainz, si la emisora lo activa
+    std::unique_ptr<SongDownloader> songDownloader;      // descargas de la búsqueda en internet (yt-dlp)
 
     // Sin esta ventana JUCE no muestra las ayudas emergentes (setTooltip) de ningún control.
     juce::TooltipWindow tooltipWindow { this, 700 };

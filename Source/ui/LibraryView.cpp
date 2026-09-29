@@ -21,6 +21,15 @@ LibraryView::LibraryView(MusicLibrary& lib)
     UiStyle::setIcon(refreshButton, "refresh");
     refreshButton.onClick = [this] { refresh(); };
 
+    addAndMakeVisible(onlineButton);
+    UiStyle::setVariant(onlineButton, "ghost");
+    UiStyle::setIcon(onlineButton, "globe");
+    addChildComponent(onlineEmptyButton);
+    UiStyle::setVariant(onlineEmptyButton, "primary");
+    UiStyle::setIcon(onlineEmptyButton, "globe");
+    for (auto* b : { &onlineButton, &onlineEmptyButton })
+        b->onClick = [this] { if (onSearchOnline) onSearchOnline(searchBox.getText().trim()); };
+
     searchBox.setIndents(34, 0);
     searchBox.setJustification(juce::Justification::centredLeft);
     searchBox.setFont(UiStyle::ui(14.5f));
@@ -91,10 +100,17 @@ void LibraryView::resized() {
     toolbar.removeFromRight(4);
     countArea = toolbar.removeFromRight(90);
     toolbar.removeFromRight(8);
+    onlineButton.setBounds(toolbar.removeFromRight(UiStyle::controlHeight));
+    toolbar.removeFromRight(4);
     searchBox.setBounds(toolbar);
 
     area.removeFromTop(UiStyle::gap);
     table.setBounds(area);
+
+    // Debajo del aviso "Sin resultados" (ver paintOverChildren).
+    const auto empty = area.withTrimmedTop(table.getHeaderHeight());
+    const int buttonWidth = juce::jmin(empty.getWidth() - 24, onlineEmptyButton.getBestWidthForHeight(34) + 44);
+    onlineEmptyButton.setBounds(empty.getCentreX() - buttonWidth / 2, empty.getCentreY() + 62, buttonWidth, 34);
 
     const int lengthWidth = 80;
     const int flexible = juce::jmax(120, table.getWidth() - lengthWidth - table.getViewport()->getScrollBarThickness());
@@ -107,6 +123,8 @@ void LibraryView::lookAndFeelChanged() {
     auto& t = ThemeManager::getInstance();
     searchBox.setTextToShowWhenEmpty(TRANS("search_placeholder"), t.getMutedTextColour());
     refreshButton.setTooltip(TRANS("btn_refresh"));
+    onlineButton.setTooltip(TRANS("tip_online_search"));
+    onlineEmptyButton.setTooltip(TRANS("tip_online_search"));
 
     table.getHeader().setColumnName(colTitle, TRANS("header_title"));
     table.getHeader().setColumnName(colArtist, TRANS("header_artist"));
@@ -122,6 +140,15 @@ void LibraryView::refresh() {
     cachedTracks = library.search(searchBox.getText(), currentCategoryFilter);
     table.updateContent();
     categorySidebar.refreshCategories();
+
+    // Lo que no está en la biblioteca, a un clic de buscarlo en internet.
+    const auto query = searchBox.getText().trim();
+    onlineEmptyButton.setVisible(cachedTracks.empty() && query.isNotEmpty());
+    if (onlineEmptyButton.isVisible()) {
+        const auto shown = query.length() > 40 ? query.substring(0, 38).trimEnd() + "..." : query;
+        onlineEmptyButton.setButtonText(TRANS("library_search_online").replace("%1", shown));
+        resized();
+    }
     repaint();
 }
 

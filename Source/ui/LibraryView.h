@@ -26,6 +26,8 @@ public:
     void setDecks(Deck* dA, Deck* dB);
     void setPlaylist(Playlist* p);
     void setCartPlayer(CartPlayer* player) { cartPlayer = player; }  // clic derecho: asignar a la botonera
+    // Buscar en internet (Deezer y YouTube) lo escrito en el buscador.
+    std::function<void(const juce::String& query)> onSearchOnline;
 
     int getNumRows() override;
     void paintRowBackground(juce::Graphics& g, int rowNumber, int width, int height, bool rowIsSelected) override;
@@ -41,6 +43,8 @@ private:
     CategorySidebarComponent categorySidebar;
     juce::TableListBox table;
     juce::TextButton refreshButton;
+    juce::TextButton onlineButton;        // globo junto al buscador
+    juce::TextButton onlineEmptyButton;   // "Buscar «...» en internet", si la biblioteca no la tiene
     juce::TextEditor searchBox;
     juce::Rectangle<int> countArea;
 

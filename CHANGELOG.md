@@ -39,6 +39,29 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
   dentro de sus límites de pedidos. La revisión lo muestra como sugerencia ("Usar datos en
   línea", en lote para lo que tiene más del 90 %); al confirmar se guardan el identificador
   de MusicBrainz y el ISRC. Se activa con una clave de AcoustID en Ajustes.
+- **Buscar canciones en internet** (`SongSearch`, `SongSearcher`, ventana *Buscar canciones
+  en internet*): desde el globo junto al buscador de la biblioteca, o con *Buscar «…» en
+  internet* cuando la biblioteca no la tiene. Los datos vienen de la API pública de Deezer
+  (sin clave: artista, título, álbum, año, duración, ISRC, carátula) y se marca lo que ya
+  está en la biblioteca aunque se escriba distinto. Para la canción elegida se busca la misma
+  grabación en YouTube Music (y en YouTube si allá no coincide) y se ordenan los videos por
+  título, artista, duración y tipo (audio oficial primero; en vivo, karaoke y covers abajo),
+  con *Coincide*, *Parecida* o *Dudosa*. El enlace se copia o se abre; también Deezer y la
+  búsqueda en Spotify (su API pide Premium). La búsqueda hace un pedido a YouTube a la vez,
+  con pausa, solo para la canción que se mira; lo encontrado no se repite y si YouTube
+  responde 429 no se le pide nada durante 15 minutos.
+- **Descargar a la biblioteca** (`SongDownloader`, `SongDownload`, `DownloadTools`,
+  `TagWriter`, `ProcessRunner`): yt-dlp baja el audio del video elegido, FFmpeg lo pasa a MP3
+  VBR, se escriben las etiquetas ID3 con los datos de Deezer (invitados, álbum, año, ISRC,
+  enlace de origen) y la canción entra por revisar en un lote propio (se puede deshacer); el
+  ISRC queda en la pista. yt-dlp, FFmpeg y Deno se instalan a pedido desde sus publicaciones
+  oficiales, con el SHA-256 verificado, en `%LOCALAPPDATA%\RAAADIO\Herramientas` (o se usan los
+  del `PATH`); yt-dlp se actualiza una vez al día. Ritmo para no ser bloqueado: de a una, al
+  menos 20 s entre descargas, tope de 20 por hora, pocos reintentos; si YouTube pide esperar
+  o confirmar que no es un robot, la fila se pausa 1 h o 6 h (la pausa se guarda) y la
+  canción espera en vez de fallar. Cancelar cierra todo el árbol de procesos (job object).
+  Cada intento queda en la tabla `downloads`. Aviso de derechos y términos de uso la primera
+  vez. Las descargas siguen aunque se cierre la ventana de búsqueda.
 - **Búsqueda FTS5** sin mayúsculas ni tildes, por partes de palabras, créditos y nombre
   original. **Separación de artistas por intérprete** en el generador (con invitados).
 - **Mostrar en MAYÚSCULAS** (*Configuración → Biblioteca y datos*): los nombres se guardan

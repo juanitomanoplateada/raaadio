@@ -98,6 +98,20 @@ void Database::createCatalogTables() {
             "error TEXT DEFAULT '', "
             "checked_at TEXT DEFAULT '');");
 
+    // Descargas de la búsqueda en internet (yt-dlp): un intento por fila.
+    execute("CREATE TABLE IF NOT EXISTS downloads ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "video_id TEXT NOT NULL, "
+            "deezer_id INTEGER DEFAULT 0, "
+            "artist TEXT DEFAULT '', "
+            "title TEXT DEFAULT '', "
+            "status INTEGER NOT NULL DEFAULT 0, "
+            "track_id INTEGER DEFAULT -1, "
+            "error TEXT DEFAULT '', "
+            "started_at TEXT NOT NULL, "
+            "finished_at TEXT DEFAULT '');");
+    execute("CREATE INDEX IF NOT EXISTS idx_downloads_started ON downloads(started_at);");
+
     // Búsqueda sin mayúsculas ni tildes (FTS5). keys: las claves del artista y el título
     // ("dleon" para "D'León"), que el separador de palabras de FTS no produce.
     ftsAvailable = sqlite3_exec(db, "CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5("
@@ -694,4 +708,57 @@ std::pair<std::string, std::string> Database::getOnlineIds(int trackId) {
     each("SELECT mb_recording_id, isrc FROM tracks WHERE id = ?1;", [trackId](sqlite3_stmt* s) { sqlite3_bind_int(s, 1, trackId); },
          [&ids](sqlite3_stmt* s) { ids = { columnText(s, 0), columnText(s, 1) }; });
     return ids;
+}
+
+//==============================================================================
+// Descargas
+
+int Database::startDownload(const std::string& videoId, long long deezerId, const std::string& artist, const std::string& title) {
+    const bool ok = run("INSERT INTO downloads (video_id, deezer_id, artist, title, status, started_at) "
+                        "VALUES (?1, ?2, ?3, ?4, 0, datetime('now', 'localtime'));", [&](sqlite3_stmt* s) {
+        bindText(s, 1, videoId);
+        sqlite3_bind_int64(s, 2, deezerId);
+        bindText(s, 3, artist);
+        bindText(s, 4, title);
+    });
+    return ok ? (int) sqlite3_last_insert_rowid(db) : -1;
+}
+
+bool Database::finishDownload(int id, DownloadStatus status, int trackId, const std::string& error) {
+    return run("UPDATE downloads SET status = ?1, track_id = ?2, error = ?3, finished_at = datetime('now', 'localtime') "
+               "WHERE id = ?4;", [&](sqlite3_stmt* s) {
+        sqlite3_bind_int(s, 1, (int) status);
+        sqlite3_bind_int(s, 2, trackId);
+        bindText(s, 3, error);
+        sqlite3_bind_int(s, 4, id);
+    });
+}
+
+std::vector<Database::DownloadRecord> Database::getRecentDownloads(int limit) {
+    std::vector<DownloadRecord> rows;
+    each("SELECT id, video_id, deezer_id, artist, title, status, track_id, error, started_at, finished_at "
+         "FROM downloads ORDER BY id DESC LIMIT ?1;", [limit](sqlite3_stmt* s) { sqlite3_bind_int(s, 1, limit); },
+         [&rows](sqlite3_stmt* s) {
+        DownloadRecord r;
+        r.id = sqlite3_column_int(s, 0);
+        r.videoId = columnText(s, 1);
+        r.deezerId = sqlite3_column_int64(s, 2);
+        r.artist = columnText(s, 3);
+        r.title = columnText(s, 4);
+        r.status = (DownloadStatus) sqlite3_column_int(s, 5);
+        r.trackId = sqlite3_column_int(s, 6);
+        r.error = columnText(s, 7);
+        r.startedAt = columnText(s, 8);
+        r.finishedAt = columnText(s, 9);
+        rows.push_back(std::move(r));
+    });
+    return rows;
+}
+
+std::vector<std::string> Database::getDownloadStartsSince(int minutes) {
+    std::vector<std::string> starts;
+    each("SELECT started_at FROM downloads WHERE started_at >= datetime('now', 'localtime', ?1) ORDER BY started_at;",
+         [minutes](sqlite3_stmt* s) { bindText(s, 1, "-" + std::to_string(minutes) + " minutes"); },
+         [&starts](sqlite3_stmt* s) { starts.push_back(columnText(s, 0)); });
+    return starts;
 }

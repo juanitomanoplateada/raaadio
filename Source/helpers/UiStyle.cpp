@@ -305,6 +305,27 @@ static juce::Path unitIcon(const juce::String& name)
             for (float y : { 0.14f, 0.54f })
                 p.addRoundedRectangle(x, y, 0.32f, 0.32f, 0.06f);
     }
+    else if (name == "globe")
+    {
+        juce::Path outline;
+        outline.addEllipse(0.14f, 0.14f, 0.72f, 0.72f);
+        p = stroke(outline, 0.08f);
+        juce::Path meridian;
+        meridian.addEllipse(0.35f, 0.14f, 0.3f, 0.72f);
+        p.addPath(stroke(meridian, 0.07f));
+        p.addPath(stroke(line(0.16f, 0.5f, 0.84f, 0.5f), 0.07f));
+        p.addPath(stroke(line(0.24f, 0.32f, 0.76f, 0.32f), 0.06f));
+        p.addPath(stroke(line(0.24f, 0.68f, 0.76f, 0.68f), 0.06f));
+    }
+    else if (name == "link")
+    {
+        // Dos eslabones que se cruzan, inclinados.
+        juce::Path rings;
+        rings.addRoundedRectangle(0.06f, 0.37f, 0.52f, 0.26f, 0.13f);
+        rings.addRoundedRectangle(0.42f, 0.37f, 0.52f, 0.26f, 0.13f);
+        rings.applyTransform(juce::AffineTransform::rotation(-MathConstants<float>::pi / 4.0f, 0.5f, 0.5f));
+        p = stroke(rings, 0.08f);
+    }
 
     return p;
 }

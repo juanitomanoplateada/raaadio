@@ -275,6 +275,23 @@ public:
     bool setOnlineIds(int trackId, const std::string& recordingId, const std::string& isrc);
     std::pair<std::string, std::string> getOnlineIds(int trackId);
 
+    // Descargas de la búsqueda en internet: cada intento queda anotado (el límite por hora se
+    // respeta aunque se cierre el programa, y queda de dónde vino cada canción).
+    enum class DownloadStatus { Running = 0, Done = 1, Failed = 2, Duplicate = 3, Cancelled = 4 };
+    struct DownloadRecord {
+        int id = -1;
+        std::string videoId, artist, title, error;
+        long long deezerId = 0;
+        DownloadStatus status = DownloadStatus::Running;
+        int trackId = -1;
+        std::string startedAt, finishedAt;  // hora local, "AAAA-MM-DD HH:MM:SS"
+    };
+    int startDownload(const std::string& videoId, long long deezerId, const std::string& artist, const std::string& title);  // -1 si falla
+    bool finishDownload(int id, DownloadStatus status, int trackId, const std::string& error);
+    std::vector<DownloadRecord> getRecentDownloads(int limit);
+    // Cuándo empezaron las descargas de los últimos minutes minutos.
+    std::vector<std::string> getDownloadStartsSince(int minutes);
+
     // Huella acústica: una por pista de música (ver AcousticFingerprint).
     bool setFingerprint(int trackId, const std::vector<uint32_t>& fingerprint, int version);
     struct FingerprintRow {

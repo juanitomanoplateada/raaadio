@@ -2,6 +2,7 @@
 #include <JuceHeader.h>
 
 class MainComponent;
+class SongDownloader;
 
 // Modo de captura de UI: renderiza la interfaz a un PNG con datos de demostración,
 // sin ventana, sin dispositivos de audio y en una carpeta de laboratorio temporal.
@@ -10,7 +11,7 @@ class MainComponent;
 //   RAAADIO.exe --ui-snapshot salida.png [--size 1920x1080] [--theme dark|light]
 //               [--lang es|en] [--view main|empty|history|ads|settings|settings-library|
 //                                     settings-broadcast|settings-broadcast-2|settings-language|settings-about|
-//                                     cartwall|generator|track|import]
+//                                     cartwall|generator|track|import|library-online|online-search]
 class UiSnapshotRunner : private juce::Timer
 {
 public:
@@ -44,6 +45,7 @@ private:
 
     Options options;
     std::unique_ptr<MainComponent> main;
+    std::unique_ptr<SongDownloader> demoDownloader;  // descargas de ejemplo (sin yt-dlp de verdad)
     std::unique_ptr<juce::Component> dialogView;
     juce::Component* target = nullptr;
     juce::uint32 startTime = 0;

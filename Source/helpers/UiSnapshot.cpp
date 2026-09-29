@@ -8,6 +8,8 @@
 #include "../ui/LibraryView.h"
 #include "../ui/AdsListView.h"
 #include "../ui/ImportReviewView.h"
+#include "../ui/OnlineSearchView.h"
+#include "UiStyle.h"
 
 //==============================================================================
 
@@ -113,6 +115,95 @@ static ComponentType* findFirstChild(juce::Component* parent)
 }
 
 //==============================================================================
+// Búsqueda en internet sin conectarse: Deezer y YouTube Music responden con datos de ejemplo
+// (la misma forma de sus respuestas de verdad) y la carátula es un degradado.
+
+static juce::String demoMusicItem(const std::string& id, const std::string& title, const std::string& artist,
+                                  const std::string& album, const std::string& duration, const std::string& plays)
+{
+    auto page = [](const std::string& type) {
+        return R"("navigationEndpoint": {"browseEndpoint": {"browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": ")"
+             + type + "\"}}}}";
+    };
+    const std::string json = R"({"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": ")" + id + R"("}, "flexColumns": [
+        {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": ")" + title + R"(", "navigationEndpoint": {"watchEndpoint": {"videoId": ")" + id
+        + R"(", "watchEndpointMusicSupportedConfigs": {"watchEndpointMusicConfig": {"musicVideoType": "MUSIC_VIDEO_TYPE_ATV"}}}}}]}}},
+        {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": ")" + artist + "\", " + page("MUSIC_PAGE_TYPE_ARTIST")
+        + R"(}, {"text": " • "}, {"text": ")" + album + "\", " + page("MUSIC_PAGE_TYPE_ALBUM")
+        + R"(}, {"text": " • "}, {"text": ")" + duration + R"("}]}}},
+        {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": ")" + plays + R"("}]}}}]}})";
+    return juce::String::fromUTF8(json.c_str());
+}
+
+static HttpTransport::Response demoOnline(const HttpTransport::Request& request)
+{
+    HttpTransport::Response r;
+    r.status = 200;
+    if (request.url.contains("api.deezer.com/search"))
+    {
+        struct Row { int id; const char* title; const char* album; int duration; const char* isrc; };
+        const Row rows[] = {
+            { 1001, "Burbujas de Amor", "Bachata Rosa", 250, "USJ3V1862529" },
+            { 1002, "Ojalá Que Llueva Café", "Ojalá Que Llueva Café", 256, "USJ3V1862530" },
+            { 1003, "La Bilirrubina", "Bachata Rosa", 214, "USJ3V1862531" },
+            { 1004, "Bachata Rosa", "Bachata Rosa", 258, "USJ3V1862532" },
+            { 1005, "Frío, Frío (En Vivo)", "Asondeguerra Tour", 236, "USJ3V1862533" },
+            { 1006, "Como Abeja al Panal", "Colección Romántica", 247, "USJ3V1862534" },
+            { 1007, "La Llave de Mi Corazón", "La Llave de Mi Corazón", 222, "USJ3V1862535" },
+            { 1008, "Visa para un Sueño", "Ojalá Que Llueva Café", 255, "USJ3V1862536" },
+            { 1009, "Estrellitas y Duendes", "Mudanza y Acarreo", 239, "USJ3V1862537" },
+            { 1010, "A Pedir Su Mano", "Areíto", 226, "USJ3V1862538" },
+        };
+        juce::StringArray items;
+        for (const auto& row : rows)
+        {
+            const auto title = juce::String::fromUTF8(row.title);
+            const auto version = title.fromFirstOccurrenceOf(" (", true, false).trim();
+            items.add("{\"id\": " + juce::String(row.id) + ", \"type\": \"track\", \"title\": \"" + title + "\", \"title_short\": \""
+                      + title.upToFirstOccurrenceOf(" (", false, false) + "\", \"title_version\": \"" + version + "\", \"duration\": "
+                      + juce::String(row.duration) + ", \"isrc\": \"" + row.isrc + "\", \"link\": \"https://www.deezer.com/track/"
+                      + juce::String(row.id) + "\", \"artist\": {\"name\": \"Juan Luis Guerra\"}, \"album\": {\"title\": \""
+                      + juce::String::fromUTF8(row.album) + "\", \"cover_medium\": \"demo://cover\"}}");
+        }
+        r.body = "{\"data\": [" + items.joinIntoString(", ") + "], \"total\": 10}";
+    }
+    else if (request.url.contains("api.deezer.com/track/"))
+    {
+        r.body = R"({"id": 1001, "title": "Burbujas de Amor", "release_date": "1990-12-11",
+                     "contributors": [{"name": "Juan Luis Guerra", "role": "Main"}]})";
+    }
+    else if (request.url.startsWith("demo://cover"))
+    {
+        juce::Image cover(juce::Image::RGB, 250, 250, true);
+        {
+            juce::Graphics g(cover);
+            g.setGradientFill(juce::ColourGradient(juce::Colour(0xffe0457b), 0.0f, 0.0f, juce::Colour(0xff3a1c71), 250.0f, 250.0f, false));
+            g.fillAll();
+            UiStyle::drawIcon(g, "music", { 75.0f, 75.0f, 100.0f, 100.0f }, juce::Colours::white.withAlpha(0.85f));
+        }
+        juce::MemoryOutputStream out(r.data, false);
+        juce::PNGImageFormat().writeImageToStream(cover, out);
+    }
+    else if (request.url.contains("music.youtube.com"))
+    {
+        juce::StringArray items {
+            demoMusicItem("v0ckuv1xBm0", "Burbujas De Amor", "Juan Luis Guerra 4.40", "Romance Rosa", "4:09", "267 M reproducciones"),
+            demoMusicItem("G6fJreMyIks", "Burbujas de Amor", "Juan Luis Guerra 4.40", "Bachata Rosa", "4:11", "267 M reproducciones"),
+            demoMusicItem("c6HhrpF09OI", "Burbujas de Amor", "J.Pedro Luis y J.Luis Guerra", "Hello! Dominican Republic Music", "4:23", "39 K reproducciones"),
+            demoMusicItem("lT5Pz3os9q8", "Burbujas de amor", "Caracol Televisión y Catalexia", "Canciones La Descarga 2024", "3:15", "788 reproducciones"),
+            demoMusicItem("yovV2KnbGLw", "Burbujas de Amor", "Banda Sinaloense Los Recoditos", "Ritmo de Fiesta", "4:33", "53 K reproducciones"),
+        };
+        r.body = R"({"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [{"musicShelfRenderer": {"contents": [)"
+               + items.joinIntoString(", ") + "]}}]}}}}]}}}";
+    }
+    else
+    {
+        r.body = "{}";
+    }
+    return r;
+}
+
+//==============================================================================
 
 UiSnapshotRunner::UiSnapshotRunner(const Options& o) : options(o)
 {
@@ -121,6 +212,7 @@ UiSnapshotRunner::UiSnapshotRunner(const Options& o) : options(o)
     mainOptions.startApiServer = false;
     mainOptions.runAutoBackup = false;
     mainOptions.analyseLibrary = false;
+    mainOptions.songDownloads = false;
 
     main = std::make_unique<MainComponent>(mainOptions);
     main->setSize(options.width, options.height);
@@ -142,6 +234,7 @@ UiSnapshotRunner::~UiSnapshotRunner()
 {
     stopTimer();
     dialogView = nullptr;
+    demoDownloader = nullptr;
     main = nullptr;
 }
 
@@ -411,6 +504,17 @@ juce::Component* UiSnapshotRunner::createView()
         return main.get();
     }
 
+    // Una canción que la biblioteca no tiene: el botón para buscarla en internet.
+    if (view == "library-online")
+    {
+        // El buscador es hijo directo de la vista (la barra de categorías tiene los suyos).
+        if (auto* libraryView = findFirstChild<LibraryView>(main.get()))
+            for (auto* child : libraryView->getChildren())
+                if (auto* box = dynamic_cast<juce::TextEditor*>(child))
+                    box->setText("Burbujas de amor", true);
+        return main.get();
+    }
+
     int width = 600, height = 600;
 
     if (view.startsWith("settings"))
@@ -454,6 +558,50 @@ juce::Component* UiSnapshotRunner::createView()
     {
         dialogView = std::make_unique<AdvancedImportDialog>(main->library);
         width = 520; height = 240;
+    }
+    else if (view == "online-search")
+    {
+        // Una descarga a medias y otra en cola: yt-dlp de mentira que llega al 45 % y espera.
+        const auto lab = PersistenceManager::getLibraryFolder().getParentDirectory();
+        SongDownloader::Services services;
+        services.toolsFolder = lab.getChildFile("DemoTools");
+        services.toolsFolder.getChildFile("yt-dlp.exe").create();
+        services.toolsFolder.getChildFile("ffmpeg/ffmpeg.exe").create();
+        services.workFolder = lab.getChildFile("DemoDownloads");
+        services.pathVariable = juce::String();
+        services.minGapSeconds = 0;
+        services.maxJitterSeconds = 0;
+        services.run = [](const juce::StringArray& command, const ProcessRunner::LineCallback& onLine, const ProcessRunner::StopCheck& shouldStop) {
+            if (command.contains("-U")) return 0;  // la actualización diaria
+            onLine("[raaadio]  12.0%");
+            onLine("[raaadio]  45.0%");
+            while (!shouldStop()) juce::Thread::sleep(20);
+            return (int) ProcessRunner::stopped;
+        };
+        demoDownloader = std::make_unique<SongDownloader>(main->library, services);
+
+        auto demoTrack = [](juce::int64 id, const char* title, int duration) {
+            SongSearch::Track t;
+            t.id = id;
+            t.title = t.titleShort = juce::String::fromUTF8(title);
+            t.artist = "Juan Luis Guerra";
+            t.duration = duration;
+            return t;
+        };
+        auto demoVideo = [](const char* id) {
+            SongSearch::Video v;
+            v.id = id;
+            v.score = 1.0;
+            return v;
+        };
+        demoDownloader->enqueue(demoTrack(1001, "Burbujas de Amor", 250), demoVideo("v0ckuv1xBm0"));
+        demoDownloader->enqueue(demoTrack(1003, "La Bilirrubina", 214), demoVideo("BF3yLhIgkXU"));
+
+        auto search = std::make_unique<OnlineSearchView>(main->library, demoDownloader.get(), &demoOnline);
+        search->search("Juan Luis Guerra");
+        dialogView = std::move(search);
+        width = options.width;
+        height = options.height;
     }
     else
     {

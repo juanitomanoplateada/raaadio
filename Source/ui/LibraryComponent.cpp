@@ -63,6 +63,7 @@ LibraryComponent::LibraryComponent(MusicLibrary& lib, HistoryManager& hm, Advert
     };
     libraryView.setCartPlayer(&carts);
     adsView.setCartPlayer(&carts);
+    libraryView.onSearchOnline = [this](const juce::String& query) { openOnlineSearch(query); };
 
     // Se agregan después de las pestañas para quedar por encima de su barra.
     addAndMakeVisible(advancedImportButton);
@@ -93,6 +94,7 @@ LibraryComponent::LibraryComponent(MusicLibrary& lib, HistoryManager& hm, Advert
 LibraryComponent::~LibraryComponent() {
     stopTimer();
     reviewWindow = nullptr;
+    onlineSearchWindow = nullptr;
 }
 
 void LibraryComponent::paint(juce::Graphics& g) {
@@ -273,6 +275,24 @@ void LibraryComponent::openReview(ImportReview::Scope scope) {
             safe->reviewWindow = nullptr;
             safe->libraryView.refresh();
             safe->updateReviewButton();
+        });
+    };
+}
+
+void LibraryComponent::openOnlineSearch(const juce::String& query) {
+    if (onlineSearchWindow != nullptr) {
+        onlineSearchWindow->search(query);
+        onlineSearchWindow->toFront(true);
+        return;
+    }
+
+    onlineSearchWindow = std::make_unique<OnlineSearchWindow>(library, songDownloader, query);
+    // Se cierra después del clic: la ventana no se puede borrar dentro de su propio evento.
+    juce::Component::SafePointer<LibraryComponent> safe(this);
+    onlineSearchWindow->onOpenReview = [safe] { if (safe != nullptr) safe->openReview(ImportReview::Scope::NewImports); };
+    onlineSearchWindow->onClosed = [safe] {
+        juce::MessageManager::callAsync([safe] {
+            if (safe != nullptr) safe->onlineSearchWindow = nullptr;
         });
     };
 }

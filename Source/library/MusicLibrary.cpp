@@ -89,6 +89,27 @@ void MusicLibrary::importFiles(const juce::Array<juce::File>& files, const juce:
     currentImportThread->startThread();
 }
 
+MusicLibrary::DownloadImport MusicLibrary::importDownloaded(const juce::File& file, const juce::String& batchSource,
+                                                            const juce::String& isrc) {
+    const juce::ScopedLock il(importLock);
+    DownloadImport result;
+    int batch = 0;
+    {
+        const juce::ScopedLock sl(dbLock);
+        batch = juce::jmax(0, db.createImportBatch(batchSource.toStdString(), -1, 1));
+    }
+    result.result = processAndAddTrack(file, "", batch);
+    if (result.result == ImportResult::Added) {
+        const juce::ScopedLock sl(dbLock);
+        const auto ids = db.getPendingTracksOfBatch(batch);
+        if (!ids.empty()) {
+            result.trackId = ids.front();
+            if (isrc.isNotEmpty()) db.setOnlineIds(result.trackId, "", isrc.toStdString());
+        }
+    }
+    return result;
+}
+
 void MusicLibrary::cancelImport() {
     if (currentImportThread) {
         currentImportThread->signalThreadShouldExit();
@@ -115,6 +136,7 @@ MusicLibrary::ImportThread::ImportThread(MusicLibrary& owner, const juce::Array<
     : Thread("Library Import"), library(owner), files(filesToImport), targetCategory(cat) {}
 
 void MusicLibrary::ImportThread::run() {
+    const juce::ScopedLock il(library.importLock);
     int totalFiles = library.countFiles(files);
     int currentFileIndex = 0;
 

@@ -103,7 +103,10 @@ en una carpeta que se puede llevar en un disco externo.
       <img src="docs/screenshots/artistas.png" alt="Artistas"/>
       <br/><sub><b>Artistas</b> · renombrar y fusionar en todas sus canciones, con alias y parecidos</sub>
     </td>
-    <td width="50%"></td>
+    <td width="50%" align="center">
+      <img src="docs/screenshots/buscar-en-internet.png" alt="Buscar canciones en internet"/>
+      <br/><sub><b>Buscar en internet</b> · datos de Deezer, el enlace de YouTube que coincide y la descarga a la biblioteca</sub>
+    </td>
   </tr>
 </table>
 
@@ -247,6 +250,31 @@ nombre: renombrar o traducir la interfaz no rompe la publicidad.
   intérprete, invitado o compositor y sus alias. Renombrar uno cambia todas sus canciones y
   archivos; fusionar dos que son el mismo ("Wilfridovargas" y "Wilfrido Vargas") junta sus
   canciones y deja el nombre equivocado como alias. La vista sugiere los parecidos.
+- **Buscar canciones en internet** (el globo junto al buscador, o *Buscar «…» en internet*
+  cuando la biblioteca no la tiene): los datos vienen de [Deezer](https://developers.deezer.com)
+  (sin clave ni cuenta: artista, título, álbum, año, duración, ISRC y carátula) y se marca lo
+  que la emisora ya tiene aunque se escriba distinto. Para la canción elegida se busca la
+  misma grabación en YouTube Music (y en YouTube si allá no aparece): los videos se ordenan
+  por título, artista, duración y tipo (el audio oficial primero; en vivo, karaoke y covers
+  abajo) y se marcan *Coincide*, *Parecida* o *Dudosa*. El enlace se copia (`Ctrl+C`) o se
+  abre; también la canción en Deezer y su búsqueda en Spotify. La búsqueda cuida a YouTube:
+  un pedido a la vez con pausa, solo para la canción que se mira, sin repetir lo ya
+  encontrado y, si YouTube pide esperar (HTTP 429), nada durante 15 minutos.
+- **Descargar a la biblioteca** (desde la misma ventana): [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+  baja el audio del video elegido, FFmpeg lo pasa a MP3 (VBR de máxima calidad), se le
+  escriben las etiquetas con los datos de Deezer (artista con invitados, título, álbum, año,
+  ISRC y el enlace de origen) y entra **por revisar** a `Library/_Entrada`, en un lote propio
+  que se puede deshacer. La primera vez RAAADIO ofrece instalar yt-dlp, FFmpeg y Deno (unos
+  140 MB desde sus publicaciones oficiales en GitHub, con el SHA-256 verificado) en
+  `%LOCALAPPDATA%\RAAADIO\Herramientas`; si ya están en el `PATH`, los usa. yt-dlp se
+  actualiza solo una vez al día. Para no terminar bloqueado por YouTube: de a una canción,
+  al menos 20 s (más un poco al azar) entre una y otra, no más de 20 por hora, pocos
+  reintentos y, si YouTube dice que se pidió demasiado o pide confirmar que no es un robot,
+  la fila se detiene una hora (o seis) y la canción espera su turno; la pausa sigue aunque se
+  cierre el programa. Cancelar cierra yt-dlp y FFmpeg completos (corren dentro de un *job
+  object* de Windows). Cada intento queda anotado en la base. La primera descarga muestra un
+  aviso: bajar de YouTube va contra sus términos de uso y emitir música requiere las
+  licencias de comunicación pública del país.
 - **Separación de artistas por intérprete**: el generador no pone seguidas
   "Eddy Herrera" y "Eddy Herrera feat. Liz".
 - **Mayúsculas a gusto**: los nombres se guardan bien escritos (`Juan Luis Guerra`) y se
@@ -599,6 +627,7 @@ Source/
 │   ├── MusicLibrary.*        # Importación, análisis, confirmar y ordenar archivos
 │   ├── TrackNaming.*         # Nombres: formato por carpeta, créditos, claves, mayúsculas
 │   ├── ImportReview.*        # Revisión: propuestas, dudas, duplicados y borradores
+│   ├── TagWriter.*           # Etiquetas ID3v2.3 de lo descargado
 │   └── ...                   # Etiquetas, cola, historial y pauta
 ├── database/
 │   ├── Database.*            # SQLite: esquema, migraciones y consultas preparadas
@@ -612,12 +641,19 @@ Source/
 │   ├── Chromaprint.*         # Huella de AcoustID (chromaprint.dll, cargada al buscar)
 │   ├── OnlineMetadata.*      # Pedidos y respuestas de AcoustID y MusicBrainz
 │   ├── OnlineIdentifier.*    # Identificación en línea en segundo plano
+│   ├── HttpTransport.*       # Pedidos HTTP de los servicios en línea (reemplazable en pruebas)
+│   ├── SongSearch.*          # Deezer y YouTube: pedidos, respuestas y qué video coincide
+│   ├── SongSearcher.*        # La búsqueda de canciones en su hilo, con pausas para YouTube
+│   ├── DownloadTools.*       # yt-dlp, FFmpeg y Deno: dónde están, instalarlos y verificarlos
+│   ├── SongDownload.*        # yt-dlp: argumentos, progreso, errores y ritmo de descargas
+│   ├── SongDownloader.*      # La fila de descargas en su hilo: pausas, etiquetas e importación
 │   └── NowPlayingPublisher.* # Título del stream, API y envío a la página web
 ├── helpers/
 │   ├── PersistenceManager.*  # Carpeta de la emisora, respaldos verificados, restauración
 │   ├── BackupService.*       # Respaldo diario, destino externo y copia de la música
 │   ├── StationHealth.*       # Alertas: disco y respaldos
 │   ├── StationLock.*         # Un solo equipo a la vez
+│   ├── ProcessRunner.*       # Programas externos sin ventana; cancelar cierra todo su árbol
 │   └── ...                   # Idioma, temas, estilo, ajustes, claves
 └── ui/                       # Componentes y diálogos
 Tests/RaaadioTests.cpp        # Pruebas automáticas (ctest)
@@ -647,13 +683,18 @@ docs/screenshots/             # Capturas del README (generadas con --ui-snapshot
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Más de 800 comprobaciones cubren la base de datos y sus migraciones, el análisis de audio,
+Más de 1000 comprobaciones cubren la base de datos y sus migraciones, el análisis de audio,
 las etiquetas, la importación y su revisión (con nombres reales de una emisora), los decks,
 la cola, la pauta, la protección contra silencio, la botonera, el streaming (Ogg, MP3 y
 títulos), lo que suena, los respaldos (verificación, retención, destino externo, recuperación
-de una base dañada), el candado y "reproducir ahora".
-Corren en laboratorios temporales, sin tocar la emisora real. La integración continua compila
-y prueba cada cambio en Windows.
+de una base dañada), el candado, "reproducir ahora", la búsqueda en internet y las descargas
+(la fila, las pausas, las etiquetas, la instalación con firmas y que cancelar cierre todos los
+procesos). Corren en laboratorios temporales, sin tocar la emisora real ni conectarse a
+internet: los servicios en línea y yt-dlp se simulan. Con `RAAADIO_ONLINE_TESTS=1` también se
+prueba la búsqueda contra Deezer y YouTube de verdad (para saber si cambiaron sus respuestas), y
+con `RAAADIO_DOWNLOAD_TESTS=1` se instalan las herramientas en una carpeta temporal y se descarga
+*Big Buck Bunny* de la Blender Foundation (licencia Creative Commons BY).
+La integración continua compila y prueba cada cambio en Windows.
 
 El ejecutable también puede renderizar la interfaz a un PNG con datos de demostración, sin
 abrir dispositivos de audio (así se generan las capturas de este README):
@@ -664,7 +705,9 @@ RAAADIO.exe --ui-snapshot captura.png --size 1366x768 --theme dark --lang es --v
 
 `--view` acepta `main`, `empty`, `history`, `ads`, `cartwall`, `settings`, `settings-library`,
 `settings-broadcast`, `settings-broadcast-2` (la parte de abajo de Emisión), `settings-language`,
-`settings-about`, `generator`, `track` e `import`.
+`settings-about`, `generator`, `track`, `import`, `review`, `review-library`, `artists`,
+`library-online` (una búsqueda sin resultados en la biblioteca) y `online-search` (la búsqueda
+en internet con respuestas de ejemplo, sin conectarse).
 
 ---
 
@@ -702,7 +745,15 @@ Para transmitir en MP3, RAAADIO carga `libmp3lame.dll`, compilada sin cambios de
 identificar canciones en línea carga `chromaprint.dll`, compilada sin cambios desde
 [Chromaprint 1.5.1](https://acoustid.org/chromaprint) (LGPL 2.1 por el código de FFmpeg que
 incluye; el resto es MIT), también aparte y reemplazable. Los datos de MusicBrainz son de
-dominio público (CC0); el servicio de AcoustID es gratuito para uso no comercial.
+dominio público (CC0); el servicio de AcoustID es gratuito para uso no comercial. La búsqueda
+de canciones usa la API pública de Deezer y la búsqueda de YouTube.
+
+Las descargas usan programas que RAAADIO no incluye: los baja a pedido del operador, de sus
+publicaciones oficiales, y los ejecuta aparte. [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+(Unlicense, dominio público), [FFmpeg](https://ffmpeg.org) en la compilación de
+[yt-dlp/FFmpeg-Builds](https://github.com/yt-dlp/FFmpeg-Builds) (GPL) y
+[Deno](https://deno.com) (MIT). Descargar de YouTube va contra sus términos de uso; quien lo
+usa responde por tener los derechos de lo que emite.
 
 ---
 

@@ -3,7 +3,7 @@
 #include "OnlineMetadata.h"
 
 OnlineIdentifier::OnlineIdentifier(MusicLibrary& lib, Transport t)
-    : juce::Thread("Online Identifier"), library(lib), transport(t ? std::move(t) : Transport(&OnlineIdentifier::http))
+    : juce::Thread("Online Identifier"), library(lib), transport(t ? std::move(t) : Transport(&HttpTransport::send))
 {
     formats.registerBasicFormats();
     startThread(juce::Thread::Priority::low);
@@ -188,18 +188,4 @@ OnlineIdentifier::Outcome OnlineIdentifier::identify(int trackId) {
         }
     }
     return save(trackId, match);
-}
-
-OnlineIdentifier::Response OnlineIdentifier::http(const Request& request) {
-    auto url = juce::URL(request.url);
-    const bool post = request.body.isNotEmpty();
-    if (post) url = url.withPOSTData(request.body);
-
-    juce::WebInputStream stream(url, post);
-    stream.withExtraHeaders(request.headers).withConnectionTimeout(15000).withNumRedirectsToFollow(3);
-    Response response;
-    if (!stream.connect(nullptr)) return response;
-    response.status = stream.getStatusCode();
-    response.body = stream.readEntireStreamAsString();
-    return response;
 }

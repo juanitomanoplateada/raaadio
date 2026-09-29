@@ -20,6 +20,11 @@ public:
     enum class ImportResult { Added, Duplicate, Failed };
     ImportResult processAndAddTrack(const juce::File& sourceFile, const juce::String& targetCategory = "", int batch = 0);
     void importFiles(const juce::Array<juce::File>& files, const juce::String& targetCategory = "");
+    // Una canción descargada (búsqueda en internet): entra por revisar como la música importada,
+    // en un lote propio que se puede deshacer, y guarda su ISRC. Si hay una importación en curso
+    // espera a que termine (se llama desde otro hilo).
+    struct DownloadImport { ImportResult result = ImportResult::Failed; int trackId = -1; };
+    DownloadImport importDownloaded(const juce::File& file, const juce::String& batchSource, const juce::String& isrc);
     void cancelImport();
     // "*.mp3;*.wav;..." con los formatos que la biblioteca sabe leer (para elegir archivos).
     juce::String getSupportedFileWildcard() const;
@@ -173,6 +178,8 @@ public:
 private:
     Database db;
     juce::CriticalSection dbLock;
+    // Una importación a la vez (la de archivos y la de descargas usan importContext).
+    juce::CriticalSection importLock;
     juce::File libraryFolder;
     juce::AudioFormatManager formatManager;
 

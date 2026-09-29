@@ -18,6 +18,13 @@
 #include "../Source/network/Chromaprint.h"
 #include "../Source/network/OnlineMetadata.h"
 #include "../Source/network/OnlineIdentifier.h"
+#include "../Source/network/SongSearch.h"
+#include "../Source/network/SongSearcher.h"
+#include "../Source/network/DownloadTools.h"
+#include "../Source/network/SongDownload.h"
+#include "../Source/network/SongDownloader.h"
+#include "../Source/helpers/ProcessRunner.h"
+#include "../Source/library/TagWriter.h"
 #include "../Source/library/AdvertisingManager.h"
 #include "../Source/generator/PlaylistGenerator.h"
 #include "../Source/autodj/QueueTiming.h"
@@ -41,6 +48,7 @@
 #include "../Source/generator/TemplateManager.h"
 #include "../Source/ui/DragFormats.h"
 #include <thread>
+#include <mutex>
 
 namespace
 {
@@ -1924,6 +1932,999 @@ public:
             const auto before = services.requests.size();
             expect(identifier.identify(id) == OnlineIdentifier::Outcome::Skipped);
             expectEquals(services.requests.size(), before);
+        }
+    }
+};
+
+//==============================================================================
+class SongSearchTests : public juce::UnitTest
+{
+public:
+    SongSearchTests() : juce::UnitTest("Buscar canciones en internet", "RAAADIO") {}
+
+    // Respuestas con la forma de las de Deezer y YouTube (recortadas de respuestas reales).
+    static juce::String deezerSearch()
+    {
+        return juce::String::fromUTF8(R"json({"data": [
+            {"id": 1857061907, "type": "track", "title": "Burbujas de Amor", "title_short": "Burbujas de Amor", "title_version": "",
+             "isrc": "USJ3V1862529", "link": "https://www.deezer.com/track/1857061907", "duration": 250, "rank": 552338,
+             "explicit_lyrics": false, "artist": {"id": 1, "name": "Juan Luis Guerra"},
+             "album": {"title": "Grandes Éxitos", "cover_medium": "https://cdn-images.dzcdn.net/cover/250x250.jpg"}},
+            {"id": 3530820701, "type": "track", "title": "Burbujas de Amor (2025 Remastered)", "title_short": "Burbujas de Amor",
+             "title_version": "(2025 Remastered)", "duration": 249, "artist": {"name": "Juan Luis Guerra"}, "album": {"title": "Grandes Éxitos (2025 Remastered)"}},
+            {"id": 0, "type": "track", "title": "Sin id"}],
+            "total": 3})json");
+    }
+
+    static juce::String deezerTrack()
+    {
+        return R"json({"id": 1, "title": "Frio, Frio", "release_date": "2012-11-06", "isrc": "USX1", "duration": 236,
+            "contributors": [{"name": "Juan Luis Guerra", "role": "Main"}, {"name": "Romeo Santos", "role": "Featured"}]})json";
+    }
+
+    // Una canción de YouTube Music: título; "Artista • Álbum • 4:09"; reproducciones.
+    static std::string musicItem(const std::string& id, const std::string& title, const std::string& artists,
+                                 const std::string& album, const std::string& duration,
+                                 const std::string& type = "MUSIC_VIDEO_TYPE_ATV")
+    {
+        auto page = [](const std::string& t) {
+            return R"(, "navigationEndpoint": {"browseEndpoint": {"browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": ")" + t + "\"}}}}";
+        };
+        return R"({"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": ")" + id + R"("}, "flexColumns": [
+            {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": ")" + title
+            + R"(", "navigationEndpoint": {"watchEndpoint": {"videoId": ")" + id
+            + R"(", "watchEndpointMusicSupportedConfigs": {"watchEndpointMusicConfig": {"musicVideoType": ")" + type + R"("}}}}}]}}},
+            {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": ")" + artists + "\"" + page("MUSIC_PAGE_TYPE_ARTIST")
+            + R"(}, {"text": " • "}, {"text": ")" + album + "\"" + page("MUSIC_PAGE_TYPE_ALBUM")
+            + R"(}, {"text": " • "}, {"text": ")" + duration + R"("}]}}},
+            {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "267 M reproducciones"}]}}}]}})";
+    }
+
+    static juce::String musicSearch(const std::vector<std::string>& items)
+    {
+        std::string joined;
+        for (const auto& i : items) joined += (joined.empty() ? "" : ", ") + i;
+        // Un artista entre las canciones (sin videoId): no es una canción y se salta.
+        joined += R"(, {"musicResponsiveListItemRenderer": {"flexColumns": [{"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Juan Luis Guerra"}]}}}]}})";
+        return juce::String::fromUTF8((R"({"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [{"musicShelfRenderer": {"contents": [)"
+                                       + joined + "]}}]}}}}]}}}").c_str());
+    }
+
+    static std::string webItem(const std::string& id, const std::string& title, const std::string& channel,
+                               const std::string& length, const std::string& badge = "")
+    {
+        return R"({"videoRenderer": {"videoId": ")" + id + R"(", "title": {"runs": [{"text": ")" + title
+             + R"("}]}, "ownerText": {"runs": [{"text": ")" + channel + R"("}]}, "lengthText": {"simpleText": ")" + length
+             + R"("}, "viewCountText": {"simpleText": "31.385.024 visualizaciones"}, "ownerBadges": [)"
+             + (badge.empty() ? std::string() : R"({"metadataBadgeRenderer": {"style": ")" + badge + "\"}}") + "]}}";
+    }
+
+    static juce::String webSearch(const std::vector<std::string>& items)
+    {
+        std::string joined;
+        for (const auto& i : items) joined += (joined.empty() ? "" : ", ") + i;
+        return juce::String::fromUTF8((R"({"contents": {"twoColumnSearchResultsRenderer": {"primaryContents": {"sectionListRenderer": {"contents": [{"itemSectionRenderer": {"contents": [)"
+                                       + joined + "]}}]}}}}}").c_str());
+    }
+
+    static SongSearch::Track track(const char* artist, const char* title, int duration, const char* version = "")
+    {
+        SongSearch::Track t;
+        t.id = 7;
+        t.artist = juce::String::fromUTF8(artist);
+        t.titleShort = juce::String::fromUTF8(title);
+        t.version = juce::String::fromUTF8(version);
+        t.title = (t.titleShort + " " + t.version).trim();
+        t.duration = duration;
+        return t;
+    }
+
+    static SongSearch::Video video(const char* title, const char* artists, int duration, bool music = true,
+                                   SongSearch::Video::Kind kind = SongSearch::Video::Kind::OfficialAudio)
+    {
+        SongSearch::Video v;
+        v.id = "x";
+        v.title = juce::String::fromUTF8(title);
+        v.artists = juce::String::fromUTF8(artists);
+        v.duration = duration;
+        v.fromMusic = music;
+        v.kind = kind;
+        return v;
+    }
+
+    // Servicios de mentira: responden según la dirección y guardan lo que se pidió.
+    struct FakeServices {
+        std::mutex mutex;
+        std::vector<HttpTransport::Request> requests;
+        HttpTransport::Response deezer { 200, deezerSearch(), {} };
+        HttpTransport::Response detail { 200, deezerTrack(), {} };
+        HttpTransport::Response music { 200, musicSearch({ musicItem("v0ckuv1xBm0", "Burbujas De Amor", "Juan Luis Guerra 4.40", "Romance Rosa", "4:09") }), {} };
+        HttpTransport::Response web { 200, webSearch({}), {} };
+
+        HttpTransport::Transport transport()
+        {
+            return [this](const HttpTransport::Request& r) {
+                std::lock_guard<std::mutex> guard(mutex);
+                requests.push_back(r);
+                if (r.url.contains("api.deezer.com/search")) return deezer;
+                if (r.url.contains("api.deezer.com/track")) return detail;
+                if (r.url.contains("music.youtube.com")) return music;
+                if (r.url.contains("www.youtube.com")) return web;
+                return HttpTransport::Response { 404, {}, {} };
+            };
+        }
+
+        // Cambiar una respuesta mientras el hilo de la búsqueda puede estar pidiendo.
+        void set(HttpTransport::Response& target, HttpTransport::Response value)
+        {
+            std::lock_guard<std::mutex> guard(mutex);
+            target = std::move(value);
+        }
+
+        int count(const juce::String& host)
+        {
+            std::lock_guard<std::mutex> guard(mutex);
+            int n = 0;
+            for (const auto& r : requests) n += r.url.contains(host) ? 1 : 0;
+            return n;
+        }
+    };
+
+    template <typename Predicate>
+    static bool waitFor(Predicate done, int timeoutMs = 5000)
+    {
+        const auto until = juce::Time::getMillisecondCounter() + (juce::uint32) timeoutMs;
+        while (!done()) {
+            if (juce::Time::getMillisecondCounter() > until) return false;
+            juce::Thread::sleep(5);
+        }
+        return true;
+    }
+
+    static SongSearcher::Links linksWhenDone(SongSearcher& searcher, juce::int64 id, int timeoutMs = 5000)
+    {
+        SongSearcher::Links links;
+        waitFor([&] { return searcher.getLinks(id, links) && links.state != SongSearcher::Links::State::Pending; }, timeoutMs);
+        return links;
+    }
+
+    // Un servidor HTTP de una sola respuesta en 127.0.0.1: devuelve lo que recibió.
+    static juce::String receiveOneRequest(juce::StreamingSocket& server)
+    {
+        std::unique_ptr<juce::StreamingSocket> connection(server.waitForNextConnection());
+        if (connection == nullptr) return {};
+        juce::MemoryBlock received;
+        char buffer[4096];
+        for (;;) {
+            const juce::String text(static_cast<const char*>(received.getData()), received.getSize());
+            const int headerEnd = text.indexOf("\r\n\r\n");
+            if (headerEnd >= 0) {
+                const auto length = text.substring(0, headerEnd).fromFirstOccurrenceOf("content-length:", false, true)
+                                        .upToFirstOccurrenceOf("\r\n", false, false).trim().getIntValue();
+                if ((int) received.getSize() >= headerEnd + 4 + length) break;
+            }
+            if (connection->waitUntilReady(true, 5000) != 1) break;
+            const int n = connection->read(buffer, (int) sizeof(buffer), false);
+            if (n <= 0) break;
+            received.append(buffer, (size_t) n);
+        }
+        const juce::String reply("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+        connection->write(reply.toRawUTF8(), (int) reply.getNumBytesAsUTF8());
+        return juce::String::fromUTF8(static_cast<const char*>(received.getData()), (int) received.getSize());
+    }
+
+    void runTest() override
+    {
+        beginTest("HTTP: un POST lleva el cuerpo tal cual y deja los parámetros en la dirección");
+        {
+            // JUCE pasaba "?prettyPrint=false" al cuerpo y YouTube respondía 400 (JSON inválido).
+            juce::StreamingSocket server;
+            expect(server.createListener(0, "127.0.0.1"));
+            HttpTransport::Response response;
+            const auto json = juce::String(R"({"query": "x"})");
+            std::thread client([&] {
+                response = HttpTransport::send({ "http://127.0.0.1:" + juce::String(server.getBoundPort()) + "/search?prettyPrint=false",
+                                                 json, "Content-Type: application/json" });
+            });
+            const auto request = receiveOneRequest(server);
+            client.join();
+            expectEquals(response.status, 200);
+            expect(request.startsWith("POST /search?prettyPrint=false HTTP/1."), request.upToFirstOccurrenceOf("\r\n", false, false));
+            expectEquals(request.fromFirstOccurrenceOf("\r\n\r\n", false, false), json);
+            expect(request.contains("Content-Type: application/json"));
+        }
+
+        beginTest("Deezer: resultados con versión, ISRC y carátula; el error del servicio se lee");
+        {
+            juce::String error;
+            const auto tracks = SongSearch::parseDeezerSearch(deezerSearch(), error);
+            expect(error.isEmpty());
+            expectEquals((int) tracks.size(), 2, "la fila sin id se salta");
+            if (tracks.size() != 2) return;
+            expect(tracks[0].id == 1857061907LL);
+            expectEquals(tracks[0].artist, juce::String("Juan Luis Guerra"));
+            expectEquals(tracks[0].album, juce::String::fromUTF8("Grandes Éxitos"));
+            expectEquals(tracks[0].isrc, juce::String("USJ3V1862529"));
+            expectEquals(tracks[0].duration, 250);
+            expect(tracks[0].coverUrl.endsWith("250x250.jpg"));
+            expectEquals(tracks[1].titleShort, juce::String("Burbujas de Amor"));
+            expectEquals(tracks[1].version, juce::String("(2025 Remastered)"));
+            expect(tracks[1].id == 3530820701LL, "los id de Deezer no caben en un int");
+
+            SongSearch::parseDeezerSearch(R"json({"error": {"type": "Exception", "message": "Quota limit exceeded", "code": 4}})json", error);
+            expectEquals(error, juce::String("Quota limit exceeded"));
+            SongSearch::parseDeezerSearch("<html>", error);
+            expect(error.isNotEmpty());
+
+            expect(SongSearch::deezerSearchUrl(juce::String::fromUTF8("Ojalá que llueva café")).startsWith("https://api.deezer.com/search/track?q=Ojal%C3%A1%20que"));
+        }
+
+        beginTest("Deezer: el detalle da el año y los invitados");
+        {
+            auto t = track("Juan Luis Guerra", "Frio, Frio", 0);
+            expect(SongSearch::parseDeezerTrack(deezerTrack(), t));
+            expectEquals(t.year, 2012);
+            expectEquals(t.featured.joinIntoString(","), juce::String("Romeo Santos"));
+            expectEquals(t.duration, 236);
+            expect(!SongSearch::parseDeezerTrack(R"json({"error": {"message": "no data"}})json", t));
+        }
+
+        beginTest("YouTube Music: canciones con artista, álbum, duración y tipo; lo que no es canción se salta");
+        {
+            const auto videos = SongSearch::parseYouTubeMusicSearch(musicSearch({
+                musicItem("v0ckuv1xBm0", "Burbujas De Amor", "Juan Luis Guerra 4.40", "Romance Rosa", "4:09"),
+                musicItem("cEoJWnTXyLY", "A Palo Limpio", "Kinito Mendez y Enerolisa Nuñez", "1", "4:53", "MUSIC_VIDEO_TYPE_OMV"),
+            }));
+            expectEquals((int) videos.size(), 2);
+            if (videos.size() != 2) return;
+            expectEquals(videos[0].id, juce::String("v0ckuv1xBm0"));
+            expectEquals(videos[0].title, juce::String("Burbujas De Amor"));
+            expectEquals(videos[0].artists, juce::String("Juan Luis Guerra 4.40"));
+            expectEquals(videos[0].album, juce::String("Romance Rosa"));
+            expectEquals(videos[0].duration, 249);
+            expect(videos[0].kind == SongSearch::Video::Kind::OfficialAudio && videos[0].fromMusic);
+            expectEquals(videos[0].views, juce::String("267 M reproducciones"));
+            expectEquals(videos[1].artists, juce::String::fromUTF8("Kinito Mendez y Enerolisa Nuñez"));
+            expect(videos[1].kind == SongSearch::Video::Kind::OfficialVideo);
+            expect(SongSearch::parseYouTubeMusicSearch("not json").empty());
+        }
+
+        beginTest("YouTube: videos con canal, duración y si el canal es del artista");
+        {
+            const auto videos = SongSearch::parseYouTubeSearch(webSearch({
+                webItem("v0ckuv1xBm0", "Burbujas De Amor", "Juan Luis Guerra", "4:09", "BADGE_STYLE_TYPE_VERIFIED_ARTIST"),
+                webItem("abc", "Burbujas De Amor", "Juan Luis Guerra 4.40 - Topic", "4:10"),
+                webItem("5iXOnXazxkk", "JUAN LUIS GUERRA SUS MEJORES EXITOS", "Voces Gruperas", "2:00:47"),
+            }));
+            expectEquals((int) videos.size(), 3);
+            if (videos.size() != 3) return;
+            expect(videos[0].kind == SongSearch::Video::Kind::OfficialVideo && !videos[0].fromMusic);
+            expect(videos[1].kind == SongSearch::Video::Kind::OfficialAudio);
+            expectEquals(videos[1].artists, juce::String("Juan Luis Guerra 4.40"));
+            expectEquals(videos[2].duration, 7247);
+            expect(videos[2].kind == SongSearch::Video::Kind::Unknown);
+        }
+
+        beginTest("Pedidos a YouTube: la búsqueda, el filtro de canciones y el cliente van en el JSON");
+        {
+            const auto music = SongSearch::youTubeMusicSearch(juce::String::fromUTF8("Juan Luis Guerra Ojalá \"café\""), "es");
+            expectEquals(music.url, juce::String("https://music.youtube.com/youtubei/v1/search?prettyPrint=false"));
+            const auto body = juce::JSON::parse(music.body);
+            expectEquals(body["query"].toString(), juce::String::fromUTF8("Juan Luis Guerra Ojalá \"café\""));
+            expectEquals(body["context"]["client"]["clientName"].toString(), juce::String("WEB_REMIX"));
+            expectEquals(body["context"]["client"]["hl"].toString(), juce::String("es"));
+            expect(body["params"].toString().isNotEmpty());
+            expect(music.headers.contains("Content-Type: application/json") && music.headers.contains("X-YouTube-Client-Name: 67"));
+
+            const auto web = SongSearch::youTubeSearch("x", "en");
+            expect(web.url.startsWith("https://www.youtube.com/youtubei/v1/search"));
+            expectEquals(juce::JSON::parse(web.body)["context"]["client"]["clientName"].toString(), juce::String("WEB"));
+
+            expectEquals(SongSearch::parseDuration("4:09"), 249);
+            expectEquals(SongSearch::parseDuration("1:02:03"), 3723);
+            expectEquals(SongSearch::parseDuration("EN VIVO"), 0);
+            expectEquals(SongSearch::parseDuration("4"), 0);
+            expectEquals(SongSearch::youTubeUrl("v0ckuv1xBm0"), juce::String("https://www.youtube.com/watch?v=v0ckuv1xBm0"));
+
+            // En vivo se busca como tal; "Remastered" no cambia la grabación.
+            expectEquals(SongSearch::youTubeQuery(track("Juan Luis Guerra", "Frio, Frio", 236, "(En Vivo)")), juce::String("Juan Luis Guerra Frio, Frio En Vivo"));
+            expectEquals(SongSearch::youTubeQuery(track("Juan Luis Guerra", "Burbujas de Amor", 249, "(2025 Remastered)")), juce::String("Juan Luis Guerra Burbujas de Amor"));
+        }
+
+        beginTest("Comparar: el audio oficial coincide; covers, en vivo, karaoke y recopilaciones quedan abajo");
+        {
+            const auto burbujas = track("Juan Luis Guerra", "Burbujas de Amor", 250);
+            auto score = [&](const SongSearch::Video& v) { return SongSearch::matchScore(burbujas, v); };
+
+            expect(score(video("Burbujas De Amor", "Juan Luis Guerra 4.40", 249)) >= SongSearch::goodMatch, "el audio oficial");
+            expect(score(video("Burbujas de amor", "Caracol Televisión y Catalexia", 195)) < SongSearch::possibleMatch, "otro intérprete");
+            expect(score(video("Burbujas de Amor", "Banda Sinaloense Los Recoditos", 273)) < SongSearch::possibleMatch, "otro intérprete, duración parecida");
+            expect(score(video("Burbujas de Amor (Karaoke Version)", "Juan Luis Guerra", 250)) < SongSearch::possibleMatch, "karaoke");
+            const double live = score(video("Burbujas de Amor (En Vivo)", "Juan Luis Guerra 4.40", 262));
+            expect(live < SongSearch::goodMatch && live >= SongSearch::possibleMatch, "en vivo: parecida, no la misma");
+
+            // YouTube: el título lleva el artista y "(Video Oficial)"; las recopilaciones no coinciden.
+            expect(score(video("Juan Luis Guerra 4-40 - Burbujas De Amor (Video Oficial)", "Karen Records", 251, false,
+                               SongSearch::Video::Kind::Unknown)) >= SongSearch::goodMatch);
+            expect(score(video("JUAN LUIS GUERRA SUS MEJORES EXITOS 2026 LAS 30 MEJORES CANCIONES", "Voces Gruperas", 7247, false,
+                               SongSearch::Video::Kind::Unknown)) < SongSearch::possibleMatch);
+
+            // Un artículo de más y 5 s de diferencia (otra edición del mismo disco) siguen coincidiendo.
+            expect(SongSearch::matchScore(track("Kinito Méndez", "El Suero De Amor", 279), video("Suero de Amor", "Kinito Mendez", 284))
+                   >= SongSearch::goodMatch);
+
+            std::vector<SongSearch::Video> videos {
+                video("Burbujas de amor", "Caracol Televisión y Catalexia", 195),
+                video("Burbujas de Amor (En Vivo)", "Juan Luis Guerra 4.40", 262),
+                video("Burbujas De Amor", "Juan Luis Guerra 4.40", 249),
+            };
+            videos[2].id = "best";
+            SongSearch::rank(burbujas, videos);
+            expectEquals(videos[0].id, juce::String("best"));
+            expect(videos[0].score >= videos[1].score && videos[1].score >= videos[2].score);
+
+            // Otra canción del mismo artista, con la misma duración, no es "parecida": no se muestra
+            // (pasó con la búsqueda real de YouTube Music).
+            std::vector<SongSearch::Video> others { video("La Bilirrubina", "Juan Luis Guerra 4.40", 246),
+                                                    video("Como Abeja al Panal", "Juan Luis Guerra 4.40", 250) };
+            expect(SongSearch::matchScore(burbujas, others[0]) < SongSearch::otherSong);
+            SongSearch::rank(burbujas, others);
+            expect(others.empty());
+        }
+
+        beginTest("Biblioteca: la misma canción aunque el artista o las tildes se escriban distinto");
+        {
+            std::vector<Database::KeyRow> rows {
+                { 1, TrackNaming::matchKey("Juan Luis Guerra 4.40", "Burbujas de amor").toStdString(), "Juan Luis Guerra 4.40", "Burbujas de amor", 251 },
+                { 2, TrackNaming::matchKey("WILFRIDO VARGAS", juce::String::fromUTF8("VOLVERÉ")).toStdString(), "WILFRIDO VARGAS", "VOLVERE", 248 },
+            };
+            expectEquals(SongSearch::findInLibrary(track("Juan Luis Guerra", "Burbujas de Amor", 250), rows), 1);
+            expectEquals(SongSearch::findInLibrary(track("Wilfrido Vargas", "Volvere", 248), rows), 2);
+            expectEquals(SongSearch::findInLibrary(track("Grupo Extra", "Burbujas de Amor", 245), rows), -1);
+            expectEquals(SongSearch::findInLibrary(track("Juan Luis Guerra", "La Bilirrubina", 214), rows), -1);
+        }
+
+        beginTest("En su hilo: la búsqueda y el enlace; lo ya encontrado no se vuelve a pedir");
+        {
+            FakeServices services;
+            SongSearcher searcher(services.transport(), "es");
+            searcher.setYouTubeInterval(0);
+
+            searcher.search("Juan Luis Guerra Burbujas");
+            expect(waitFor([&] { return searcher.getResults().generation == 1; }));
+            const auto results = searcher.getResults();
+            expectEquals((int) results.tracks.size(), 2);
+            if (results.tracks.size() != 2) return;
+            expect(!results.working && results.error.isEmpty());
+            expect(services.requests.front().headers.contains("User-Agent: RAAADIO/"));
+
+            searcher.resolve(results.tracks[0]);
+            const auto links = linksWhenDone(searcher, results.tracks[0].id);
+            expect(links.state == SongSearcher::Links::State::Done);
+            expectEquals((int) links.videos.size(), 1);
+            if (links.videos.size() != 1) return;
+            expectEquals(links.videos[0].id, juce::String("v0ckuv1xBm0"));
+            expect(links.videos[0].score >= SongSearch::goodMatch);
+            expectEquals(links.track.year, 2012, "con el detalle de Deezer");
+            expectEquals(services.count("music.youtube.com"), 1);
+            expectEquals(services.count("www.youtube.com"), 0, "YouTube Music coincidió: no hace falta buscar en YouTube");
+
+            searcher.resolve(results.tracks[0]);
+            juce::Thread::sleep(50);
+            expectEquals(services.count("music.youtube.com"), 1, "ya estaba");
+        }
+
+        beginTest("En su hilo: si YouTube Music no la tiene se busca en YouTube; si YouTube pide esperar, se espera");
+        {
+            FakeServices services;
+            services.music.body = musicSearch({ musicItem("cover", "Burbujas de amor", "Caracol Televisión", "La Descarga", "3:15") });
+            services.web.body = webSearch({ webItem("v0ckuv1xBm0", "Burbujas De Amor", "Juan Luis Guerra", "4:09", "BADGE_STYLE_TYPE_VERIFIED_ARTIST") });
+            SongSearcher searcher(services.transport(), "es");
+            searcher.setYouTubeInterval(0);
+
+            auto burbujas = track("Juan Luis Guerra", "Burbujas de Amor", 250);
+            searcher.resolve(burbujas);
+            auto links = linksWhenDone(searcher, burbujas.id);
+            expectEquals(services.count("www.youtube.com"), 1);
+            expect(links.videos.size() == 2 && links.videos[0].id == "v0ckuv1xBm0" && !links.videos[0].fromMusic);
+
+            // Sin conexión: error, y se puede volver a pedir.
+            services.set(services.music, { 0, {}, {} });
+            services.set(services.web, { 0, {}, {} });
+            auto other = track("Kinito Méndez", "El Suero De Amor", 279);
+            other.id = 8;
+            searcher.resolve(other);
+            links = linksWhenDone(searcher, other.id);
+            expect(links.state == SongSearcher::Links::State::Error);
+            expectEquals(links.error, juce::String("offline"));
+
+            // HTTP 429: YouTube pidió esperar; nada más se le pide durante un rato.
+            services.set(services.music, { 429, {}, {} });
+            auto third = track("Wilfrido Vargas", "Volvere", 248);
+            third.id = 9;
+            searcher.resolve(third);
+            links = linksWhenDone(searcher, third.id);
+            expectEquals(links.error, juce::String("youtube_wait"));
+            const int before = services.count("youtube.com");
+            auto fourth = track("Eddy Herrera", "Carolina", 240);
+            fourth.id = 10;
+            searcher.resolve(fourth);
+            links = linksWhenDone(searcher, fourth.id);
+            expectEquals(links.error, juce::String("youtube_wait"));
+            expectEquals(services.count("youtube.com"), before);
+        }
+
+        // Contra los servicios de verdad, solo si se pide (RAAADIO_ONLINE_TESTS=1): avisa si
+        // Deezer o YouTube cambiaron la forma de sus respuestas.
+        if (juce::SystemStats::getEnvironmentVariable("RAAADIO_ONLINE_TESTS", {}) == "1")
+        {
+            beginTest("En línea de verdad: Deezer y YouTube Music responden como se espera");
+            SongSearcher searcher({}, "es");
+            searcher.search("Juan Luis Guerra Burbujas de amor");
+            expect(waitFor([&] { return searcher.getResults().generation == 1; }, 20000), "Deezer respondió");
+            const auto results = searcher.getResults();
+            expect(results.error.isEmpty(), results.error);
+            expect(!results.tracks.empty(), "Deezer encontró la canción");
+            if (results.tracks.empty()) return;
+            const auto& first = results.tracks.front();
+            logMessage("Deezer: " + first.artist + " - " + first.title + " (" + first.album + ", " + first.isrc + ")");
+
+            searcher.resolve(first);
+            const auto links = linksWhenDone(searcher, first.id, 40000);
+            expect(links.state == SongSearcher::Links::State::Done, links.error);
+            expect(!links.videos.empty() && links.videos.front().score >= SongSearch::goodMatch, "YouTube Music la tiene");
+            expect(links.cover.isValid(), "carátula");
+            expect(links.track.year > 0, "año del detalle");
+            for (const auto& v : links.videos)
+                logMessage(juce::String(v.score, 2) + "  " + SongSearch::youTubeUrl(v.id) + "  " + v.title + " | " + v.artists
+                           + " | " + juce::String(v.duration) + " s" + (v.fromMusic ? " | YouTube Music" : " | YouTube"));
+        }
+    }
+};
+
+//==============================================================================
+class SongDownloadTests : public juce::UnitTest
+{
+public:
+    SongDownloadTests() : juce::UnitTest("Descargar canciones", "RAAADIO") {}
+
+    template <typename Predicate>
+    static bool waitFor(Predicate done, int timeoutMs = 10000)
+    {
+        const auto until = juce::Time::getMillisecondCounter() + (juce::uint32) timeoutMs;
+        while (!done()) {
+            if (juce::Time::getMillisecondCounter() > until) return false;
+            juce::Thread::sleep(5);
+        }
+        return true;
+    }
+
+    // Un MP3 de verdad (LAME), como el que deja FFmpeg: un tono de unos segundos.
+    static juce::MemoryBlock encodeMp3(double seconds)
+    {
+        Mp3Encoder encoder;
+        juce::MemoryBlock out;
+        if (!encoder.open(44100.0, 128)) return out;
+        std::vector<float> left(1024), right(1024);
+        const int total = (int) (seconds * 44100.0);
+        for (int pos = 0; pos < total; pos += 1024) {
+            const int n = juce::jmin(1024, total - pos);
+            for (int i = 0; i < n; ++i)
+                left[(size_t) i] = right[(size_t) i] = 0.3f * (float) std::sin(2.0 * juce::MathConstants<double>::pi * 440.0 * (pos + i) / 44100.0)
+                                                     * (0.6f + 0.4f * (float) std::sin((pos + i) / 9000.0));
+            encoder.encode(left.data(), right.data(), n, out);
+        }
+        encoder.flush(out);
+        return out;
+    }
+
+    // yt-dlp de mentira: deja el MP3 donde lo pide "-o", o responde con un error, o espera
+    // hasta que lo cancelen.
+    struct FakeYtDlp {
+        std::atomic<int> downloads { 0 }, updates { 0 };
+        juce::MemoryBlock mp3;
+        juce::String errorOutput;
+        std::atomic<bool> block { false };
+
+        SongDownloader::Runner runner()
+        {
+            return [this](const juce::StringArray& command, const ProcessRunner::LineCallback& onLine, const ProcessRunner::StopCheck& shouldStop) {
+                if (command.contains("-U")) { ++updates; return 0; }
+                ++downloads;
+                if (block) {
+                    onLine("[raaadio]  10.0%");
+                    while (!shouldStop()) juce::Thread::sleep(5);
+                    return (int) ProcessRunner::stopped;
+                }
+                if (errorOutput.isNotEmpty()) {
+                    onLine("[youtube] Extracting URL");
+                    onLine(errorOutput);
+                    return 1;
+                }
+                const auto outputTemplate = command[command.indexOf("-o") + 1];
+                const auto id = command[command.size() - 1].fromLastOccurrenceOf("v=", false, false);
+                const auto file = juce::File(outputTemplate).getParentDirectory().getChildFile(id + ".mp3");
+                file.replaceWithData(mp3.getData(), mp3.getSize());
+                onLine("[raaadio]  50.0%");
+                onLine("[raaadio] 100.0%");
+                onLine(file.getFullPathName());
+                return 0;
+            };
+        }
+    };
+
+    static SongDownloader::Services fakeServices(const juce::File& root, FakeYtDlp& yt)
+    {
+        SongDownloader::Services s;
+        s.toolsFolder = root.getChildFile("Herramientas");
+        s.toolsFolder.getChildFile("yt-dlp.exe").create();
+        s.toolsFolder.getChildFile("ffmpeg").getChildFile("ffmpeg.exe").create();
+        s.workFolder = root.getChildFile("Trabajo");
+        s.pathVariable = juce::String();
+        s.minGapSeconds = 0;
+        s.maxJitterSeconds = 0;
+        s.run = yt.runner();
+        return s;
+    }
+
+    static SongSearch::Track frioFrio()
+    {
+        SongSearch::Track t;
+        t.id = 42;
+        t.artist = "Juan Luis Guerra";
+        t.featured = { "Romeo Santos" };
+        t.titleShort = juce::String::fromUTF8("Frío, Frío");
+        t.version = "(En Vivo)";
+        t.title = t.titleShort + " " + t.version;
+        t.album = "Asondeguerra Tour";
+        t.isrc = "USJ3V1200001";
+        t.year = 2012;
+        return t;
+    }
+
+    static SongSearch::Video video(const char* id)
+    {
+        SongSearch::Video v;
+        v.id = id;
+        v.score = 1.0;
+        return v;
+    }
+
+    static std::optional<SongDownloader::Job> finished(SongDownloader& d, int jobId, int timeoutMs = 20000)
+    {
+        std::optional<SongDownloader::Job> result;
+        waitFor([&] {
+            for (const auto& j : d.getJobs())
+                if (j.id == jobId && j.isFinished()) { result = j; return true; }
+            return false;
+        }, timeoutMs);
+        return result;
+    }
+
+    void runTest() override
+    {
+        beginTest("Procesos: la salida llega línea por línea, con el código de salida");
+        {
+            juce::StringArray lines;
+            const int code = ProcessRunner::run({ "cmd.exe", "/c", "echo uno& echo dos& exit 3" },
+                                                [&lines](const juce::String& l) { lines.add(l.trim()); }, [] { return false; });
+            expectEquals(code, 3);
+            expectEquals(lines.joinIntoString("|"), juce::String("uno|dos"));
+            expectEquals(ProcessRunner::run({ "no-existe-este-programa.exe" }, {}, {}), (int) ProcessRunner::couldNotStart);
+
+            // Comillas y barras como las lee Windows.
+            expectEquals(ProcessRunner::commandLine({ "a.exe", "C:\\Con espacio\\", "sin", "" }),
+                         juce::String("a.exe \"C:\\Con espacio\\\\\" sin \"\""));
+            expectEquals(ProcessRunner::commandLine({ "x", "di \"hola\"" }), juce::String("x \"di \\\"hola\\\"\""));
+        }
+
+        beginTest("Procesos: cancelar cierra también los procesos que abrió (yt-dlp abre otro y FFmpeg)");
+        {
+            TempLab lab;
+            const auto marker = lab.root.getChildFile("marca.txt");
+            const auto inner = lab.root.getChildFile("hijo.bat");
+            const auto outer = lab.root.getChildFile("padre.bat");
+            inner.replaceWithText("@ping -n 4 127.0.0.1 >nul\r\n@echo x > \"" + marker.getFullPathName() + "\"\r\n");
+            outer.replaceWithText("@start \"\" /b cmd /c \"" + inner.getFullPathName() + "\"\r\n@ping -n 30 127.0.0.1 >nul\r\n");
+            const auto start = juce::Time::getMillisecondCounter();
+            const int code = ProcessRunner::run({ "cmd.exe", "/c", outer.getFullPathName() }, {},
+                                                [start] { return juce::Time::getMillisecondCounter() - start > 700; });
+            expectEquals(code, (int) ProcessRunner::stopped);
+            expect(juce::Time::getMillisecondCounter() - start < 4000, "se corta enseguida");
+            juce::Thread::sleep(4500);
+            expect(!marker.exists(), "el proceso que abrió también se cerró");
+        }
+
+        beginTest("Etiquetas: el MP3 descargado lleva los datos de Deezer y el audio no cambia");
+        {
+            TempLab lab;
+            // Como lo deja FFmpeg: una etiqueta ID3v2.4 mínima y el audio.
+            juce::MemoryOutputStream original;
+            const juce::uint8 ffmpegTag[] = { 'I', 'D', '3', 4, 0, 0, 0, 0, 0, 24, 'T', 'S', 'S', 'E', 0, 0, 0, 14, 0, 0,
+                                              3, 'L', 'a', 'v', 'f', '6', '3', '.', '7', '.', '1', '0', '0', 0 };
+            original.write(ffmpegTag, sizeof(ffmpegTag));
+            const auto audio = encodeMp3(1.0);
+            original.write(audio.getData(), audio.getSize());
+            const auto file = lab.root.getChildFile("cancion.mp3");
+            file.replaceWithData(original.getData(), original.getDataSize());
+
+            const auto t = SongDownload::tagsFor(frioFrio(), "JQwqpsuENeQ");
+            expect(TagWriter::writeMp3(file, t));
+            const auto read = TagReader::read(file);
+            expectEquals(read.artist, juce::String("Juan Luis Guerra feat. Romeo Santos"));
+            expectEquals(read.title, juce::String::fromUTF8("Frío, Frío (En Vivo)"));
+
+            juce::MemoryBlock written;
+            file.loadFileAsData(written);
+            size_t tagLength = 0;
+            TagReader::parseId3v2(static_cast<const juce::uint8*>(written.getData()), written.getSize(), &tagLength);
+            expect(tagLength > 0 && written.getSize() - tagLength == audio.getSize());
+            expect(memcmp(static_cast<const char*>(written.getData()) + tagLength, audio.getData(), audio.getSize()) == 0,
+                   "el audio queda igual, sin la etiqueta de FFmpeg");
+            const std::string_view tagBytes(static_cast<const char*>(written.getData()), tagLength);
+            expect(tagBytes.find("TSRC") != std::string_view::npos && tagBytes.find("TALB") != std::string_view::npos
+                   && tagBytes.find("TXXX") != std::string_view::npos, "ISRC, álbum y el enlace de origen");
+
+            // Etiquetar otra vez reemplaza la etiqueta, no la duplica.
+            expect(TagWriter::writeMp3(file, t));
+            juce::MemoryBlock again;
+            file.loadFileAsData(again);
+            expectEquals((int) again.getSize(), (int) written.getSize());
+        }
+
+        beginTest("Herramientas: primero las de RAAADIO, luego las del PATH; lo que falta se instala");
+        {
+            TempLab lab;
+            const auto own = lab.root.getChildFile("Herramientas");
+            const auto path = lab.root.getChildFile("path con espacios");
+            path.getChildFile("node.exe").create();
+            path.getChildFile("ffmpeg.exe").create();
+
+            auto found = DownloadTools::find(own, "C:\\no\\existe;\"" + path.getFullPathName() + "\"");
+            expect(!found.ytDlp.existsAsFile() && !found.ready());
+            expect(found.ffmpegFolder == path, found.ffmpegFolder.getFullPathName());
+            expectEquals(found.jsRuntimeName, juce::String("node"));
+            auto missing = DownloadTools::missing(found, own);
+            expectEquals((int) missing.size(), 1, "solo yt-dlp: FFmpeg y Node ya están");
+            expectEquals(missing[0].name, juce::String("yt-dlp"));
+
+            own.getChildFile("yt-dlp.exe").create();
+            own.getChildFile("ffmpeg").getChildFile("ffmpeg.exe").create();
+            found = DownloadTools::find(own, path.getFullPathName());
+            expect(found.ready() && found.managedYtDlp);
+            expect(found.ffmpegFolder == own.getChildFile("ffmpeg"), found.ffmpegFolder.getFullPathName());
+
+            missing = DownloadTools::missing(DownloadTools::find(lab.root.getChildFile("vacia"), {}), lab.root.getChildFile("vacia"));
+            expectEquals((int) missing.size(), 3);
+            expectEquals(DownloadTools::totalMegabytes(missing), 141);
+        }
+
+        beginTest("Herramientas: el SHA-256 en las listas de yt-dlp, FFmpeg y Deno; del zip, solo lo que hace falta");
+        {
+            const juce::String hex("66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a");
+            expectEquals(DownloadTools::findSha256("aaaa  yt-dlp_x86.exe\n" + hex + "  yt-dlp.exe\n", "yt-dlp.exe"), hex);
+            expectEquals(DownloadTools::findSha256(hex.replace("6", "7") + "  yt-dlp.exe.zip\n" + hex + " *yt-dlp.exe", "yt-dlp.exe"), hex);
+            expectEquals(DownloadTools::findSha256("Algorithm : SHA256\r\nHash      : " + hex.toUpperCase() + "\r\nPath      : C:\\a\\deno.zip\r\n",
+                                                   "deno-x86_64-pc-windows-msvc.zip"), hex);
+            expect(DownloadTools::findSha256(hex + "  otro.exe", "yt-dlp.exe").isEmpty());
+
+            TempLab lab;
+            const auto zipFile = lab.root.getChildFile("ffmpeg.zip");
+            {
+                juce::ZipFile::Builder builder;
+                for (auto* name : { "ffmpeg-x/bin/ffmpeg.exe", "ffmpeg-x/bin/ffprobe.exe", "ffmpeg-x/bin/ffplay.exe",
+                                    "ffmpeg-x/bin/avcodec-63.dll", "ffmpeg-x/doc/leeme.txt", "ffmpeg-x/bin/../../../fuera.exe" })
+                    builder.addEntry(new juce::MemoryInputStream(name, strlen(name), true), 9, name, juce::Time::getCurrentTime());
+                juce::FileOutputStream out(zipFile);
+                builder.writeToStream(out, nullptr);
+            }
+            DownloadTools::Asset asset;
+            asset.zip = true;
+            asset.zipFolder = "bin/";
+            asset.skip = { "ffplay.exe" };
+            asset.destination = lab.root.getChildFile("Herramientas").getChildFile("ffmpeg");
+            expectEquals(DownloadTools::extract(zipFile, asset), 4);
+            expect(asset.destination.getChildFile("ffmpeg.exe").existsAsFile() && asset.destination.getChildFile("avcodec-63.dll").existsAsFile());
+            expect(!asset.destination.getChildFile("ffplay.exe").exists() && !asset.destination.getChildFile("leeme.txt").exists());
+            expect(!lab.root.getChildFile("fuera.exe").exists(), "una entrada con .. no sale de la carpeta");
+        }
+
+        beginTest("yt-dlp: argumentos, progreso, ruta final y qué hacer con cada error");
+        {
+            DownloadTools::Paths tools;
+            tools.ytDlp = juce::File("C:\\Herramientas\\yt-dlp.exe");
+            tools.ffmpegFolder = juce::File("C:\\Herramientas\\ffmpeg");
+            const auto args = SongDownload::arguments(tools, "v0ckuv1xBm0", juce::File("C:\\Temp\\RAAADIO\\3"));
+            expectEquals(args[0], tools.ytDlp.getFullPathName());
+            expect(args.contains("--no-config") && args.contains("--no-playlist") && args.contains("-x"));
+            expectEquals(args[args.indexOf("--audio-format") + 1], juce::String("mp3"));
+            expectEquals(args[args.indexOf("--ffmpeg-location") + 1], tools.ffmpegFolder.getFullPathName());
+            expectEquals(args[args.indexOf("-o") + 1], juce::String("C:\\Temp\\RAAADIO\\3\\%(id)s.%(ext)s"));
+            expectEquals(args[args.indexOf("--retries") + 1], juce::String("3"));
+            expect(!args.contains("--js-runtimes"), "sin motor de JavaScript no se pide");
+            expectEquals(args[args.size() - 1], juce::String("https://www.youtube.com/watch?v=v0ckuv1xBm0"));
+
+            expect(SongDownload::isValidVideoId("v0ckuv1xBm0") && SongDownload::isValidVideoId("-YRkhpmAsvE"));
+            expect(!SongDownload::isValidVideoId("v0ckuv1xBm") && !SongDownload::isValidVideoId("--exec=calc") && !SongDownload::isValidVideoId("a b c d e f"));
+
+            expectWithinAbsoluteError(SongDownload::parseProgress("[raaadio]  45.3%"), 0.453, 0.0001);
+            expectEquals(SongDownload::parseProgress("[raaadio] 100.0%"), 1.0);
+            expectEquals(SongDownload::parseProgress("[raaadio]   N/A%"), -1.0);
+            expectEquals(SongDownload::parseProgress("[download]  45.3%"), -1.0);
+            expectEquals(SongDownload::parseFinalPath("C:\\Temp\\RAAADIO\\3\\v0ckuv1xBm0.mp3"), juce::String("C:\\Temp\\RAAADIO\\3\\v0ckuv1xBm0.mp3"));
+            expect(SongDownload::parseFinalPath("[youtube] v0ckuv1xBm0: Downloading webpage").isEmpty());
+
+            using P = SongDownload::Problem;
+            // Mensajes reales de yt-dlp.
+            expect(SongDownload::classify("ERROR: [youtube] abc: Video unavailable. This content isn't available, try again later. "
+                                          "The current session has been rate-limited by YouTube for up to an hour") == P::RateLimited);
+            expect(SongDownload::classify("ERROR: [youtube] abc: Unable to download API page: HTTP Error 429: Too Many Requests") == P::RateLimited);
+            expect(SongDownload::classify(juce::String::fromUTF8("ERROR: [youtube] abc: Sign in to confirm you\xe2\x80\x99re not a bot. Use --cookies"))
+                   == P::BotCheck);
+            expect(SongDownload::classify("ERROR: [youtube] abc: Sign in to confirm your age. This video may be inappropriate for some users.")
+                   == P::AgeRestricted);
+            expect(SongDownload::classify("ERROR: [youtube] abc: Video unavailable. This video has been removed by the uploader") == P::Unavailable);
+            expect(SongDownload::classify("ERROR: [youtube] abc: The uploader has not made this video available in your country") == P::Region);
+            expect(SongDownload::classify("ERROR: Postprocessing: ffprobe and ffmpeg not found. Please install or provide the path") == P::Tools);
+            expect(SongDownload::classify("ERROR: [youtube] abc: Unable to download API page: <urlopen error [Errno 11001] getaddrinfo failed>")
+                   == P::Network);
+            expectEquals(SongDownload::pauseMinutes(P::RateLimited), 60);
+            expectEquals(SongDownload::pauseMinutes(P::BotCheck), 360);
+            expectEquals(SongDownload::pauseMinutes(P::Unavailable), 0);
+            expect(SongDownload::problemFromKey(SongDownload::problemKey(P::BotCheck)) == P::BotCheck);
+
+            auto acdc = frioFrio();
+            acdc.artist = "AC/DC";
+            acdc.featured.clear();
+            acdc.title = "Back in Black?";
+            expect(!SongDownload::fileName(acdc).containsAnyOf("/\\?:*\"<>|"));
+            expect(SongDownload::fileName(frioFrio()).startsWith("Juan Luis Guerra - "));
+        }
+
+        beginTest("Ritmo: al menos 20 s entre descargas y no más de 20 por hora");
+        {
+            const auto now = juce::Time(2026, 8, 29, 10, 0, 0);
+            expectEquals(SongDownload::secondsToWait({}, now), 0);
+            expectEquals(SongDownload::secondsToWait({ now - juce::RelativeTime::seconds(5) }, now), 15);
+            expectEquals(SongDownload::secondsToWait({ now - juce::RelativeTime::seconds(30) }, now), 0);
+            juce::Array<juce::Time> twenty;
+            for (int i = 0; i < 20; ++i) twenty.add(now - juce::RelativeTime::minutes(58 - i * 2));  // la más vieja hace 58 min
+            expectEquals(SongDownload::secondsToWait(twenty, now), 120, "hasta que la más vieja salga de la hora");
+            twenty.remove(0);
+            expectEquals(SongDownload::secondsToWait(twenty, now), 0);
+        }
+
+        beginTest("Base: cada intento queda anotado y cuenta para el tope por hora");
+        {
+            LibraryFixture fx;
+            auto& db = fx.library.getDatabase();
+            const int a = db.startDownload("v0ckuv1xBm0", 1857061907LL, "Juan Luis Guerra", "Burbujas de Amor");
+            const int b = db.startDownload("JQwqpsuENeQ", 42, "Juan Luis Guerra", juce::String::fromUTF8("Frío, Frío").toStdString());
+            expect(a > 0 && b > a);
+            expect(db.finishDownload(a, Database::DownloadStatus::Done, 7, ""));
+            expect(db.finishDownload(b, Database::DownloadStatus::Failed, -1, "rate_limited: try again later"));
+            const auto rows = db.getRecentDownloads(10);
+            expectEquals((int) rows.size(), 2);
+            expect(rows[0].id == b && rows[0].status == Database::DownloadStatus::Failed && rows[0].error == "rate_limited: try again later");
+            expect(rows[1].status == Database::DownloadStatus::Done && rows[1].trackId == 7 && rows[1].deezerId == 1857061907LL);
+            expectEquals((int) db.getDownloadStartsSince(60).size(), 2);
+        }
+
+        beginTest("En su hilo: baja, etiqueta y entra a la biblioteca por revisar, en su propio lote");
+        {
+            LibraryFixture fx;
+            FakeYtDlp yt;
+            yt.mp3 = encodeMp3(8.0);
+            expect(yt.mp3.getSize() > 1000, "LAME está junto a las pruebas");
+            auto services = fakeServices(fx.lab.root, yt);
+            SongDownloader downloader(fx.library, services);
+            expect(downloader.getStatus().toolsReady);
+
+            const int id = downloader.enqueue(frioFrio(), video("JQwqpsuENeQ"));
+            expect(id > 0);
+            expectEquals(downloader.enqueue(frioFrio(), video("JQwqpsuENeQ")), 0, "ya está en la fila");
+            auto otherSong = frioFrio();
+            otherSong.id = 99;
+            expectEquals(downloader.enqueue(otherSong, video("--exec=calc")), 0, "un id de video que no es válido");
+
+            const auto job = finished(downloader, id);
+            expect(job.has_value() && job->state == SongDownloader::State::Done, job.has_value() ? job->detail : juce::String("timeout"));
+            if (!job.has_value() || job->trackId < 0) return;
+            expectEquals(yt.updates.load(), 1, "yt-dlp de RAAADIO se actualiza una vez al día");
+
+            const auto track = fx.library.getTrackById(job->trackId);
+            expectEquals(track.status, 1, "por revisar");
+            const juce::File file(juce::String::fromUTF8(track.path.c_str()));
+            expect(file.getFullPathName().contains("_Entrada"));
+            expectEquals(file.getFileName(), juce::String::fromUTF8("Juan Luis Guerra - Frío, Frío (En Vivo).mp3"));
+            const auto tags = TagReader::read(file);
+            expectEquals(tags.artist, juce::String("Juan Luis Guerra feat. Romeo Santos"));
+            expect(juce::String::fromUTF8(track.artist.c_str()).startsWith("Juan Luis Guerra"));
+            expectEquals(juce::String(fx.library.getDatabase().getOnlineIds(job->trackId).second), juce::String("USJ3V1200001"));
+            expect(!services.workFolder.getChildFile(juce::String(id)).exists(), "la carpeta de trabajo se borra");
+
+            const auto batches = fx.library.getImportBatches();
+            expect(!batches.empty() && juce::String::fromUTF8(batches[0].source.c_str()).startsWith("YouTube: Juan Luis Guerra") && batches[0].pending == 1,
+                   "un lote propio: se puede deshacer");
+            const auto records = fx.library.getDatabase().getRecentDownloads(5);
+            expect(!records.empty() && records[0].status == Database::DownloadStatus::Done && records[0].trackId == job->trackId
+                   && records[0].videoId == "JQwqpsuENeQ");
+
+            // Otra vez la misma: se reconoce y no se copia dos veces.
+            const int again = downloader.enqueue(frioFrio(), video("JQwqpsuENeQ"));
+            const auto second = finished(downloader, again);
+            expect(second.has_value() && second->state == SongDownloader::State::Duplicate);
+        }
+
+        beginTest("En su hilo: si YouTube pide esperar, la fila se detiene (aunque se cierre el programa) y la canción espera");
+        {
+            LibraryFixture fx;
+            FakeYtDlp yt;
+            yt.errorOutput = "ERROR: [youtube] JQwqpsuENeQ: Video unavailable. This content isn't available, try again later. "
+                             "The current session has been rate-limited by YouTube for up to an hour";
+            const auto before = juce::Time::getCurrentTime();
+            {
+                SongDownloader downloader(fx.library, fakeServices(fx.lab.root, yt));
+                const int id = downloader.enqueue(frioFrio(), video("JQwqpsuENeQ"));
+                expect(waitFor([&] { return downloader.getStatus().pausedUntil > before; }));
+                const auto status = downloader.getStatus();
+                expect(status.pausedUntil >= before + juce::RelativeTime::minutes(59));
+                expect(status.pauseReason == SongDownload::Problem::RateLimited);
+                juce::Thread::sleep(300);
+                expectEquals(yt.downloads.load(), 1, "no se insiste");
+                const auto jobs = downloader.getJobs();
+                expect(jobs.size() == 1 && jobs[0].id == id && jobs[0].state == SongDownloader::State::Queued, "espera su turno, no falla");
+                expectEquals(status.queued, 1);
+            }
+            SongDownloader reopened(fx.library, fakeServices(fx.lab.root, yt));
+            expect(reopened.getStatus().pausedUntil >= before + juce::RelativeTime::minutes(59), "la pausa se guarda");
+            expect(fx.library.getDatabase().getRecentDownloads(1)[0].error.rfind("rate_limited", 0) == 0);
+        }
+
+        beginTest("En su hilo: un video no disponible falla sin detener la fila; cancelar corta la descarga");
+        {
+            LibraryFixture fx;
+            FakeYtDlp yt;
+            yt.errorOutput = "ERROR: [youtube] JQwqpsuENeQ: Video unavailable. This video has been removed by the uploader";
+            SongDownloader downloader(fx.library, fakeServices(fx.lab.root, yt));
+            const auto failed = finished(downloader, downloader.enqueue(frioFrio(), video("JQwqpsuENeQ")));
+            expect(failed.has_value() && failed->state == SongDownloader::State::Failed && failed->problem == SongDownload::Problem::Unavailable);
+            expect(failed.has_value() && failed->detail.contains("removed by the uploader"));
+            expect(downloader.getStatus().pausedUntil == juce::Time());
+
+            yt.block = true;
+            auto other = frioFrio();
+            other.id = 43;
+            const int id = downloader.enqueue(other, video("G6fJreMyIks"));
+            expect(waitFor([&] {
+                for (const auto& j : downloader.getJobs())
+                    if (j.id == id) return j.state == SongDownloader::State::Downloading && j.progress > 0.05;
+                return false;
+            }));
+            downloader.cancel(id);
+            const auto cancelled = finished(downloader, id, 3000);
+            expect(cancelled.has_value() && cancelled->state == SongDownloader::State::Cancelled);
+        }
+
+        beginTest("Instalación: baja, verifica el SHA-256 y extrae; una firma que no coincide no se instala");
+        {
+            // Lo que "publica" GitHub: yt-dlp.exe y los zip de FFmpeg y Deno, con sus checksums.
+            TempLab lab;
+            auto zipOf = [&lab](const juce::String& name, std::initializer_list<const char*> entries) {
+                const auto file = lab.root.getChildFile(name);
+                juce::ZipFile::Builder builder;
+                for (auto* e : entries) builder.addEntry(new juce::MemoryInputStream(e, strlen(e), true), 9, e, juce::Time::getCurrentTime());
+                juce::FileOutputStream out(file);
+                builder.writeToStream(out, nullptr);
+                out.flush();
+                return file;
+            };
+            const auto ytDlp = lab.root.getChildFile("yt-dlp.exe");
+            ytDlp.replaceWithText("yt-dlp de prueba");
+            const auto ffmpegZip = zipOf("ffmpeg.zip", { "ffmpeg-x/bin/ffmpeg.exe", "ffmpeg-x/bin/ffplay.exe", "ffmpeg-x/LICENSE.txt" });
+            const auto denoZip = zipOf("deno.zip", { "deno.exe" });
+            auto sha = [](const juce::File& f) { return juce::SHA256(f).toHexString(); };
+
+            auto services = [&](LibraryFixture& fx, const juce::String& ffmpegHash) {
+                SongDownloader::Services s;
+                s.toolsFolder = fx.lab.root.getChildFile("Herramientas");
+                s.workFolder = fx.lab.root.getChildFile("Trabajo");
+                s.pathVariable = juce::String();
+                s.transport = [&, ffmpegHash](const HttpTransport::Request& r) {
+                    if (r.url.endsWith("SHA2-256SUMS")) return HttpTransport::Response { 200, sha(ytDlp) + "  yt-dlp.exe\n", {} };
+                    if (r.url.endsWith("checksums.sha256"))
+                        return HttpTransport::Response { 200, ffmpegHash + "  ffmpeg-master-latest-win64-gpl-shared.zip\n", {} };
+                    if (r.url.endsWith(".sha256sum")) return HttpTransport::Response { 200, "Hash      : " + sha(denoZip).toUpperCase(), {} };
+                    return HttpTransport::Response { 404, {}, {} };
+                };
+                s.fetch = [&](const juce::String& url, const juce::File& target, const HttpTransport::Progress& progress) {
+                    const auto source = url.endsWith("yt-dlp.exe") ? ytDlp : url.contains("ffmpeg") ? ffmpegZip : denoZip;
+                    progress(0.5);
+                    progress(1.0);
+                    return source.copyFileTo(target);
+                };
+                return s;
+            };
+
+            {
+                LibraryFixture fx;
+                SongDownloader downloader(fx.library, services(fx, sha(ffmpegZip)));
+                expectEquals((int) downloader.getMissingTools().size(), 3);
+                downloader.installTools();
+                expect(waitFor([&] { return !downloader.getStatus().installing; }));
+                const auto status = downloader.getStatus();
+                expect(status.toolsReady && status.installError.isEmpty(), status.installError);
+                const auto folder = fx.lab.root.getChildFile("Herramientas");
+                expectEquals(folder.getChildFile("yt-dlp.exe").loadFileAsString(), juce::String("yt-dlp de prueba"));
+                expect(folder.getChildFile("ffmpeg/ffmpeg.exe").existsAsFile() && !folder.getChildFile("ffmpeg/ffplay.exe").exists());
+                expect(folder.getChildFile("deno/deno.exe").existsAsFile());
+                expect(downloader.getMissingTools().empty() && downloader.getTools().jsRuntimeName == "deno");
+                expect(folder.findChildFiles(juce::File::findFiles, false, "descargando-*").isEmpty(), "no quedan archivos a medias");
+            }
+            {
+                LibraryFixture fx;
+                SongDownloader downloader(fx.library, services(fx, juce::String::repeatedString("0", 64)));
+                downloader.installTools();
+                expect(waitFor([&] { return !downloader.getStatus().installing; }));
+                const auto status = downloader.getStatus();
+                expectEquals(status.installError, juce::String("checksum"));
+                expectEquals(status.installErrorStep, juce::String("FFmpeg"));
+                expect(!status.toolsReady && !fx.lab.root.getChildFile("Herramientas/ffmpeg/ffmpeg.exe").exists());
+            }
+        }
+
+        // De verdad, solo si se pide (RAAADIO_DOWNLOAD_TESTS=1): instala yt-dlp, FFmpeg y Deno en una
+        // carpeta temporal y descarga "Big Buck Bunny" de la Blender Foundation (Creative Commons BY).
+        if (juce::SystemStats::getEnvironmentVariable("RAAADIO_DOWNLOAD_TESTS", {}) == "1")
+        {
+            beginTest("De verdad: instalar las herramientas y descargar un video con licencia Creative Commons");
+            LibraryFixture fx;
+            SongDownloader::Services s;
+            s.toolsFolder = fx.lab.root.getChildFile("Herramientas");
+            s.workFolder = fx.lab.root.getChildFile("Trabajo");
+            s.pathVariable = juce::String();
+            s.minGapSeconds = 0;
+            s.maxJitterSeconds = 0;
+            SongDownloader downloader(fx.library, s);
+            downloader.installTools();
+            expect(waitFor([&] { return !downloader.getStatus().installing; }, 15 * 60 * 1000));
+            const auto status = downloader.getStatus();
+            expect(status.toolsReady, status.installErrorStep + " " + status.installError);
+            if (!status.toolsReady) return;
+
+            SongSearch::Track bunny;
+            bunny.id = 1;
+            bunny.artist = "Blender Foundation";
+            bunny.title = bunny.titleShort = "Big Buck Bunny";
+            bunny.album = "Big Buck Bunny";
+            bunny.year = 2008;
+            const auto start = juce::Time::getMillisecondCounter();
+            const auto done = finished(downloader, downloader.enqueue(bunny, video("aqz-KE-bpKQ")), 5 * 60 * 1000);
+            expect(done.has_value() && done->state == SongDownloader::State::Done, done.has_value() ? done->detail : juce::String("timeout"));
+            logMessage("Descarga real: " + juce::String((juce::Time::getMillisecondCounter() - start) / 1000) + " s");
+            if (done.has_value() && done->trackId > 0) {
+                const auto track = fx.library.getTrackById(done->trackId);
+                logMessage("En la biblioteca: " + juce::String::fromUTF8(track.path.c_str()) + " (" + juce::String(track.duration, 1) + " s)");
+                expect(track.status == 1 && track.duration > 600.0);
+                expectEquals(TagReader::read(juce::File(juce::String::fromUTF8(track.path.c_str()))).title, juce::String("Big Buck Bunny"));
+            }
+
+            // Cancelar a medias no deja yt-dlp ni FFmpeg corriendo.
+            auto again = bunny;
+            again.id = 2;
+            const int id = downloader.enqueue(again, video("aqz-KE-bpKQ"));
+            waitFor([&] {
+                for (const auto& j : downloader.getJobs())
+                    if (j.id == id) return j.state == SongDownloader::State::Downloading && j.progress > 0.02;
+                return false;
+            }, 60000);
+            downloader.cancel(id);
+            const auto cancelled = finished(downloader, id, 10000);
+            expect(cancelled.has_value() && cancelled->state == SongDownloader::State::Cancelled);
+            juce::Thread::sleep(1000);
+            juce::String processes;
+            ProcessRunner::run({ "tasklist", "/NH" }, [&processes](const juce::String& l) { processes << l << "\n"; }, {});
+            expect(!processes.containsIgnoreCase("yt-dlp.exe") && !processes.containsIgnoreCase("ffmpeg.exe"), "no queda nada corriendo");
         }
     }
 };
@@ -4098,6 +5099,8 @@ static ImportReviewTests importReviewTests;
 static AcousticFingerprintTests acousticFingerprintTests;
 static CatalogToolsTests catalogToolsTests;
 static OnlineIdentityTests onlineIdentityTests;
+static SongSearchTests songSearchTests;
+static SongDownloadTests songDownloadTests;
 static DeckCueTests deckCueTests;
 static GeneratorTests generatorTests;
 static CategoryTests categoryTests;

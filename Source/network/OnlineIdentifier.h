@@ -2,6 +2,7 @@
 #include <JuceHeader.h>
 #include <deque>
 #include "../library/MusicLibrary.h"
+#include "HttpTransport.h"
 
 // Identificación en línea de la música por revisar: huella de Chromaprint → AcoustID (qué
 // grabación es) → MusicBrainz (sus datos). Trabaja en su propio hilo, respeta los límites de
@@ -11,15 +12,9 @@
 // AcoustID (Ajustes); "Buscar en línea" a mano solo pide la clave.
 class OnlineIdentifier : public juce::ChangeBroadcaster, private juce::Thread {
 public:
-    struct Request {
-        juce::String url, body;  // body vacío: GET; si no, POST
-        juce::String headers;
-    };
-    struct Response {
-        int status = 0;          // 0: sin conexión
-        juce::String body;
-    };
-    using Transport = std::function<Response(const Request&)>;
+    using Request = HttpTransport::Request;
+    using Response = HttpTransport::Response;
+    using Transport = HttpTransport::Transport;
 
     // transport: para las pruebas; por omisión, HTTP de verdad.
     explicit OnlineIdentifier(MusicLibrary& library, Transport transport = {});
@@ -67,7 +62,6 @@ private:
     Response send(Request request);
     void waitTurn(juce::uint32& last, int intervalMs);
     Outcome save(int trackId, const Database::OnlineMatch& match);
-    static Response http(const Request& request);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OnlineIdentifier)
 };

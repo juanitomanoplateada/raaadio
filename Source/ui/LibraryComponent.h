@@ -9,6 +9,7 @@
 #include "AdvertisingComponent.h"
 #include "CartwallView.h"
 #include "ImportReviewView.h"
+#include "OnlineSearchView.h"
 
 class Deck;
 class Playlist;
@@ -44,8 +45,11 @@ public:
     void refreshLibrary();  // tras cambios hechos fuera del panel (p. ej., borrar la biblioteca)
     void setPreviewPlayer(PreviewPlayer* player) { previewPlayer = player; }
     void setOnlineIdentifier(OnlineIdentifier* identifier) { onlineIdentifier = identifier; }
+    void setSongDownloader(SongDownloader* downloader) { songDownloader = downloader; }
     // Abre la revisión de canciones (o la trae al frente si ya estaba abierta).
     void openReview(ImportReview::Scope scope);
+    // Abre la búsqueda en internet (o la trae al frente) y busca query, si no está vacía.
+    void openOnlineSearch(const juce::String& query);
 
 private:
     MusicLibrary& library;
@@ -65,7 +69,9 @@ private:
     int pendingCount = 0, unreviewedCount = 0, catalogVersionSeen = -1;
     PreviewPlayer* previewPlayer = nullptr;
     OnlineIdentifier* onlineIdentifier = nullptr;
+    SongDownloader* songDownloader = nullptr;
     std::unique_ptr<ImportReviewWindow> reviewWindow;
+    std::unique_ptr<OnlineSearchWindow> onlineSearchWindow;
     void updateReviewButton();
 
     double progress = 0.0;
