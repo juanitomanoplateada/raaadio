@@ -31,6 +31,7 @@ juce::var StationSettings::toVar() const {
     o->setProperty("streamDescription", streamDescription);
     o->setProperty("streamWebsite", streamWebsite);
     o->setProperty("streamPublic", streamPublic);
+    o->setProperty("streamTls", streamTls);
     o->setProperty("streamMetadataDelay", streamMetadataDelay);
     o->setProperty("nowPlayingPushUrl", nowPlayingPushUrl);
     o->setProperty("backupEnabled", backupEnabled);
@@ -78,6 +79,7 @@ StationSettings StationSettings::fromVar(const juce::var& v) {
     s.streamDescription = read("streamDescription", s.streamDescription).toString();
     s.streamWebsite = read("streamWebsite", s.streamWebsite).toString();
     s.streamPublic = read("streamPublic", s.streamPublic);
+    s.streamTls = read("streamTls", s.streamTls);
     s.streamMetadataDelay = juce::jlimit(0, 60, (int) read("streamMetadataDelay", s.streamMetadataDelay));
     s.nowPlayingPushUrl = read("nowPlayingPushUrl", s.nowPlayingPushUrl).toString();
     // Antes el respaldo automático se activaba en la configuración de Windows, no en la emisora.

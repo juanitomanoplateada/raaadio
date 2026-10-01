@@ -11,7 +11,7 @@ class SongDownloader;
 //   RAAADIO.exe --ui-snapshot salida.png [--size 1920x1080] [--theme dark|light]
 //               [--lang es|en] [--view main|empty|history|ads|settings|settings-library|
 //                                     settings-broadcast|settings-broadcast-2|settings-language|settings-about|
-//                                     cartwall|generator|track|import|library-online|online-search]
+//                                     cartwall|generator|generator-advanced|track|import|library-online|online-search]
 class UiSnapshotRunner : private juce::Timer
 {
 public:

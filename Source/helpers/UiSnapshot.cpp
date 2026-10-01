@@ -255,6 +255,8 @@ void UiSnapshotRunner::populateDemoState()
                         const juce::String& category, juce::String path = {}) {
         if (path.isEmpty())
             path = demoDir.getChildFile(juce::String(db.searchTracks("", "").size()) + ".ogg").getFullPathName();
+        // Un archivo vacío en su lugar: el generador no usa pistas cuyo archivo falta.
+        if (!juce::File(path).existsAsFile()) juce::File(path).create();
 
         TrackInfo t;
         t.path = path.toStdString();
@@ -526,10 +528,29 @@ juce::Component* UiSnapshotRunner::createView()
         static_cast<SettingsDialog*>(dialogView.get())->setOnlineIdentifier(main->onlineIdentifier.get());
         height = 640;
     }
-    else if (view == "generator")
+    else if (view.startsWith("generator"))
     {
-        dialogView = std::make_unique<PlaylistGeneratorDialog>(main->library, main->playlist);
-        width = 900; height = 620;
+        // generator, generator-advanced, generator-done (después de generar) y
+        // generator-replace (reemplazar la cola, con separadores y solo salsa).
+        auto generatorDialog = std::make_unique<PlaylistGeneratorDialog>(main->library, main->playlist);
+        generatorDialog->showAdvanced(view == "generator-advanced");
+        if (view == "generator-done")
+            generatorDialog->generate();
+        if (view == "generator-replace")
+        {
+            auto& s = generatorDialog->settings;
+            s.insertionMode = InsertionMode::Replace;
+            s.targetDurationVal = 2;
+            s.targetDurationIsHours = true;
+            if (!generatorDialog->musicCategories.empty()) s.includedCategories = { generatorDialog->musicCategories.front().id };
+            s.separatorCategoryId = generatorDialog->sweepersCategoryId;
+            s.separatorInterval = 4;
+            generatorDialog->syncControlsFromSettings();
+            generatorDialog->refresh();
+        }
+        dialogView = std::move(generatorDialog);
+        width = PlaylistGeneratorDialog::defaultWidth;
+        height = PlaylistGeneratorDialog::defaultHeight;
     }
     else if (view == "track")
     {

@@ -31,6 +31,7 @@ struct StationSettings {
     juce::String streamDescription;
     juce::String streamWebsite;
     bool streamPublic = false;  // pedir que la liste en directorios públicos (Icecast)
+    bool streamTls = false;     // conexión cifrada con el servidor (ver StreamSocket)
     // Segundos que se retrasa el título en MP3, para que cambie cuando el oyente oye el
     // cambio de canción y no antes. En Ogg el título viaja con el audio y no hace falta.
     int streamMetadataDelay = 0;

@@ -371,7 +371,8 @@ void PlaylistComponent::openGenerator() {
     opt.resizable = true;
 
     auto* w = opt.launchAsync();
-    w->centreWithSize(900, 620);
+    w->setResizeLimits(820, 640, 1600, 1200);
+    w->centreWithSize(PlaylistGeneratorDialog::defaultWidth, PlaylistGeneratorDialog::defaultHeight);
     dialog->onGenerateSuccess = [this] { updateCache(); };
     dialog->onCancel = [w] { w->closeButtonPressed(); };
 }

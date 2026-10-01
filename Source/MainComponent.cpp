@@ -230,6 +230,7 @@ void MainComponent::applyStationSettings() {
     server.description = s.streamDescription;
     server.website = s.streamWebsite;
     server.isPublic = s.streamPublic;
+    server.tls = s.streamTls;
     server.metadataDelaySeconds = s.streamMetadataDelay;
 
     // Durante las tandas los oyentes ven el nombre de la emisora.

@@ -6,19 +6,16 @@ namespace {
     // socket: cada flujo encadenado crea uno nuevo sobre la misma conexión.
     class SocketOutputStream : public juce::OutputStream {
     public:
-        SocketOutputStream(juce::StreamingSocket& s, std::atomic<bool>& failedFlag) : socket(s), failed(failedFlag) {}
+        SocketOutputStream(StreamSocket& s, std::atomic<bool>& failedFlag, juce::int64& totalSent)
+            : socket(s), failed(failedFlag), total(totalSent) {}
 
         bool write(const void* data, size_t numBytes) override {
             if (failed) return false;
-            size_t sent = 0;
-            while (sent < numBytes) {
-                const int n = socket.write(static_cast<const char*>(data) + sent, (int) (numBytes - sent));
-                if (n <= 0) {
-                    failed = true;
-                    return false;
-                }
-                sent += (size_t) n;
+            if (!socket.writeAll(data, (int) numBytes)) {
+                failed = true;
+                return false;
             }
+            total += (juce::int64) numBytes;
             position += (juce::int64) numBytes;
             return true;
         }
@@ -27,8 +24,9 @@ namespace {
         bool setPosition(juce::int64) override { return false; }
 
     private:
-        juce::StreamingSocket& socket;
+        StreamSocket& socket;
         std::atomic<bool>& failed;
+        juce::int64& total;  // todo lo enviado en la conexión, entre todos los flujos Ogg
         juce::int64 position = 0;
     };
 
@@ -51,15 +49,88 @@ namespace {
 
     const juce::String userAgent = "User-Agent: RAAADIO/" + juce::String(ProjectInfo::versionString) + "\r\n";
 
-    // Lee la respuesta del servidor hasta la línea en blanco y devuelve la primera línea.
-    juce::String readStatusLine(juce::StreamingSocket& socket, int timeoutMs) {
+    // Lee la respuesta del servidor hasta la línea en blanco, de a un byte para no tomar nada
+    // de lo que venga después.
+    juce::String readResponse(StreamSocket& socket, int timeoutMs) {
         juce::String response;
         while (response.length() < 4096 && !response.endsWith("\r\n\r\n")) {
             char c = 0;
-            if (socket.waitUntilReady(true, timeoutMs) != 1 || socket.read(&c, 1, false) != 1) break;
+            if (socket.readSome(&c, 1, timeoutMs) != 1) break;
             response += juce::String::charToString((juce::juce_wchar) (juce::uint8) c);
         }
+        return response;
+    }
+
+    juce::String statusLineOf(const juce::String& response) {
         return response.upToFirstOccurrenceOf("\r\n", false, false).trim();
+    }
+
+    // Las cabeceras de la respuesta en una línea, para el registro (no llevan la clave).
+    juce::String headersOf(const juce::String& response) {
+        juce::StringArray lines;
+        lines.addLines(response.fromFirstOccurrenceOf("\r\n", false, false));
+        lines.removeEmptyStrings();
+        return lines.joinIntoString(" | ").substring(0, 400);
+    }
+
+    const char* methodName(StreamEncoder::Method m) {
+        return m == StreamEncoder::Method::Put ? "PUT" : "SOURCE";
+    }
+
+    // Lo que manda el servidor al echar al emisor (lo primero ya leído en data), hasta que
+    // cierra o se calla, con un tope.
+    juce::String readUntilClosed(StreamSocket& socket, juce::MemoryBlock data) {
+        char buffer[4096];
+        while (data.getSize() < 256 * 1024) {
+            const int n = socket.readSome(buffer, (int) sizeof(buffer), 2000);
+            if (n <= 0) break;
+            data.append(buffer, (size_t) n);
+        }
+        return juce::String::fromUTF8(static_cast<const char*>(data.getData()), (int) data.getSize());
+    }
+
+    // El texto visible de un trozo de HTML, en una línea.
+    juce::String plainText(const juce::String& html) {
+        juce::String text;
+        bool inTag = false;
+        for (auto c : html) {
+            if (c == '<') inTag = true;
+            else if (c == '>') { inTag = false; text << ' '; }
+            else if (!inTag) text << juce::String::charToString(c);
+        }
+        juce::StringArray words;
+        words.addTokens(text, " \t\r\n", {});
+        words.removeEmptyStrings();
+        return words.joinIntoString(" ");
+    }
+
+    // El texto del primer <tag> o <tag ...> (no el de <tagotra>: <p> no es <path>).
+    juce::String firstElement(const juce::String& html, const juce::String& tag) {
+        for (int i = html.indexOfIgnoreCase("<" + tag); i >= 0; i = html.indexOfIgnoreCase(i + 1, "<" + tag)) {
+            const auto next = html[i + 1 + tag.length()];
+            if (next != '>' && !juce::CharacterFunctions::isWhitespace(next)) continue;
+            const auto inner = html.substring(i).fromFirstOccurrenceOf(">", false, false);
+            return plainText(inner.upToFirstOccurrenceOf("</" + tag, false, true)).substring(0, 200);
+        }
+        return {};
+    }
+
+    // Para el registro: la línea de estado y, si es una página, su título y lo primero que dice.
+    juce::String describeServerMessage(const juce::String& message) {
+        auto description = statusLineOf(message);
+        const auto body = message.fromFirstOccurrenceOf("\r\n\r\n", false, false);
+        for (const char* tag : { "title", "h1", "h2", "p" }) {
+            const auto text = firstElement(body, tag);
+            if (text.isNotEmpty()) description << " | <" << tag << "> " << text;
+        }
+        return description;
+    }
+
+    // El registro general no lleva hora; la transmisión sí, para saber cuánto duró cada cosa.
+    void logLine(const juce::String& text) {
+        const auto now = juce::Time::getCurrentTime();
+        juce::Logger::writeToLog("StreamEncoder [" + now.formatted("%H:%M:%S") + "."
+                                 + juce::String(now.getMilliseconds()).paddedLeft('0', 3) + "]: " + text);
     }
 }
 
@@ -72,6 +143,7 @@ StreamEncoder::~StreamEncoder() {
 void StreamEncoder::start(const Server& newServer) {
     stop();
     server = newServer;
+    method = Method::Put;
     status = Status::Connecting;
     if (server.format == Format::Mp3) metadataSender.start(server);
     startThread();
@@ -116,13 +188,16 @@ void StreamEncoder::pushBlock(const juce::AudioBuffer<float>& buffer, int startS
         if (size2 > 0) fifoBuffer.copyFrom(ch, start2, buffer, source, startSample + size1, size2);
     }
     fifo.finishedWrite(size1 + size2);
+    samplesIn += size1 + size2;
+    samplesDropped += numSamples - (size1 + size2);
 }
 
-juce::String StreamEncoder::buildSourceRequest(const Server& s, double sampleRate) {
+juce::String StreamEncoder::buildSourceRequest(const Server& s, double sampleRate, Method m) {
     const bool mp3 = s.format == Format::Mp3;
     const int rate = mp3 ? Mp3Encoder::outputRateFor(sampleRate) : juce::roundToInt(sampleRate);
 
-    juce::String request = "SOURCE " + withSlash(s.mount) + " HTTP/1.0\r\n"
+    juce::String request = juce::String(methodName(m)) + " " + withSlash(s.mount)
+                           + (m == Method::Put ? " HTTP/1.1\r\n" : " HTTP/1.0\r\n")
                            + hostHeader(s) + basicAuth(s) + userAgent
                            + "Content-Type: " + (mp3 ? "audio/mpeg" : "application/ogg") + "\r\n"
                            + "ice-name: " + headerValue(s.name) + "\r\n"
@@ -163,21 +238,57 @@ void StreamEncoder::fail(const juce::String& message) {
         lastError = message;
     }
     status = Status::Error;
-    juce::Logger::writeToLog("StreamEncoder: " + message);
+    logLine(message);
 }
 
 void StreamEncoder::run() {
     wait(0);  // descarta un aviso que haya quedado de una detención anterior
     int backoffSeconds = 2;
     while (!threadShouldExit()) {
-        if (connectAndStream()) backoffSeconds = 2;  // estuvo conectado: se reintenta pronto
+        // Tras una conexión que duró, se reintenta pronto. Si el servidor corta a los pocos
+        // segundos (un límite del plan, un dato que no le gusta), insistir cada 2 s no lo
+        // arregla, y algunos servicios bloquean al que insiste: la espera sigue creciendo.
+        if (connectAndStream() >= 60) backoffSeconds = 2;
         if (threadShouldExit()) break;
         wait(backoffSeconds * 1000);
         backoffSeconds = juce::jmin(backoffSeconds * 2, 30);
     }
 }
 
-bool StreamEncoder::connectAndStream() {
+// Abre la conexión y se presenta. Si el servidor no acepta PUT, se prueba SOURCE en otra
+// conexión (algunos cortan después de rechazar), y el método que funcionó queda para las
+// reconexiones.
+bool StreamEncoder::openStream(StreamSocket& socket, double rate) {
+    juce::String rejection;
+    const auto first = method;
+    for (const auto m : { first, Method::Source }) {
+        if (threadShouldExit()) return false;
+        if (!socket.connect(server.host, server.port, server.tls, 5000)) {
+            const auto tlsProblem = socket.getLastError();
+            fail(tlsProblem.isNotEmpty() ? TRANS("stream_err_tls") + ": " + tlsProblem
+                                         : TRANS("stream_err_connect") + " " + server.host + ":" + juce::String(server.port));
+            return false;
+        }
+        const auto request = buildSourceRequest(server, rate, m);
+        juce::String response;
+        if (socket.writeAll(request.toRawUTF8(), (int) request.getNumBytesAsUTF8()))
+            response = readResponse(socket, 5000);
+        const auto statusLine = statusLineOf(response);
+        logLine(juce::String(methodName(m)) + " " + withSlash(server.mount) + ": "
+            + (statusLine.isEmpty() ? juce::String("no response") : statusLine + " | " + headersOf(response)));
+        if (isAccepted(statusLine)) {
+            method = m;
+            return true;
+        }
+        socket.close();
+        rejection = statusLine.isEmpty() ? TRANS("stream_err_no_response") : TRANS("stream_err_rejected") + ": " + statusLine;
+        if (m == Method::Source) break;  // ya era SOURCE: no hay otro que probar
+    }
+    if (!threadShouldExit()) fail(rejection);
+    return false;
+}
+
+int StreamEncoder::connectAndStream() {
     // Mientras se reintenta después de un error, el estado sigue en error (con su motivo)
     // hasta que la conexión vuelva: así la barra superior no parpadea entre los dos.
     if (status.load() != Status::Error) status = Status::Connecting;
@@ -190,10 +301,10 @@ bool StreamEncoder::connectAndStream() {
     Mp3Encoder mp3Encoder;
     if (mp3 && !mp3Encoder.open(rate, server.bitrate)) {
         fail(Mp3Encoder::isAvailable() ? TRANS("stream_err_encoder") : TRANS("stream_err_no_lame"));
-        return false;
+        return -1;
     }
 
-    juce::StreamingSocket socket;
+    StreamSocket socket;
     {
         const juce::ScopedLock sl(lock);
         activeSocket = &socket;
@@ -203,25 +314,11 @@ bool StreamEncoder::connectAndStream() {
         ~Release() { const juce::ScopedLock sl(owner.lock); owner.activeSocket = nullptr; }
     } release { *this };
 
-    if (!socket.connect(server.host, server.port, 5000)) {
-        fail(TRANS("stream_err_connect") + " " + server.host + ":" + juce::String(server.port));
-        return false;
-    }
-
-    const auto request = buildSourceRequest(server, rate);
-    if (socket.write(request.toRawUTF8(), (int) request.getNumBytesAsUTF8()) < 0) {
-        fail(TRANS("stream_err_lost"));
-        return false;
-    }
-
-    const auto statusLine = readStatusLine(socket, 5000);
-    if (!isAccepted(statusLine)) {
-        fail(statusLine.isEmpty() ? TRANS("stream_err_no_response") : TRANS("stream_err_rejected") + ": " + statusLine);
-        return false;
-    }
+    if (!openStream(socket, rate)) return -1;
 
     std::atomic<bool> failed { false };
-    SocketOutputStream mp3Out(socket, failed);
+    juce::int64 bytesSent = 0;
+    SocketOutputStream mp3Out(socket, failed, bytesSent);
     std::unique_ptr<juce::AudioFormatWriter> writer;  // Ogg
 
     // Ogg: un flujo con el título en sus comentarios. MP3: el título va aparte; al
@@ -249,7 +346,7 @@ bool StreamEncoder::connectAndStream() {
         writer.reset();  // cierra el flujo Ogg anterior
         if (failed) return false;
         juce::OggVorbisAudioFormat ogg;
-        auto* out = new SocketOutputStream(socket, failed);
+        auto* out = new SocketOutputStream(socket, failed, bytesSent);
         writer.reset(ogg.createWriterFor(out, rate, 2, 16, metadata, server.quality));
         if (writer == nullptr) delete out;  // si no crea el escritor, el flujo sigue siendo nuestro
         return writer != nullptr;
@@ -259,30 +356,48 @@ bool StreamEncoder::connectAndStream() {
     limiter.prepare(rate);
     if (!startTrack(true)) {
         fail(TRANS("stream_err_encoder"));
-        return false;
+        return -1;
     }
+    samplesIn = 0;
+    samplesDropped = 0;
     sending = true;
     status = Status::Connected;
     {
         const juce::ScopedLock sl(lock);
         lastError = {};
     }
-    juce::Logger::writeToLog("StreamEncoder: connected to " + server.host + ":" + juce::String(server.port)
-                             + withSlash(server.mount) + (mp3 ? " (MP3)" : " (Ogg Vorbis)"));
+    const auto connectedAt = juce::Time::getMillisecondCounter();
+    logLine("connected to " + server.host + ":" + juce::String(server.port) + withSlash(server.mount) + (server.tls ? " over TLS" : "") + " with "
+        + methodName(method) + (mp3 ? " (MP3 " + juce::String(server.bitrate) + " kbps, " : juce::String(" (Ogg Vorbis, "))
+        + juce::String(mp3 ? Mp3Encoder::outputRateFor(rate) : juce::roundToInt(rate)) + " Hz)");
 
+    bool encoderFailed = false, serverClosed = false;
+    juce::String serverSaid;  // lo que mande el servidor después de aceptar: a veces, el motivo del corte
     juce::MemoryBlock encoded;
     auto encodeRegion = [&](int start, int size) {
         if (size <= 0) return;
         limiter.process(fifoBuffer.getArrayOfWritePointers(), 2, start, size);
         if (mp3) {
             if (!mp3Encoder.encode(fifoBuffer.getReadPointer(0, start), fifoBuffer.getReadPointer(1, start), size, encoded))
-                failed = true;
+                encoderFailed = true;
         } else {
             writer->writeFromAudioSampleBuffer(fifoBuffer, start, size);
         }
     };
 
-    while (!threadShouldExit() && !failed) {
+    while (!threadShouldExit() && !failed && !encoderFailed) {
+        // Icecast no le escribe al emisor después de aceptarlo: si llega algo, es el servidor
+        // echándolo (a veces con una página que dice por qué) o cerrando. Se nota aquí,
+        // enseguida, y no cuando por fin falla un envío: hay servidores que siguen aceptando
+        // datos unos segundos sin pasarlos a nadie.
+        char first[4096];
+        const int incoming = socket.readSome(first, (int) sizeof(first), 0);
+        if (incoming != 0) {
+            if (incoming > 0) serverSaid = readUntilClosed(socket, juce::MemoryBlock(first, (size_t) incoming));
+            serverClosed = true;
+            break;
+        }
+
         bool newTrack;
         {
             const juce::ScopedLock sl(lock);
@@ -290,13 +405,13 @@ bool StreamEncoder::connectAndStream() {
         }
         if (newTrack && !startTrack(false)) break;
 
-        const int ready = fifo.getNumReady();
-        if (ready < 1024) {
+        const int available = fifo.getNumReady();
+        if (available < 1024) {
             wait(10);
             continue;
         }
         int start1, size1, start2, size2;
-        fifo.prepareToRead(ready, start1, size1, start2, size2);
+        fifo.prepareToRead(available, start1, size1, start2, size2);
         encodeRegion(start1, size1);
         encodeRegion(start2, size2);
         fifo.finishedRead(size1 + size2);
@@ -309,14 +424,43 @@ bool StreamEncoder::connectAndStream() {
 
     sending = false;
     metadataSender.clear();  // los títulos pendientes eran para esta conexión
-    if (mp3 && !failed) {
+    if (mp3 && !failed && !encoderFailed && !serverClosed) {
         mp3Encoder.flush(encoded);
         if (encoded.getSize() > 0) mp3Out.write(encoded.getData(), encoded.getSize());
     }
     writer.reset();
     socket.close();
-    if (!threadShouldExit()) fail(TRANS("stream_err_lost"));
-    return true;
+
+    // Lo que hace falta para saber quién cortó y si el audio salía: cuánto duró, cuánto se
+    // envió y cuánto audio entregó el mezclador.
+    const double seconds = (juce::Time::getMillisecondCounter() - connectedAt) / 1000.0;
+    const double audioRate = juce::jmax(1.0, rate);
+    const juce::String reason = threadShouldExit() ? "stopped"
+                              : serverClosed      ? "the server closed the connection"
+                              : encoderFailed     ? "the encoder failed"
+                                                  : "sending failed";
+    logLine(reason + " after " + juce::String(seconds, 1) + " s: sent " + juce::String(bytesSent / 1024) + " KB ("
+        + juce::String(seconds > 0.0 ? (double) bytesSent * 8.0 / 1000.0 / seconds : 0.0, 0) + " kbps), "
+        + juce::String((double) samplesIn.load() / audioRate, 1) + " s of audio from the mixer, "
+        + juce::String((double) samplesDropped.load() / audioRate, 1) + " s dropped");
+
+    // Lo que dijo el servidor al echarnos, entero en un archivo (puede ser una página web
+    // con el motivo) y resumido en el registro y en el error que ve el usuario.
+    juce::String serverStatus;
+    if (serverSaid.isNotEmpty()) {
+        const auto saved = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("raaadio_stream_server_message.html");
+        saved.replaceWithText(serverSaid);
+        logLine("the server said: " + describeServerMessage(serverSaid) + " (full text: " + saved.getFullPathName() + ")");
+        const auto line = statusLineOf(serverSaid);
+        if (line.startsWith("HTTP/")) serverStatus = line.fromFirstOccurrenceOf(" ", false, false);  // "403 Forbidden"
+    }
+
+    if (!threadShouldExit())
+        fail(serverClosed    ? TRANS("stream_err_closed") + " " + juce::String(juce::roundToInt(seconds)) + " s"
+                                   + (serverStatus.isNotEmpty() ? " (" + serverStatus + ")" : juce::String())
+             : encoderFailed ? TRANS("stream_err_encoder")
+                             : TRANS("stream_err_lost"));
+    return (int) seconds;
 }
 
 //==============================================================================
@@ -379,7 +523,7 @@ void StreamEncoder::MetadataSender::run() {
 }
 
 void StreamEncoder::MetadataSender::send(const juce::String& song) {
-    juce::StreamingSocket socket;
+    StreamSocket socket;
     {
         const juce::ScopedLock sl(lock);
         activeSocket = &socket;
@@ -389,17 +533,18 @@ void StreamEncoder::MetadataSender::send(const juce::String& song) {
         ~Release() { const juce::ScopedLock sl(owner.lock); owner.activeSocket = nullptr; }
     } release { *this };
 
+    // Por la misma vía que el audio: si va cifrado, la clave del título también.
     juce::String statusLine;
-    if (socket.connect(server.host, server.port, 5000)) {
+    if (socket.connect(server.host, server.port, server.tls, 5000)) {
         const auto request = buildMetadataRequest(server, song);
-        if (socket.write(request.toRawUTF8(), (int) request.getNumBytesAsUTF8()) >= 0)
-            statusLine = readStatusLine(socket, 5000);
+        if (socket.writeAll(request.toRawUTF8(), (int) request.getNumBytesAsUTF8()))
+            statusLine = statusLineOf(readResponse(socket, 5000));
     }
     socket.close();
 
     // Un título que no llegó no corta la transmisión: se anota y sigue el audio.
     if (isAccepted(statusLine))
-        juce::Logger::writeToLog("StreamEncoder: title sent: " + song);
+        logLine("title sent: " + song);
     else if (!threadShouldExit())
-        juce::Logger::writeToLog("StreamEncoder: title not accepted (" + (statusLine.isEmpty() ? juce::String("no response") : statusLine) + ")");
+        logLine("title not accepted (" + (statusLine.isEmpty() ? juce::String("no response") : statusLine) + ")");
 }

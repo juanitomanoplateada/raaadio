@@ -4,10 +4,13 @@
 #include <tuple>
 #include "../audio/OutputTap.h"
 #include "../audio/MasterLimiter.h"
+#include "StreamSocket.h"
 
 // Transmisión por internet: codifica la salida al aire en MP3 u Ogg Vorbis y la envía a
-// un servidor Icecast (método SOURCE, compatible con Icecast 2, Zeno.fm y similares). Si se
-// corta la conexión, reintenta sola con esperas crecientes.
+// un servidor Icecast (Icecast 2, Zeno.fm, caster.fm y similares). Se presenta con PUT, el
+// método de Icecast 2.4 en adelante, y si el servidor no lo acepta, con SOURCE, el de los
+// servidores anteriores (lo mismo que hace BUTT). Si se corta la conexión, reintenta sola;
+// si el servidor la corta enseguida, espera cada vez más antes de insistir.
 //
 // El título de lo que suena llega a los oyentes de dos maneras, según el formato:
 //  - Ogg: cada cambio de canción abre un nuevo flujo Ogg encadenado con título y artista.
@@ -17,6 +20,7 @@
 class StreamEncoder : public OutputTap, private juce::Thread {
 public:
     enum class Format { OggVorbis, Mp3 };
+    enum class Method { Put, Source };
 
     struct Server {
         juce::String host;
@@ -31,10 +35,11 @@ public:
         juce::String genre, description, website;
         bool isPublic = false;
         int metadataDelaySeconds = 0;  // solo MP3
+        bool tls = false;              // conexión cifrada (ver StreamSocket)
 
         auto tie() const {
             return std::tie(host, port, mount, user, password, name, format, quality, bitrate,
-                            genre, description, website, isPublic, metadataDelaySeconds);
+                            genre, description, website, isPublic, metadataDelaySeconds, tls);
         }
         bool operator==(const Server& o) const { return tie() == o.tie(); }
         bool operator!=(const Server& o) const { return !(*this == o); }
@@ -63,7 +68,7 @@ public:
     void pushBlock(const juce::AudioBuffer<float>& buffer, int startSample, int numSamples) override;
 
     // Partes del protocolo, separadas para las pruebas.
-    static juce::String buildSourceRequest(const Server& server, double sampleRate = 44100.0);
+    static juce::String buildSourceRequest(const Server& server, double sampleRate = 44100.0, Method method = Method::Put);
     static juce::String buildMetadataRequest(const Server& server, const juce::String& song);
     static juce::String songText(const juce::String& artist, const juce::String& title);
     static bool isAccepted(const juce::String& responseStatusLine);
@@ -86,17 +91,20 @@ private:
         Server server;
         juce::CriticalSection lock;
         std::deque<std::pair<juce::uint32, juce::String>> pending;
-        juce::StreamingSocket* activeSocket = nullptr;
+        StreamSocket* activeSocket = nullptr;
     };
 
     void run() override;
-    bool connectAndStream();
+    int connectAndStream();  // segundos que duró la conexión; -1 si no se llegó a transmitir
+    bool openStream(StreamSocket& socket, double sampleRate);
     void fail(const juce::String& message);
 
     Server server;
+    Method method = Method::Put;  // el que aceptó el servidor (solo lo toca el hilo de envío)
     std::atomic<Status> status { Status::Off };
     std::atomic<bool> sending { false };  // el hilo de audio solo encola mientras hay conexión
     std::atomic<double> preparedRate { 44100.0 };
+    std::atomic<juce::int64> samplesIn { 0 }, samplesDropped { 0 };  // para el registro
 
     juce::AbstractFifo fifo { 131072 };
     juce::AudioBuffer<float> fifoBuffer { 2, 131072 };
@@ -104,7 +112,7 @@ private:
     MetadataSender metadataSender;
 
     mutable juce::CriticalSection lock;
-    juce::StreamingSocket* activeSocket = nullptr;  // para cortar una escritura trabada al detener
+    StreamSocket* activeSocket = nullptr;  // para cortar una escritura trabada al detener
     juce::String lastError;
     juce::String artist, title;
     bool metadataChanged = false;

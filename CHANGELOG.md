@@ -134,6 +134,17 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
 - `Recordings/Registro` pasa a `Recordings/AirLog`, y la política de respaldo pasa de la
   configuración de Windows a la emisora.
 - Las plantillas del generador aceptan cualquier nombre (ya no son nombres de archivo).
+- **Generador de listas rediseñado**, con dos modos sobre los mismos ajustes: *Rápido* (cuánta
+  música, qué géneros con su cantidad de canciones, dónde ponerla y separadores; los valores
+  por defecto ya están puestos) y *Avanzado* (incluir y excluir categorías con botones en vez
+  de clic derecho, reglas escritas como frases, separadores, plantillas en una lista
+  desplegable). Un resumen dice antes de generar qué va a pasar y avisa de lo que saldría mal;
+  reemplazar la cola lo dice en el botón; después de generar se informa qué se hizo y se puede
+  quitar lo generado.
+- **Las reglas del generador son preferencias con un orden**: no repetir canciones, separar
+  artistas, cambiar de categoría. El bloque sigue de lo que ya está en la cola (no lo repite y
+  separa los artistas desde la última canción), siempre llega a la duración pedida y dice
+  cuánto tuvo que ceder.
 - **Interfaz rediseñada**: `LookAndFeel` propio, iconos vectoriales, temas claro y oscuro
   revisados, barra de estado nueva y diálogos reorganizados.
 - Los decks y la botonera **leen el disco en otro hilo**, con ~3 s de ventaja: un disco
@@ -169,6 +180,25 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
 - El selector de importación ofrecía `.m4a` (ilegible) y ocultaba `.ogg`, `.aiff` y `.wma`.
 - La última reproducción se leía como UTC y corría la hora.
 - El generador se quedaba atascado cuando una regla de separación era imposible de cumplir.
+- El generador, con una categoría chica junto a una grande, repetía las canciones de la chica
+  para "cambiar de categoría" (con 300 de salsa y 10 boleros, la mitad de una lista de 4 horas
+  eran boleros y cada uno sonaba hasta 4 veces).
+- Generar dos bloques seguidos repetía en el segundo canciones que seguían en la cola, y podía
+  empezar con el artista de la última canción de la cola.
+- Una lista que quedaba a medias (reglas imposibles) se daba por buena sin avisar; una pista
+  sin duración dejaba al generador agregando miles de filas; se programaban canciones cuyo
+  archivo ya no estaba; una plantilla a la que le faltaba un campo cargaba ceros en vez de los
+  valores por defecto; y un mismo separador podía salir dos veces seguidas.
+- La transmisión por internet se caía al sonar música detrás de un firewall que revisa el
+  tráfico web (un FortiGate tomaba el MP3 por peticiones HTTP y cortaba por "URL inválida"):
+  ahora hay **conexión cifrada (TLS)**, que además protege la clave. También se caía en redes
+  lentas: en Windows, leer la respuesta del servidor dejaba el socket en modo no bloqueante, y
+  un envío que encontraba la red atascada un instante se tomaba por una conexión perdida.
+  Además se presenta con `PUT` (Icecast 2.4 en adelante) y, si el servidor no lo acepta, con
+  `SOURCE`; nota enseguida cuando el servidor corta (antes seguía enviando unos segundos a una
+  conexión muerta); si el corte llega a los pocos segundos, espera cada vez más antes de
+  insistir; y el registro dice con hora quién cortó, cuánto duró, cuánto audio salió y qué
+  respondió el servidor (la página entera, si mandó una).
 
 ### Eliminado
 

@@ -897,6 +897,10 @@ SettingsDialog::BroadcastTab::BroadcastTab(StationConfig& config, StreamEncoder&
     fillQualityOptions();
     quality.combo.onChange = [this] { apply(); };
 
+    addAndMakeVisible(tlsToggle);
+    tlsToggle.setToggleState(s.streamTls, juce::dontSendNotification);
+    tlsToggle.onClick = [this] { apply(); };
+
     addAndMakeVisible(publicToggle);
     publicToggle.setToggleState(s.streamPublic, juce::dontSendNotification);
     publicToggle.onClick = [this] { apply(); };
@@ -969,6 +973,7 @@ void SettingsDialog::BroadcastTab::apply() {
     s.streamWebsite = website.editor.getText().trim();
     s.streamDescription = description.editor.getText().trim();
     s.streamPublic = publicToggle.getToggleState();
+    s.streamTls = tlsToggle.getToggleState();
     if (metadataDelay.getSelectedId() > 0) s.streamMetadataDelay = metadataDelay.getSelectedId() - 1;
     s.nowPlayingPushUrl = pushUrl.editor.getText().trim();
 
@@ -1021,7 +1026,7 @@ namespace {
     // Medidas de la pestaña Emisión, compartidas por resized() y getIdealHeight().
     constexpr int margin = 12, groupGap = 12, deadAirHeight = 112, airLogHeight = 78;
     constexpr int labelHeight = 18, fieldRowHeight = 18 + 4 + UiStyle::controlHeight + 8;
-    constexpr int streamHeight = 26 + 8 + 6 * fieldRowHeight + (UiStyle::controlHeight + 8)
+    constexpr int streamHeight = 26 + 8 + 6 * fieldRowHeight + 2 * (UiStyle::controlHeight + 8)
                                + (UiStyle::controlHeight + 6) + 22 + 8;
     constexpr int nowPlayingHintHeight = 50;
     constexpr int nowPlayingHeight = 26 + 8 + nowPlayingHintHeight + 6 + (18 + 4 + UiStyle::controlHeight) + 6 + 22 + 8;
@@ -1090,6 +1095,9 @@ void SettingsDialog::BroadcastTab::resized() {
     twoCells(genre.label, genre.editor, website.label, website.editor, half);
     stacked(description.label, description.editor, stream.removeFromTop(fieldRowHeight));
 
+    tlsToggle.setBounds(stream.removeFromTop(rowH));
+    stream.removeFromTop(8);
+
     row = stream.removeFromTop(rowH);
     stream.removeFromTop(8);
     metadataDelay.setBounds(row.removeFromRight(90));
@@ -1150,6 +1158,8 @@ void SettingsDialog::BroadcastTab::lookAndFeelChanged() {
     website.label.setText(TRANS("stream_website"), juce::dontSendNotification);
     website.editor.setTextToShowWhenEmpty("https://", t.getSecondaryTextColour());
     description.label.setText(TRANS("stream_description"), juce::dontSendNotification);
+    tlsToggle.setButtonText(TRANS("stream_tls"));
+    tlsToggle.setTooltip(TRANS("tip_stream_tls"));
     publicToggle.setButtonText(TRANS("stream_public"));
     publicToggle.setTooltip(TRANS("tip_stream_public"));
     metadataDelayLabel.setText(TRANS("stream_metadata_delay"), juce::dontSendNotification);

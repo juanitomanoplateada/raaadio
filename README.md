@@ -85,7 +85,7 @@ en una carpeta que se puede llevar en un disco externo.
     </td>
     <td width="50%" align="center">
       <img src="docs/screenshots/generador.png" alt="Generador de listas"/>
-      <br/><sub><b>Generador de listas</b> · reglas de separación, separadores y plantillas</sub>
+      <br/><sub><b>Generador de listas</b> · modo rápido (tres preguntas) y avanzado, con un resumen de lo que va a pasar</sub>
     </td>
   </tr>
   <tr>
@@ -136,8 +136,25 @@ en una carpeta que se puede llevar en un disco externo.
   `EMERGENCIA` (si existe) o de toda la biblioteca. En manual o con la locución abierta, solo avisa.
 - **Botonera.** 12 cartuchos para cortinillas y efectos con F1 a F12, directo al aire por
   encima de los decks, con la ganancia y los puntos de entrada y salida de su análisis.
-- **Generador de listas por reglas.** Separación de artista, título, categoría y última
-  reproducción; separadores cada N canciones; duración objetivo; plantillas reutilizables.
+- **Generador de listas**, en dos modos sobre los mismos ajustes:
+  - **Rápido**: tres preguntas con los valores por defecto ya puestos (cuánta música, qué
+    géneros, dónde ponerla) y, si se quiere, un separador cada tantas canciones. Basta
+    oprimir *Generar lista*.
+  - **Avanzado**: incluir y excluir categorías, las reglas de separación (artista, canción,
+    categoría, lo que sonó hace poco), los separadores y las plantillas guardadas.
+  - **Antes de generar dice qué va a pasar**: cuántas canciones hay para elegir, cuántas
+    saldrán, qué reglas se usan y lo que saldría mal (pocas canciones, archivos que faltan,
+    categoría de separadores vacía, que la cola se va a reemplazar). Después dice qué hizo, y
+    *Quitar lo generado* lo deshace.
+  - **Sigue de la cola**: lo que ya está en la cola no se repite y las reglas cuentan desde la
+    última canción que tiene delante, así se arma una programación por bloques (una hora de
+    salsa, otra de vallenato) sin repetir.
+  - **Siempre llega a la duración pedida.** Las reglas son preferencias con un orden: primero
+    no repetir canciones, después separar artistas, después cambiar de categoría. Si la
+    biblioteca no alcanza, cede primero la categoría (una categoría con muchas más canciones
+    que las otras se mezcla en proporción, en vez de repetir las de las chicas), luego repite
+    canciones y por último acerca los artistas; el resultado dice cuánto cedió. Una canción
+    cuyo archivo falta o que no tiene duración no se usa.
 
 <details>
 <summary><b>Parámetros del generador (valores por defecto)</b></summary>
@@ -146,18 +163,17 @@ en una carpeta que se puede llevar en un disco externo.
 
 | Parámetro | Por defecto | Qué controla |
 |---|:---:|---|
-| `artistSeparation` | `5` | Pistas mínimas antes de repetir un artista |
-| `titleSeparation` | `10` | Pistas mínimas antes de repetir un título |
-| `categorySeparation` | `3` | Pistas mínimas antes de repetir una categoría |
+| `artistSeparation` | `5` | Canciones antes de repetir un artista (cuenta a los invitados) |
+| `titleSeparation` | `10` | Canciones antes de repetir un título |
+| `categorySeparation` | `3` | Canciones antes de repetir una categoría, si la biblioteca lo permite |
 | `lastPlayedSeparation` | `60` | Minutos mínimos desde la última reproducción |
-| `targetDurationVal` | `60` | Duración objetivo del bloque (minutos u horas) |
-| `separatorInterval` | `0` | Insertar un separador cada N pistas (`0` = desactivado) |
-| `insertionMode` | `AddToEnd` | Añadir al final, al inicio o reemplazar la cola |
+| `targetDurationVal` | `60` | Duración del bloque (minutos u horas) |
+| `separatorInterval` | `0` | Un separador cada N canciones (`0` = ninguno) |
+| `insertionMode` | `AddToEnd` | Al final de la cola, al inicio o reemplazarla |
 
 Sin categorías incluidas vale toda la música, también la que no tiene categoría; las
-identificaciones, cuñas y separadores solo entran si se incluyen. Si una regla de
-separación pide más variedad de la que hay, se limita a lo posible en lugar de dejar la
-lista a medias.
+identificaciones, cuñas y separadores solo entran si se incluyen. Un `0` apaga la regla. Una
+lista no pasa de 3000 pistas.
 
 </details>
 
@@ -384,7 +400,8 @@ la biblioteca de LAME del sistema (`libmp3lame`; en Debian y Ubuntu, `sudo apt i
 4. **Carga las identificaciones y separadores** en sus categorías fijas.
 5. **Programa la pauta** en la pestaña *Publicidad*: escribe el número de la cuña y marca
    sus franjas. Activa *Pauta automática* para que las tandas entren solas.
-6. **Genera una lista** con el *Generador de Playlist* y guárdala como plantilla.
+6. **Genera una lista** con el *Generador de Playlist*: en el modo *Rápido* basta elegir
+   cuánta música y oprimir *Generar lista*.
 7. **Activa AutoDJ** y deja la emisora al aire.
 
 ---
@@ -465,9 +482,24 @@ BUTT; por ejemplo, para **Zeno.fm** (su panel muestra los datos para el codifica
 | Contraseña | Contraseña | la que da Zeno |
 | Formato | Formato y Calidad | **MP3, 128 kbps** (el mismo que elegiste en el panel de Zeno) |
 
-Marca **Transmitir** y el estado pasa a *Transmitiendo*. RAAADIO usa el método `SOURCE` de
-Icecast (el "protocolo anticuado" de BUTT), que acepta Icecast 2 y los servicios compatibles.
-No hay SSL/TLS: la conexión va sin cifrar, igual que en BUTT con el puerto 80.
+Marca **Transmitir** y el estado pasa a *Transmitiendo*. RAAADIO se presenta con `PUT`, el
+método de Icecast 2.4 en adelante (caster.fm, por ejemplo), y si el servidor no lo acepta,
+con `SOURCE`, el "protocolo anticuado" de BUTT; igual que BUTT, prueba los dos solo.
+
+**Conexión cifrada (TLS).** Márcala si el servidor lo acepta en ese puerto (caster.fm sí, en
+el mismo). Cifra todo, como HTTPS: la clave no viaja a la vista y **los firewalls de la red
+no leen el audio**. Sin cifrar, un firewall que revisa el tráfico web (FortiGate y otros)
+puede tomar el MP3 por peticiones a páginas y cortar la transmisión al rato de empezar a sonar
+música, con su propia página de *"URL bloqueada"* (en silencio no pasa, porque el silencio
+codificado no se parece a nada). En Windows usa el cifrado del sistema (Schannel), con TLS 1.2,
+y valida el certificado del servidor.
+
+Si la transmisión se cae, el registro (`Logs/raaadio.log`, líneas `StreamEncoder`) dice con
+hora quién cortó, a los cuántos segundos, cuánto audio salió y qué respondió el servidor; si
+respondió con una página, se guarda entera en `%TEMP%\raaadio_stream_server_message.html`.
+Cuando el servidor corta a los pocos segundos, RAAADIO espera cada vez más antes de volver a
+intentar (hasta 30 s): algunos servicios bloquean al emisor que insiste. Revisa el bitrate
+máximo de tu plan (el gratuito de caster.fm admite 96 kbps).
 
 - **MP3 u Ogg.** MP3 lo abre cualquier reproductor; Ogg Vorbis suena mejor con los mismos
   kbps, pero Zeno.fm no lo acepta y algunos reproductores (sobre todo en iPhone) no lo abren.
@@ -705,7 +737,8 @@ RAAADIO.exe --ui-snapshot captura.png --size 1366x768 --theme dark --lang es --v
 
 `--view` acepta `main`, `empty`, `history`, `ads`, `cartwall`, `settings`, `settings-library`,
 `settings-broadcast`, `settings-broadcast-2` (la parte de abajo de Emisión), `settings-language`,
-`settings-about`, `generator`, `track`, `import`, `review`, `review-library`, `artists`,
+`settings-about`, `generator`, `generator-advanced`, `generator-done` (después de generar),
+`generator-replace`, `track`, `import`, `review`, `review-library`, `artists`,
 `library-online` (una búsqueda sin resultados en la biblioteca) y `online-search` (la búsqueda
 en internet con respuestas de ejemplo, sin conectarse).
 

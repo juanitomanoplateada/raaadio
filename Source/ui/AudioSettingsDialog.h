@@ -163,7 +163,7 @@ private:
         struct Choice { juce::Label label; juce::ComboBox combo; };
         Field host, port, mount, user, password, name, genre, website, description;
         Choice format, quality;
-        juce::ToggleButton publicToggle;
+        juce::ToggleButton tlsToggle, publicToggle;
         juce::Label metadataDelayLabel;
         juce::ComboBox metadataDelay;
         juce::ToggleButton streamToggle;

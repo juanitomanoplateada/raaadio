@@ -203,6 +203,8 @@ target_sources(RAAADIO PRIVATE
     Source/network/ApiServer.cpp
     Source/network/StreamEncoder.h
     Source/network/StreamEncoder.cpp
+    Source/network/StreamSocket.h
+    Source/network/StreamSocket.cpp
     Source/network/Mp3Encoder.h
     Source/network/Mp3Encoder.cpp
     Source/network/NowPlaying.h
@@ -391,6 +393,7 @@ if(RAAADIO_BUILD_TESTS)
         Source/audio/PreviewPlayer.cpp
         Source/audio/AcousticFingerprint.cpp
         Source/network/StreamEncoder.cpp
+        Source/network/StreamSocket.cpp
         Source/network/Mp3Encoder.cpp
         Source/network/NowPlaying.cpp
         Source/network/ApiServer.cpp

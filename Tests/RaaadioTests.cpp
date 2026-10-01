@@ -3105,6 +3105,236 @@ public:
             expect(total >= 1800.0 && total - list.back().getAirDuration() < 1800.0);
         }
 
+        auto seconds = [](const std::vector<TrackInfo>& list) {
+            double total = 0.0;
+            for (const auto& t : list) total += t.getAirDuration();
+            return total;
+        };
+        auto repeats = [](const std::vector<TrackInfo>& list) {
+            std::set<int> seen;
+            int n = 0;
+            for (const auto& t : list) n += seen.insert(t.id).second ? 0 : 1;
+            return n;
+        };
+
+        beginTest("Una categoría chica junto a una grande: con los valores por defecto no se repiten canciones");
+        {
+            // 300 de salsa y 10 boleros. Antes, para "cambiar de categoría", la mitad de la lista
+            // eran boleros y cada uno sonaba hasta 4 veces en 4 horas.
+            PlaylistGenerator::Pool skewed;
+            for (int i = 0; i < 300; ++i) {
+                skewed.candidates.push_back(song(1000 + i, "SALSERO " + juce::String(i % 60), "SALSA " + juce::String(i), 210.0));
+                skewed.categoriesOf[1000 + i] = { 1 };
+            }
+            for (int i = 0; i < 10; ++i) {
+                skewed.candidates.push_back(song(2000 + i, "BOLERISTA " + juce::String(i % 5), "BOLERO " + juce::String(i), 180.0));
+                skewed.categoriesOf[2000 + i] = { 2 };
+            }
+            GeneratorSettings settings;  // los valores por defecto
+            settings.lastPlayedSeparation = 0;
+            settings.targetDurationVal = 4;
+            settings.targetDurationIsHours = true;
+            juce::Random r(7);
+            PlaylistGenerator::Report report;
+            const auto list = PlaylistGenerator::buildSequence(settings, skewed, r, error, &report);
+            expect(error.isEmpty() && report.reachedTarget);
+            expect(seconds(list) >= 4 * 3600.0);
+            expectEquals(repeats(list), 0, "hay canciones de sobra: ninguna se repite");
+            expectEquals(report.repeatedSongs, 0);
+            expectEquals(report.relaxed(), 0, "una regla que la biblioteca no permite no cuenta como incumplida");
+            expectEquals(PlaylistGenerator::feasibleCategorySeparation(3, skewed), 0);
+
+            bool artistsApart = true;
+            for (size_t i = 1; i < list.size(); ++i)
+                for (size_t back = 1; back <= 5 && back <= i; ++back) artistsApart &= list[i].artist != list[i - back].artist;
+            expect(artistsApart, "y los artistas siguen separados por 5 canciones");
+        }
+
+        beginTest("Categorías parejas: cambia de categoría como se pide");
+        {
+            PlaylistGenerator::Pool even;
+            for (int i = 0; i < 160; ++i) {
+                even.candidates.push_back(song(i + 1, "ARTISTA " + juce::String(i), "TEMA " + juce::String(i), 200.0));
+                even.categoriesOf[i + 1] = { 1 + i % 4 };
+            }
+            expectEquals(PlaylistGenerator::feasibleCategorySeparation(3, even), 3);
+            GeneratorSettings settings;
+            settings.lastPlayedSeparation = 0;
+            settings.targetDurationVal = 2;
+            settings.targetDurationIsHours = true;
+            juce::Random r(3);
+            PlaylistGenerator::Report report;
+            const auto list = PlaylistGenerator::buildSequence(settings, even, r, error, &report);
+            bool apart = true;
+            for (size_t i = 1; i < list.size(); ++i)
+                for (size_t back = 1; back <= 3 && back <= i; ++back)
+                    apart &= even.categoriesOf[list[i].id] != even.categoriesOf[list[i - back].id];
+            expect(apart && report.relaxed() == 0 && repeats(list) == 0);
+        }
+
+        beginTest("Sigue de la cola: no repite lo que ya está en ella ni el artista de la última canción");
+        {
+            // 40 canciones de 8 artistas; en la cola ya están las 20 primeras.
+            PlaylistGenerator::Pool queuedPool;
+            for (int i = 0; i < 40; ++i) {
+                queuedPool.candidates.push_back(song(i + 1, "ARTISTA " + juce::String(i % 8), "TEMA " + juce::String(i), 180.0));
+                queuedPool.categoriesOf[i + 1] = { 1 };
+            }
+            for (int i = 0; i < 20; ++i) {
+                queuedPool.preceding.push_back(queuedPool.candidates[(size_t) i]);
+                queuedPool.queued.insert(i + 1);
+            }
+            GeneratorSettings settings;
+            settings.artistSeparation = 3;
+            settings.lastPlayedSeparation = 0;
+            settings.targetDurationVal = 30;  // 10 canciones: caben sin repetir las de la cola
+            bool fresh = true, boundary = true;
+            for (int seed = 1; seed <= 20; ++seed) {
+                juce::Random r(seed);
+                PlaylistGenerator::Report report;
+                const auto list = PlaylistGenerator::buildSequence(settings, queuedPool, r, error, &report);
+                for (const auto& t : list) fresh &= t.id > 20;
+                fresh &= report.repeatedSongs == 0;
+                // Las tres últimas de la cola son de los artistas 1, 2 y 3 (pistas 18, 19 y 20).
+                for (size_t i = 0; i < 3 && i < list.size(); ++i)
+                    for (size_t back = 0; back + i < 3; ++back)
+                        boundary &= list[i].artist != queuedPool.preceding[19 - back].artist;
+            }
+            expect(fresh, "las 20 que ya están en la cola no vuelven a salir");
+            expect(boundary, "la separación de artistas cuenta desde lo que ya está en la cola");
+
+            // Si se pide más de lo que queda sin usar, se repite, y el informe lo dice.
+            settings.targetDurationVal = 90;
+            juce::Random r(5);
+            PlaylistGenerator::Report report;
+            const auto list = PlaylistGenerator::buildSequence(settings, queuedPool, r, error, &report);
+            expect(seconds(list) >= 90 * 60.0 && report.repeatedSongs > 0 && error.isEmpty());
+        }
+
+        beginTest("Con pocas canciones llega igual a la duración: repite, pero nunca la misma seguida");
+        {
+            PlaylistGenerator::Pool tiny;
+            for (int i = 0; i < 3; ++i) {
+                tiny.candidates.push_back(song(i + 1, "UNICO ARTISTA", "TEMA " + juce::String(i), 200.0));
+                tiny.categoriesOf[i + 1] = { 1 };
+            }
+            GeneratorSettings settings;  // pide separar 5 artistas y 10 títulos: imposible con 3 canciones
+            settings.lastPlayedSeparation = 0;
+            juce::Random r(11);
+            PlaylistGenerator::Report report;
+            const auto list = PlaylistGenerator::buildSequence(settings, tiny, r, error, &report);
+            expect(error.isEmpty() && report.reachedTarget && seconds(list) >= 3600.0, "antes se quedaba atascado o a medias");
+            expect(report.repeatedSongs > 0);
+            bool neverBackToBack = true;
+            for (size_t i = 2; i < list.size(); ++i) neverBackToBack &= list[i].id != list[i - 1].id && list[i].id != list[i - 2].id;
+            expect(neverBackToBack, "con 3 canciones, cada una vuelve después de las otras dos");
+
+            // Un artista con casi todas las canciones: se llega a la duración acercándolo.
+            PlaylistGenerator::Pool dominated;
+            for (int i = 0; i < 20; ++i) dominated.candidates.push_back(song(i + 1, "DIOMEDES", "TEMA " + juce::String(i), 240.0));
+            dominated.candidates.push_back(song(50, "OTRO", "UNA", 240.0));
+            dominated.candidates.push_back(song(51, "OTRO MAS", "DOS", 240.0));
+            const auto second = PlaylistGenerator::buildSequence(settings, dominated, r, error, &report);
+            expect(error.isEmpty() && seconds(second) >= 3600.0);
+        }
+
+        beginTest("Una pista sin duración no deja al generador dando vueltas; hay un tope de filas");
+        {
+            PlaylistGenerator::Pool broken;
+            broken.candidates.push_back(song(1, "A", "SIN DURACION", 0.0));
+            GeneratorSettings settings;
+            juce::Random r(1);
+            PlaylistGenerator::Report report;
+            const auto list = PlaylistGenerator::buildSequence(settings, broken, r, error, &report);
+            expectEquals((int) list.size(), PlaylistGenerator::maxRows);
+            expect(!report.reachedTarget && error.isNotEmpty());
+
+            // Y de la biblioteca ni siquiera sale como candidata.
+            std::vector<TrackInfo> all = { song(1, "A", "SIN DURACION", 0.0), song(2, "B", "BUENA", 200.0) };
+            settings.lastPlayedSeparation = 0;
+            const auto candidates = PlaylistGenerator::selectCandidates(all, {}, {}, settings, juce::Time::getCurrentTime());
+            expect(candidates.size() == 1 && candidates[0].id == 2);
+        }
+
+        beginTest("Ajustes: a una plantilla vieja le faltan campos y quedan con su valor por defecto");
+        {
+            const auto old = GeneratorSettings::fromVar(juce::JSON::parse(R"({"includedCategories": [4], "targetDurationVal": 90, "insertionMode": 7})"));
+            expect(old.includedCategories == std::vector<int> { 4 });
+            expectEquals(old.targetDurationVal, 90);
+            expectEquals(old.artistSeparation, 5);
+            expectEquals(old.titleSeparation, 10);
+            expectEquals(old.lastPlayedSeparation, 60);
+            expectEquals(old.separatorCategoryId, -1);
+            expect(old.insertionMode == InsertionMode::Replace, "un modo fuera de rango se limita");
+            expect(old.hasDefaultRules() && !old.usesSeparators());
+
+            GeneratorSettings custom;
+            custom.artistSeparation = 0;
+            custom.separatorCategoryId = 3;
+            custom.separatorInterval = 4;
+            custom.targetDurationIsHours = true;
+            const auto back = GeneratorSettings::fromVar(custom.toVar());
+            expect(back.artistSeparation == 0 && back.usesSeparators() && back.targetDurationIsHours && !back.hasDefaultRules());
+            expectEquals(back.targetSeconds(), 60 * 3600.0);
+        }
+
+        beginTest("Con la biblioteca: no usa archivos que faltan, sigue de la cola y dice con qué cuenta");
+        {
+            LibraryFixture fx;
+            auto& lib = fx.library;
+            std::vector<TrackInfo> songs;
+            for (int i = 0; i < 8; ++i) songs.push_back(fx.add("Library/M/" + juce::String(i) + ".wav", "TEMA " + juce::String(i)));
+            juce::File(juce::String::fromUTF8(songs[7].path.c_str())).deleteFile();  // a esta le falta el archivo
+
+            GeneratorSettings settings;
+            settings.targetDurationVal = 9;  // tres canciones de 3 minutos
+            Playlist playlist;
+            PlaylistGenerator generator(lib);
+
+            const auto available = generator.check(settings, playlist);
+            expectEquals(available.songs, 7, "la que no tiene archivo no cuenta");
+            expectEquals(available.missingFiles, 1);
+            expectWithinAbsoluteError(available.seconds, 7 * 180.0, 0.5);
+            expect(available.recentlyPlayed == 0 && available.alreadyQueued == 0);
+
+            const auto first = generator.generate(settings, playlist);
+            expect(first.success && first.reachedTarget && first.message.isEmpty());
+            expect(first.songs == 3 && first.separators == 0 && first.tracksGenerated == 3 && first.tracks.size() == 3);
+            expectWithinAbsoluteError(first.seconds, 540.0, 0.5);
+            expectEquals(first.missingFiles, 1);
+            expectEquals(first.repeatedSongs, 0);
+
+            // Otro bloque al final: no repite las tres que ya están en la cola.
+            const auto second = generator.generate(settings, playlist);
+            std::set<int> ids;
+            for (const auto& t : playlist.getQueue()) ids.insert(t.id);
+            expect(second.success && playlist.getQueue().size() == 6 && ids.size() == 6, "seis canciones distintas en la cola");
+            expect(ids.count(songs[7].id) == 0, "la que no tiene archivo no sale");
+            expectEquals(generator.check(settings, playlist).alreadyQueued, 6);
+
+            // Queda una sola sin usar: el tercer bloque repite dos, y lo dice.
+            const auto third = generator.generate(settings, playlist);
+            expect(third.success && third.songs == 3);
+            expectEquals(third.repeatedSongs, 2);
+
+            // Lo que acaba de sonar no entra (60 minutos por defecto).
+            lib.incrementPlayCount(songs[0].id);
+            const auto later = generator.check(settings, playlist);
+            expectEquals(later.songs, 6);
+            expectEquals(later.recentlyPlayed, 1);
+
+            // Reemplazar: la cola anterior no cuenta.
+            settings.insertionMode = InsertionMode::Replace;
+            const auto replaced = generator.generate(settings, playlist);
+            expect(replaced.success && playlist.getQueue().size() == 3);
+            expectEquals(replaced.repeatedSongs, 0);
+
+            // Sin nada que usar: el error lo dice.
+            settings.includedCategories = { 9999 };
+            const auto nothing = generator.generate(settings, playlist);
+            expect(!nothing.success && nothing.message.isNotEmpty() && playlist.getQueue().size() == 3, "la cola no se toca si no hay con qué");
+        }
+
         beginTest("Candidatas: categorías incluidas y excluidas, y última reproducción en hora local");
         {
             const auto now = juce::Time::getCurrentTime();
@@ -4143,16 +4373,31 @@ public:
 };
 
 //==============================================================================
+// Cierra solo el lado que envía (FIN) y deja leer, como un servidor que corta a un emisor
+// pero sigue tragando datos unos segundos: los envíos no fallan y solo la lectura lo nota.
+// JUCE no lo ofrece; en Windows se declara aquí para no traer <winsock2.h> a este archivo.
+#if JUCE_WINDOWS
+extern "C" __declspec(dllimport) int __stdcall shutdown(juce::pointer_sized_uint socket, int how);
+static void closeSendingSide(juce::StreamingSocket& s) { shutdown((juce::pointer_sized_uint) s.getRawSocketHandle(), 1 /* SD_SEND */); }
+#else
+#include <sys/socket.h>
+static void closeSendingSide(juce::StreamingSocket& s) { ::shutdown(s.getRawSocketHandle(), SHUT_WR); }
+#endif
+
 class StreamingTests : public juce::UnitTest
 {
 public:
     StreamingTests() : juce::UnitTest("Transmisión Icecast", "RAAADIO") {}
 
-    // Servidor Icecast de mentira en 127.0.0.1. Una conexión SOURCE recibe la respuesta
-    // (200 o 401) y, si se aceptó, se guarda lo que llega hasta ver untilText (o agotar el
-    // tiempo). Las peticiones /admin/metadata se anotan y se responden como Icecast.
+    // Servidor Icecast de mentira en 127.0.0.1. Una conexión PUT o SOURCE recibe la respuesta
+    // (200 o 401; 405 a PUT si rejectPut) y, si se aceptó, se guarda lo que llega hasta que
+    // el emisor cierra (o se agota el tiempo): no corta por su cuenta, porque el emisor nota
+    // enseguida un cierre y pasaría a error. Con cutAfterMs, a ese tiempo manda kickMessage
+    // (si hay) y corta como un servidor que echa al emisor (ver closeSendingSide). Las
+    // peticiones /admin/metadata se anotan y se responden como Icecast.
     struct FakeIcecast {
-        explicit FakeIcecast(bool accept, juce::String until = {}) : accepting(accept), untilText(std::move(until)) {
+        explicit FakeIcecast(bool accept, bool rejectPutRequests = false, int cutAfter = 0, juce::String kick = {})
+            : accepting(accept), rejectPut(rejectPutRequests), cutAfterMs(cutAfter), kickMessage(std::move(kick)) {
             listening = server.createListener(0, "127.0.0.1");
             thread = std::thread([this] { acceptLoop(); });
         }
@@ -4191,20 +4436,29 @@ public:
                 }
                 {
                     const juce::ScopedLock sl(lock);
-                    if (request.isEmpty()) request = headers;
+                    requests.add(headers);
                 }
-                sources.emplace_back([this, client] { serveSource(*client); });
+                sources.emplace_back([this, client, headers] { serveSource(*client, headers); });
             }
         }
 
-        void serveSource(juce::StreamingSocket& client) {
-            const char* reply = accepting ? "HTTP/1.0 200 OK\r\n\r\n" : "HTTP/1.0 401 Unauthorized\r\n\r\n";
+        void serveSource(juce::StreamingSocket& client, const juce::String& headers) {
+            const bool ok = accepting && !(rejectPut && headers.startsWith("PUT "));
+            const char* reply = ok ? "HTTP/1.0 200 OK\r\n\r\n"
+                                   : accepting ? "HTTP/1.0 405 Method Not Allowed\r\n\r\n" : "HTTP/1.0 401 Unauthorized\r\n\r\n";
             client.write(reply, (int) strlen(reply));
-            if (!accepting) return;
+            if (!ok) return;
 
-            const auto deadline = juce::Time::getMillisecondCounter() + 8000;
+            const auto start = juce::Time::getMillisecondCounter();
+            const auto deadline = start + 8000;
+            bool cut = false;
             char buffer[8192];
             while (juce::Time::getMillisecondCounter() < deadline) {
+                if (cutAfterMs > 0 && !cut && juce::Time::getMillisecondCounter() - start >= (juce::uint32) cutAfterMs) {
+                    if (kickMessage.isNotEmpty()) client.write(kickMessage.toRawUTF8(), (int) kickMessage.getNumBytesAsUTF8());
+                    closeSendingSide(client);
+                    cut = true;
+                }
                 if (client.waitUntilReady(true, 200) != 1) continue;
                 const int n = client.read(buffer, (int) sizeof(buffer), false);
                 if (n <= 0) break;
@@ -4212,7 +4466,6 @@ public:
                     const juce::ScopedLock sl(lock);
                     received.append(buffer, (size_t) n);
                 }
-                if (untilText.isNotEmpty() && contains(untilText)) break;
             }
         }
         // Busca los bytes UTF-8 de text dentro de lo recibido (datos binarios, con ceros).
@@ -4224,7 +4477,8 @@ public:
             return std::search(begin, end, utf8, utf8 + strlen(utf8)) != end;
         }
         size_t size() { const juce::ScopedLock sl(lock); return received.getSize(); }
-        juce::String sourceRequest() { const juce::ScopedLock sl(lock); return request; }
+        juce::String sourceRequest() { const juce::ScopedLock sl(lock); return requests[0]; }
+        juce::StringArray sourceRequests() { const juce::ScopedLock sl(lock); return requests; }
 
         // Hora (contador de milisegundos) de la primera petición de título que contiene text; 0 si no llegó.
         juce::uint32 adminRequestTime(const juce::String& text) {
@@ -4245,14 +4499,15 @@ public:
             return count;
         }
 
-        bool accepting;
-        juce::String untilText;
+        bool accepting, rejectPut;
+        int cutAfterMs;
+        juce::String kickMessage;
         juce::StreamingSocket server;
         bool listening = false;
         std::thread thread;
         std::vector<std::thread> sources;
         juce::CriticalSection lock;
-        juce::String request;
+        juce::StringArray requests;  // las conexiones de audio, en orden
         juce::StringArray adminRequests;
         juce::Array<juce::uint32> adminTimes;
         juce::MemoryBlock received;
@@ -4267,7 +4522,7 @@ public:
         server.password = "secreto";
         server.name = "Radio Prueba";
 
-        beginTest("La petición SOURCE lleva el punto de montaje, la clave, el formato y los datos de la emisora");
+        beginTest("La petición lleva el punto de montaje, la clave, el formato y los datos de la emisora");
         {
             auto s = server;
             s.format = StreamEncoder::Format::Mp3;
@@ -4276,7 +4531,10 @@ public:
             s.website = "https://radio.example.org";
             s.name = "Radio\r\nX-Inyectada: 1";
             const auto request = StreamEncoder::buildSourceRequest(s, 48000.0);
-            expect(request.startsWith("SOURCE /prueba HTTP/1.0\r\n"), request);
+            expect(request.startsWith("PUT /prueba HTTP/1.1\r\n"), request);
+            expect(StreamEncoder::buildSourceRequest(s, 48000.0, StreamEncoder::Method::Source).startsWith("SOURCE /prueba HTTP/1.0\r\n"),
+                   "para los servidores anteriores a Icecast 2.4");
+            expect(request.contains("Host: 127.0.0.1:8000\r\n"), request);
             expect(request.contains("Authorization: Basic " + juce::Base64::toBase64("source:secreto") + "\r\n"));
             expect(request.contains("Content-Type: audio/mpeg\r\n") && request.endsWith("\r\n\r\n"));
             expect(request.contains("ice-genre: Tropical\r\n") && request.contains("ice-url: https://radio.example.org\r\n"));
@@ -4349,7 +4607,7 @@ public:
 
         beginTest("Transmite Ogg Vorbis con el título, y lo cambia en cada canción");
         {
-            FakeIcecast icecast(true, "TITLE=SIGUIENTE");
+            FakeIcecast icecast(true);
             expect(icecast.listening);
             auto s = server;
             s.format = StreamEncoder::Format::OggVorbis;
@@ -4373,7 +4631,7 @@ public:
             encoder.stop();
 
             const auto request = icecast.sourceRequest();
-            expect(request.startsWith("SOURCE /prueba HTTP/1.0") && request.contains("application/ogg"), request);
+            expect(request.startsWith("PUT /prueba HTTP/1.1") && request.contains("application/ogg"), request);
             expect(icecast.contains("OggS"), "llegan páginas Ogg");
             expect(icecast.contains(juce::String::fromUTF8("TITLE=CANCIÓN")) && icecast.contains("ARTIST=ARTISTA"),
                    "el título y el artista con tildes");
@@ -4408,7 +4666,7 @@ public:
             encoder.stop();
 
             const auto request = icecast.sourceRequest();
-            expect(request.startsWith("SOURCE /prueba HTTP/1.0") && request.contains("Content-Type: audio/mpeg"), request);
+            expect(request.startsWith("PUT /prueba HTTP/1.1") && request.contains("Content-Type: audio/mpeg"), request);
             expect(icecast.mp3FrameSyncs() > 10, "llegan cuadros MP3");
             expect(!icecast.contains("OggS"), "no es Ogg");
             expect(icecast.adminRequestTime("song=ARTISTA%20-%20CANCI%C3%93N") != 0, "el título de la canción al conectar");
@@ -4418,6 +4676,88 @@ public:
             if (arrivedAt != 0)
                 expect(arrivedAt - changedAt >= 900 && arrivedAt - changedAt < 4000,
                        "con el retardo de 1 s: " + juce::String((int) (arrivedAt - changedAt)) + " ms");
+        }
+
+        beginTest("Si el servidor no acepta PUT, se presenta con SOURCE y transmite");
+        {
+            FakeIcecast icecast(true, true);
+            expect(icecast.listening);
+            auto s = server;
+            s.format = StreamEncoder::Format::Mp3;
+            s.port = icecast.port();
+
+            StreamEncoder encoder;
+            encoder.prepare(44100.0);
+            encoder.start(s);
+            for (int i = 0; i < 1500 && icecast.mp3FrameSyncs() < 20; ++i) {
+                encoder.pushBlock(block, 0, 512);
+                juce::Thread::sleep(3);
+            }
+            expect(encoder.getStatus() == StreamEncoder::Status::Connected);
+            encoder.stop();
+
+            const auto requests = icecast.sourceRequests();
+            expect(requests.size() == 2, juce::String(requests.size()) + " conexiones");
+            expect(requests[0].startsWith("PUT /prueba HTTP/1.1") && requests[1].startsWith("SOURCE /prueba HTTP/1.0"),
+                   requests.joinIntoString("\n"));
+            expect(icecast.mp3FrameSyncs() >= 20, "llega el audio por la conexión SOURCE");
+        }
+
+        beginTest("Si el servidor corta, se nota enseguida aunque siga aceptando datos");
+        {
+            FakeIcecast icecast(true, false, 500);
+            expect(icecast.listening);
+            auto s = server;
+            s.format = StreamEncoder::Format::Mp3;
+            s.port = icecast.port();
+
+            StreamEncoder encoder;
+            encoder.prepare(44100.0);
+            encoder.start(s);
+            juce::uint32 connectedAt = 0, errorAt = 0;
+            for (int i = 0; i < 1500 && errorAt == 0; ++i) {
+                encoder.pushBlock(block, 0, 512);
+                const auto now = juce::Time::getMillisecondCounter();
+                if (connectedAt == 0 && encoder.getStatus() == StreamEncoder::Status::Connected) connectedAt = now;
+                if (connectedAt != 0 && encoder.getStatus() == StreamEncoder::Status::Error) errorAt = now;
+                juce::Thread::sleep(3);
+            }
+            const auto error = encoder.getLastError();
+            encoder.stop();
+
+            expect(connectedAt != 0 && errorAt != 0, "conectó y después se dio cuenta del corte");
+            if (errorAt != 0)
+                expect(errorAt - connectedAt < 2000, "el servidor cortó a los 0,5 s y se notó a los "
+                                                     + juce::String((int) (errorAt - connectedAt)) + " ms");
+            expect(error.startsWith(TRANS("stream_err_closed")), "lo notó la lectura, no un envío fallido: " + error);
+        }
+
+        beginTest("Si el servidor echa al emisor con una página, el error dice el código y la página se guarda");
+        {
+            const auto saved = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("raaadio_stream_server_message.html");
+            saved.deleteFile();
+            FakeIcecast icecast(true, false, 300,
+                                "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\n\r\n<html><head><title>Bloqueado</title></head>"
+                                "<body><h1>Transmisión detenida</h1><p>Motivo de prueba</p></body></html>");
+            expect(icecast.listening);
+            auto s = server;
+            s.format = StreamEncoder::Format::Mp3;
+            s.port = icecast.port();
+
+            StreamEncoder encoder;
+            encoder.prepare(44100.0);
+            encoder.start(s);
+            bool connected = false;
+            for (int i = 0; i < 1500 && !(connected && encoder.getStatus() == StreamEncoder::Status::Error); ++i) {
+                encoder.pushBlock(block, 0, 512);
+                connected = connected || encoder.getStatus() == StreamEncoder::Status::Connected;
+                juce::Thread::sleep(3);
+            }
+            const auto error = encoder.getLastError();
+            encoder.stop();
+
+            expect(error.startsWith(TRANS("stream_err_closed")) && error.endsWith("(403 Forbidden)"), error);
+            expect(saved.loadFileAsString().contains("<title>Bloqueado</title>"), "la página entera, para leer el motivo");
         }
 
         beginTest("Lo que se transmite no pasa de -1 dBFS");
@@ -4460,6 +4800,48 @@ public:
             expect(encoder.getLastError().contains("401"), encoder.getLastError());
             encoder.stop();
             expect(encoder.getStatus() == StreamEncoder::Status::Off);
+        }
+
+        beginTest("Con TLS, un servidor que no lo habla da un error claro y no se queda esperando");
+        {
+            juce::StreamingSocket listener;
+            expect(listener.createListener(0, "127.0.0.1"));
+            std::thread plainServer([&listener] {
+                std::unique_ptr<juce::StreamingSocket> client(listener.waitForNextConnection());
+                if (client == nullptr) return;
+                const char* reply = "HTTP/1.0 400 Bad Request\r\n\r\n";
+                client->write(reply, (int) strlen(reply));
+                juce::Thread::sleep(300);
+            });
+            StreamSocket socket;
+            const auto started = juce::Time::getMillisecondCounter();
+            expect(!socket.connect("127.0.0.1", listener.getBoundPort(), true, 4000));
+            expect(socket.getLastError().isNotEmpty(), "dice que falló el cifrado, no que no hay conexión");
+            expect(juce::Time::getMillisecondCounter() - started < 3000, "no espera el tiempo máximo");
+            plainServer.join();
+            listener.close();
+
+            StreamSocket refused;  // nada escucha en el puerto 9: falla la conexión, no el cifrado
+            expect(!refused.connect("127.0.0.1", 9, true, 1000) && refused.getLastError().isEmpty());
+        }
+
+        // Contra un servidor de verdad (red y certificado reales): solo si se pide, para que
+        // las pruebas no dependan de internet. RAAADIO_ONLINE_TESTS=1 para correrla.
+        if (juce::SystemStats::getEnvironmentVariable("RAAADIO_ONLINE_TESTS", {}) == "1") {
+            beginTest("TLS con un servidor Icecast real: valida el certificado y lee la respuesta");
+            {
+                StreamSocket socket;
+                const bool connected = socket.connect("morcast.caster.fm", 10827, true, 8000);
+                expect(connected, "(el servidor gratuito de caster.fm se apaga solo) " + socket.getLastError());
+                const juce::String request = "GET /status-json.xsl HTTP/1.0\r\nHost: morcast.caster.fm:10827\r\n\r\n";
+                expect(socket.writeAll(request.toRawUTF8(), (int) request.getNumBytesAsUTF8()));
+                juce::MemoryBlock reply;
+                char buffer[4096];
+                for (int n; (n = socket.readSome(buffer, (int) sizeof(buffer), 5000)) > 0;)
+                    reply.append(buffer, (size_t) n);
+                const auto text = reply.toString();
+                expect(text.startsWith("HTTP/1.") && text.contains("icestats"), text.substring(0, 300));
+            }
         }
     }
 };
@@ -4558,6 +4940,7 @@ public:
                 s.streamDescription = juce::String::fromUTF8("La que más suena");
                 s.streamWebsite = "https://radio.example.org";
                 s.streamPublic = true;
+                s.streamTls = true;
                 s.streamMetadataDelay = 6;
                 s.nowPlayingPushUrl = "https://radio.example.org/ahora.php";
                 config.set(s);
@@ -4570,6 +4953,7 @@ public:
             expectEquals(r.streamDescription, juce::String::fromUTF8("La que más suena"));
             expectEquals(r.streamWebsite, juce::String("https://radio.example.org"));
             expect(r.streamPublic);
+            expect(r.streamTls, "la conexión cifrada se recuerda");
             expectEquals(r.streamMetadataDelay, 6);
             expectEquals(r.nowPlayingPushUrl, juce::String("https://radio.example.org/ahora.php"));
 
@@ -4578,6 +4962,7 @@ public:
             expectEquals(withServer.streamQuality, 6);
             const auto withoutServer = StationSettings::fromVar(juce::JSON::parse(R"({ "deadAirSeconds": 30 })"));
             expect(withoutServer.streamFormat == StationSettings::StreamFormat::Mp3, "sin servidor configurado, MP3");
+            expect(!withoutServer.streamTls, "sin cifrar, salvo que se pida (Zeno.fm, por ejemplo, va sin cifrar)");
 
             const auto clamped = StationSettings::fromVar(juce::JSON::parse(R"({ "streamBitrate": 999, "streamMetadataDelay": -5, "backupHour": 30 })"));
             expectEquals(clamped.streamBitrate, 320);
