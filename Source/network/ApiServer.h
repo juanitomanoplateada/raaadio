@@ -8,7 +8,7 @@
 class ApiServer : public juce::Thread {
 public:
     ApiServer();
-    ~ApiServer();
+    ~ApiServer() override;
 
     void start(int port);
     void stop();

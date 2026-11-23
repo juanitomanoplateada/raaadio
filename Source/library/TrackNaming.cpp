@@ -182,7 +182,7 @@ namespace {
         const auto trimmed = s.trimEnd();
         const auto close = trimmed.getLastCharacter();
         if (close != ')' && close != ']') return false;
-        const juce::juce_wchar open = close == ')' ? '(' : '[';
+        const juce::juce_wchar open = close == ')' ? U'(' : U'[';
         int depth = 0;
         for (int i = trimmed.length() - 1; i >= 0; --i) {
             const auto c = trimmed[i];
@@ -501,12 +501,10 @@ juce::String titleCase(const juce::String& text) {
 
         if (word.containsAnyOf("0123456789")) {
             out.add(word);  // "UB40", "2x1"
-        } else if (isRomanNumeral(upper(bare))) {
-            out.add(upper(word));
-        } else if ((bare.length() == 1 && word.endsWithChar('.')) || isDottedAcronym(word)) {
-            out.add(upper(word));  // iniciales: "J. Wilson", "D.R.A."
-        } else if (bare.length() >= 2 && bare.length() <= 4 && !hasVowel(bare) && !isSmallWord(lower(bare))) {
-            out.add(upper(word));  // siglas sin vocales: "DJ", "MC", "NTVG"
+        } else if (isRomanNumeral(upper(bare))
+                   || (bare.length() == 1 && word.endsWithChar('.')) || isDottedAcronym(word)  // iniciales: "J. Wilson", "D.R.A."
+                   || (bare.length() >= 2 && bare.length() <= 4 && !hasVowel(bare) && !isSmallWord(lower(bare)))) {
+            out.add(upper(word));  // números romanos, iniciales y siglas sin vocales: "DJ", "MC", "NTVG"
         } else if (!first && !startsGroup && isSmallWord(lowered)) {
             out.add(lowered);
         } else {
@@ -774,9 +772,12 @@ juce::String cleanFileName(const juce::String& fileName) {
         const auto c = s[i];
         if ((c == '(' || c == '[' || c == '{') && depth++ == 0) groupStart = i;
         if (depth == 0) cleaned += c;
-        if ((c == ')' || c == ']' || c == '}') && depth > 0 && --depth == 0) {
-            const auto group = s.substring(groupStart, i + 1);
-            if (!isJunkGroup(key(group))) cleaned += group;
+        if ((c == ')' || c == ']' || c == '}') && depth > 0) {
+            --depth;
+            if (depth == 0) {
+                const auto group = s.substring(groupStart, i + 1);
+                if (!isJunkGroup(key(group))) cleaned += group;
+            }
         }
     }
     if (depth > 0) cleaned += s.substring(groupStart);  // paréntesis sin cerrar: se deja

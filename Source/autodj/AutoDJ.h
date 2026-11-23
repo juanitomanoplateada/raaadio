@@ -11,7 +11,7 @@ public:
     };
 
     AutoDJ(AudioEngine& engine, Playlist& playlist);
-    ~AutoDJ();
+    ~AutoDJ() override;
 
     void setEnabled(bool enabled);
     bool isEnabled() const;

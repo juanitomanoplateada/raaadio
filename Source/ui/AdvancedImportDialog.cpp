@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include "AdvancedImportDialog.h"
+#include "FileChoosers.h"
 #include "../helpers/ThemeManager.h"
 #include "../helpers/UiStyle.h"
 
@@ -82,10 +83,9 @@ void AdvancedImportDialog::lookAndFeelChanged() {
 void AdvancedImportDialog::importFiles() {
     const auto cat = categoryNames[categoryCombo.getSelectedId() - 1];
 
-    fileChooser.reset(new juce::FileChooser(TRANS("select_files"), juce::File::getSpecialLocation(juce::File::userHomeDirectory), library.getSupportedFileWildcard()));
-    fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectMultipleItems,
-        [this, cat](const juce::FileChooser& fc) {
-            auto files = fc.getResults();
+    FileChoosers::chooseFiles(fileChooser, TRANS("select_files"), juce::File::getSpecialLocation(juce::File::userHomeDirectory),
+                              library.getSupportedFileWildcard(),
+        [this, cat](const juce::Array<juce::File>& files) {
             if (!files.isEmpty()) {
                 library.importFiles(files, cat);
                 if (auto* dw = findParentComponentOfClass<juce::DialogWindow>()) {
@@ -98,10 +98,8 @@ void AdvancedImportDialog::importFiles() {
 void AdvancedImportDialog::importFolder() {
     const auto cat = categoryNames[categoryCombo.getSelectedId() - 1];
 
-    fileChooser.reset(new juce::FileChooser(TRANS("select_folder"), juce::File::getSpecialLocation(juce::File::userHomeDirectory)));
-    fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-        [this, cat](const juce::FileChooser& fc) {
-            auto res = fc.getResult();
+    FileChoosers::chooseFolder(fileChooser, TRANS("select_folder"), juce::File::getSpecialLocation(juce::File::userHomeDirectory),
+        [this, cat](const juce::File& res) {
             if (res.exists()) {
                 library.importFiles({res}, cat);
                 if (auto* dw = findParentComponentOfClass<juce::DialogWindow>()) {

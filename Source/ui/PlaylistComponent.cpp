@@ -68,7 +68,7 @@ PlaylistComponent::NextUp PlaylistComponent::computeNextUp() const {
 
     if (deckA != nullptr && deckB != nullptr) {
         // Un deck cargado y detenido mientras el otro suena es lo próximo que saldrá al aire.
-        for (auto [playing, waiting, letter] : { std::make_tuple(deckA, deckB, "B"), std::make_tuple(deckB, deckA, "A") }) {
+        for (const auto& [playing, waiting, letter] : { std::make_tuple(deckA, deckB, "B"), std::make_tuple(deckB, deckA, "A") }) {
             if (playing->isPlaying() && waiting->isLoaded() && !waiting->isPlaying()) {
                 next.track = waiting->getCurrentTrack();
                 next.source = TRANS("deck") + " " + letter;
@@ -484,12 +484,10 @@ void PlaylistComponent::itemDragMove(const SourceDetails& dragSourceDetails) {
     const int uiRow = table.getRowContainingPosition(pos.x, pos.y);
     const int numRows = getNumRows();
 
-    int newIndex = (int)trackCache.size();
+    int newIndex = (int)trackCache.size();  // fuera de la tabla o en la última fila: al final
     if (uiRow >= 0 && uiRow <= 1) {
         newIndex = 0;
-    } else if (uiRow < 0 || uiRow >= numRows - 1) {
-        newIndex = (int)trackCache.size();
-    } else {
+    } else if (uiRow > 1 && uiRow < numRows - 1) {
         auto* viewport = table.getViewport();
         const int scrollY = (viewport != nullptr) ? viewport->getViewPositionY() : 0;
         const int rowStart = headerH + (uiRow * rowH) - scrollY;
@@ -550,20 +548,25 @@ PlaylistComponent::RowControlComponent::RowControlComponent(PlaylistComponent& p
     // Con varias filas elegidas se mueve el tramo de la primera a la última; si no, la
     // fila del botón. Las filas de la tabla son índice de la cola + 1.
     auto move = [this](int delta) {
-        const auto selected = owner.table.getSelectedRows();
-        const bool block = selected.size() > 1 && selected.contains(currentRow);
-        const int top = (block ? selected[0] : currentRow) - 1;
-        const int bottom = (block ? selected[selected.size() - 1] : currentRow) - 1;
-        if (top < 0 || (delta < 0 && top == 0) || (delta > 0 && bottom >= (int) owner.trackCache.size() - 1))
+        // Solo las filas elegidas tienen este control: al deseleccionar, la tabla lo borra en
+        // ese mismo momento (con el botón que se está pulsando). Lo que hace falta se toma
+        // antes, y después solo se usa la cola, que sigue existiendo.
+        auto& queue = owner;
+        const int row = currentRow;
+        const auto selected = queue.table.getSelectedRows();
+        const bool block = selected.size() > 1 && selected.contains(row);
+        const int top = (block ? selected[0] : row) - 1;
+        const int bottom = (block ? selected[selected.size() - 1] : row) - 1;
+        if (top < 0 || (delta < 0 && top == 0) || (delta > 0 && bottom >= (int) queue.trackCache.size() - 1))
             return;
 
-        owner.table.deselectAllRows();
-        if (!owner.shiftRows(top, bottom, delta)) return;  // la cola cambió: no se mueve nada
+        queue.table.deselectAllRows();  // desde aquí este control ya no existe
+        if (!queue.shiftRows(top, bottom, delta)) return;  // la cola cambió: no se mueve nada
         if (block) {
             for (int i = 0; i < selected.size(); ++i)
-                owner.table.selectRow(selected[i] + delta, false, false);
+                queue.table.selectRow(selected[i] + delta, false, false);
         } else {
-            owner.table.selectRow(currentRow + delta, false, true);
+            queue.table.selectRow(row + delta, false, true);
         }
     };
     upButton.onClick = [move] { move(-1); };

@@ -18,8 +18,9 @@ namespace {
     // Huella acústica: enteros de 32 bits, guardados en orden little-endian.
     std::vector<uint32_t> blobToFingerprint(sqlite3_stmt* stmt, int column) {
         const auto* bytes = static_cast<const uint8_t*>(sqlite3_column_blob(stmt, column));
+        if (bytes == nullptr) return {};  // NULL o blob vacío
         const int size = sqlite3_column_bytes(stmt, column);
-        std::vector<uint32_t> fingerprint(bytes != nullptr ? (size_t) size / 4 : 0);
+        std::vector<uint32_t> fingerprint((size_t) size / 4);
         for (size_t i = 0; i < fingerprint.size(); ++i)
             fingerprint[i] = (uint32_t) bytes[4 * i] | (uint32_t) bytes[4 * i + 1] << 8
                            | (uint32_t) bytes[4 * i + 2] << 16 | (uint32_t) bytes[4 * i + 3] << 24;
@@ -178,7 +179,7 @@ std::vector<Database::ReviewRecord> Database::getReviewRecords(bool pending) {
     std::vector<ReviewRecord> records;
     std::string sql = std::string("SELECT ") + "t.id, t.path, t.artist, t.title, t.play_count, t.duration, t.last_played, "
         "t.normalization_gain, t.created_at, t.updated_at, t.loudness_lufs, t.true_peak_db, t.cue_in, t.cue_out, "
-        "t.analysis_version, t.file_hash, t.status, t.version, t.year, t.confirmed_at, "
+        "t.analysis_version, t.file_hash, t.status, t.version, t.year, t.confirmed_at, t.mix_point, 0, "
         "t.source_name, t.source_folder, t.tag_artist, t.tag_title, t.import_batch, t.review_draft, t.fingerprint FROM tracks t WHERE ";
     sql += pending ? "t.status = 1 " : (std::string("t.status = 0 AND t.confirmed_at = '' AND ") + isMusic + " ");
     sql += "ORDER BY t.source_folder, t.id;";
@@ -186,13 +187,13 @@ std::vector<Database::ReviewRecord> Database::getReviewRecords(bool pending) {
     each(sql.c_str(), {}, [this, &records](sqlite3_stmt* s) {
         ReviewRecord r;
         r.track = readTrackRow(s);
-        r.source.name = columnText(s, 20);
-        r.source.folder = columnText(s, 21);
-        r.source.tagArtist = columnText(s, 22);
-        r.source.tagTitle = columnText(s, 23);
-        r.source.batch = sqlite3_column_int(s, 24);
-        r.draft = columnText(s, 25);
-        r.fingerprint = blobToFingerprint(s, 26);
+        r.source.name = columnText(s, 22);
+        r.source.folder = columnText(s, 23);
+        r.source.tagArtist = columnText(s, 24);
+        r.source.tagTitle = columnText(s, 25);
+        r.source.batch = sqlite3_column_int(s, 26);
+        r.draft = columnText(s, 27);
+        r.fingerprint = blobToFingerprint(s, 28);
         records.push_back(std::move(r));
     });
     return records;

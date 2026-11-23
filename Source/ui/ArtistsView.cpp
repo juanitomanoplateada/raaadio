@@ -326,7 +326,7 @@ void ArtistsView::rename() {
         }));
 }
 
-void ArtistsView::merge(std::vector<int> fromIds, int intoId) {
+void ArtistsView::merge(const std::vector<int>& fromIds, int intoId) {
     if (fromIds.empty()) return;
     const int into = indexOfId(intoId);
     if (into < 0) return;

@@ -102,11 +102,13 @@ bool Playlist::moveTracks(const std::vector<RowRef>& rows, int insertIndex) {
     }
 
     std::vector<int> indices;
+    indices.reserve(rows.size());
     for (const auto& r : rows) indices.push_back(r.index);
     std::sort(indices.begin(), indices.end());
     indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
 
     std::vector<TrackInfo> moving;
+    moving.reserve(indices.size());
     for (int i : indices) moving.push_back(queue[(size_t)i]);
 
     // Al quitar las filas, las que estaban antes del destino corren la posición.

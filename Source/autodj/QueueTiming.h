@@ -4,9 +4,9 @@
 
 class Deck;
 
-// Cuándo sonará cada cosa, tal como encadena AutoDJ las pistas: la siguiente entra
-// Deck::mixLeadSeconds antes del punto de salida de la que suena. Lo usan la cola (hora
-// de inicio de cada fila) y la pauta (dónde insertar una tanda para que salga a su hora).
+// Cuándo sonará cada cosa, tal como encadena AutoDJ las pistas: la siguiente entra en el
+// punto de mezcla de la que suena (Deck::mixPointFor). Lo usan la cola (hora de inicio de
+// cada fila) y la pauta (dónde insertar una tanda para que salga a su hora).
 namespace QueueTiming {
     // Segundos entre el inicio de una pista y el de la siguiente.
     double secondsUntilNext(const TrackInfo& track);

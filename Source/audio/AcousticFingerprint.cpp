@@ -155,7 +155,8 @@ double similarity(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b
         if (to - from < minOverlap) continue;
         long onesA = 0, onesB = 0, both = 0;
         for (int i = from; i < to; ++i) {
-            const auto x = a[(size_t) i], y = b[(size_t) (i + offset)];
+            const int j = i + offset;  // de 0 a nb - 1, por cómo se eligieron from y to
+            const auto x = a[(size_t) i], y = b[(size_t) j];
             onesA += countBits(x);
             onesB += countBits(y);
             both += countBits(x & y);

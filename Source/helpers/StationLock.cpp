@@ -1,6 +1,6 @@
 #include "StationLock.h"
 
-StationLock::StationLock(juce::File labRoot) : file(labRoot.getChildFile("raaadio.lock")) {}
+StationLock::StationLock(const juce::File& labRoot) : file(labRoot.getChildFile("raaadio.lock")) {}
 
 StationLock::~StationLock() {
     release();
@@ -26,7 +26,7 @@ std::optional<StationLock::Owner> StationLock::parse(const juce::String& text) {
 
 std::optional<StationLock::Owner> StationLock::otherOwner(juce::Time now) const {
     if (!file.existsAsFile()) return std::nullopt;
-    const auto owner = parse(file.loadFileAsString());
+    auto owner = parse(file.loadFileAsString());
     if (!owner || owner->computer == thisComputer()) return std::nullopt;
     const auto age = now - owner->heartbeat;
     if (age > juce::RelativeTime::seconds(staleSeconds) || age < juce::RelativeTime::seconds(-staleSeconds))

@@ -32,14 +32,19 @@ public:
         int maxJitterSeconds = 10;           // más una espera al azar, para no parecer un reloj
     };
 
-    explicit SongDownloader(MusicLibrary& library, Services services = {});
+    // Dos constructores en vez de "Services services = {}": Services tiene inicializadores de
+    // miembros y Clang (clang-tidy) no deja usarlos como argumento por omisión dentro de la clase.
+    explicit SongDownloader(MusicLibrary& library);
+    explicit SongDownloader(MusicLibrary& library, Services services);
     ~SongDownloader() override;
 
     //==========================================================================
     // Herramientas
     DownloadTools::Paths getTools() const;
     std::vector<DownloadTools::Asset> getMissingTools() const;
-    void installTools();  // en el hilo: ver getStatus()
+    // En el hilo: ver getStatus(). only: los nombres de lo que se instala (vacío: todo lo que
+    // falta); la importación pide solo FFmpeg.
+    void installTools(const juce::StringArray& only = {});
 
     // El aviso sobre derechos y términos de uso, aceptado una vez por emisora.
     bool isAcknowledged();
@@ -93,6 +98,7 @@ private:
     Status status;
     DownloadTools::Paths tools;
     std::atomic<bool> installRequested { false };
+    juce::StringArray installOnly;
     int jitterSeconds = 0;
     juce::Random random;
 

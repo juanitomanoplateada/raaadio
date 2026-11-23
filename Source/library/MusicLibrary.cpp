@@ -73,17 +73,26 @@ void MusicLibrary::initialise(const juce::File& dbFile) {
 }
 
 juce::String MusicLibrary::getSupportedFileWildcard() const {
-    return formatManager.getWildcardForAllFormats();
+    return formatManager.getWildcardForAllFormats() + ";" + AudioConverter::fileWildcard();
+}
+
+bool MusicLibrary::isImportable(const juce::File& file) const {
+    return formatManager.findFormatForFileExtension(file.getFileExtension()) != nullptr || AudioConverter::isConvertible(file);
 }
 
 void MusicLibrary::importFiles(const juce::Array<juce::File>& files, const juce::String& targetCategory) {
     if (isImporting()) return;
-    
+
     importProgress = 0.0;
     importAdded = 0;
     importDuplicates = 0;
     importFailed = 0;
     importToReview = 0;
+    importNeedFfmpeg = 0;
+    {
+        const juce::ScopedLock sl(waitingLock);
+        waitingForFfmpeg = { {}, targetCategory };
+    }
     ++importCount;
     currentImportThread = std::make_unique<ImportThread>(*this, files, targetCategory);
     currentImportThread->startThread();
@@ -128,7 +137,12 @@ double MusicLibrary::getProgress() const {
 }
 
 MusicLibrary::ImportSummary MusicLibrary::getLastImportSummary() const {
-    return { importAdded.load(), importDuplicates.load(), importFailed.load(), importToReview.load() };
+    return { importAdded.load(), importDuplicates.load(), importFailed.load(), importToReview.load(), importNeedFfmpeg.load() };
+}
+
+MusicLibrary::WaitingFiles MusicLibrary::getFilesWaitingForFfmpeg() const {
+    const juce::ScopedLock sl(waitingLock);
+    return waitingForFfmpeg;
 }
 
 
@@ -167,7 +181,7 @@ int MusicLibrary::countFiles(const juce::Array<juce::File>& files) {
     for (const auto& f : files) {
         if (f.isDirectory()) {
             count += countFiles(f.findChildFiles(juce::File::findFiles, true));
-        } else if (formatManager.findFormatForFileExtension(f.getFileExtension()) != nullptr) {
+        } else if (isImportable(f)) {
             count++;
         }
     }
@@ -183,7 +197,7 @@ void MusicLibrary::scanAndImport(const juce::File& file, int& current, int total
             if (juce::Thread::currentThreadShouldExit()) return;
             scanAndImport(child, current, total, targetCategory, batch);
         }
-    } else if (formatManager.findFormatForFileExtension(file.getFileExtension()) != nullptr) {
+    } else if (isImportable(file)) {
         // Carátulas, listas y otros archivos de la carpeta se ignoran.
         switch (processAndAddTrack(file, targetCategory, batch)) {
             case ImportResult::Added:     ++importAdded; break;
@@ -191,6 +205,12 @@ void MusicLibrary::scanAndImport(const juce::File& file, int& current, int total
             case ImportResult::Failed:
                 if (!juce::Thread::currentThreadShouldExit()) ++importFailed;
                 break;
+            case ImportResult::NeedsFfmpeg: {
+                ++importNeedFfmpeg;
+                const juce::ScopedLock sl(waitingLock);
+                waitingForFfmpeg.files.add(file);
+                break;
+            }
         }
         current++;
         if (total > 0) importProgress = (double)current / total;
@@ -264,6 +284,7 @@ static void applyAnalysis(TrackInfo& track, const TrackAnalysis& analysis) {
     track.truePeakDb = analysis.truePeakDb;
     track.cueIn = analysis.cueIn;
     track.cueOut = analysis.cueOut;
+    track.mixPoint = analysis.mixPoint;
     track.normalizationGain = TrackAnalyzer::gainFor(analysis.loudnessLufs, analysis.truePeakDb);
     track.analysisVersion = TrackAnalyzer::version;
 }
@@ -289,7 +310,7 @@ static bool writeFlacCopy(juce::AudioFormatReader& reader, const juce::File& des
     std::unique_ptr<juce::AudioFormatWriter> writer(
         flac.createWriterFor(stream.get(), reader.sampleRate, channels, reader.bitsPerSample > 16 ? 24 : 16, {}, 0));
     if (writer == nullptr) return false;
-    stream.release();
+    (void) stream.release();  // ahora es del writer
     return writer->writeFromAudioReader(reader, 0, reader.lengthInSamples);
 }
 
@@ -304,15 +325,62 @@ static juce::File freeFileIn(const juce::File& folder, const juce::String& baseN
 MusicLibrary::ImportResult MusicLibrary::processAndAddTrack(const juce::File& sourceFile, const juce::String& targetCategory, int batch) {
     juce::Logger::writeToLog("Processing: " + sourceFile.getFileName());
 
+    // Lo que se guarda: el archivo tal cual (recodificar un MP3 a otro formato con pérdida lo
+    // degrada) o, si JUCE no lo decodifica por su cuenta, un FLAC, que no pierde nada. Lo que
+    // solo sabe leer Windows Media (WMA) se pasa a FLAC para que el deck no dependa de Windows
+    // Media dentro del hilo de audio; lo que JUCE no lee, con FFmpeg.
+    juce::File stored = sourceFile;
+    auto extension = sourceFile.getFileExtension().toLowerCase();
+    const juce::TemporaryFile converted(".flac");
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(sourceFile));
+
+    if (reader != nullptr && !hasNativeDecoder(*reader)) {
+        const bool written = writeFlacCopy(*reader, converted.getFile());
+        reader.reset();
+        if (!written) {
+            juce::Logger::writeToLog("Import: could not convert " + sourceFile.getFullPathName());
+            return ImportResult::Failed;
+        }
+        stored = converted.getFile();
+    } else if (reader == nullptr) {
+        // Los .mpeg de WhatsApp: un MP3 con otro nombre. Se guarda como .mp3, sin recodificar.
+        if (AudioConverter::isConvertible(sourceFile) && AudioConverter::looksLikeMp3(sourceFile)) {
+            auto* mp3 = formatManager.findFormatForFileExtension(".mp3");
+            if (auto in = sourceFile.createInputStream(); mp3 != nullptr && in != nullptr)
+                reader.reset(mp3->createReaderFor(in.release(), true));
+            if (reader != nullptr) extension = ".mp3";
+        }
+
+        // Las notas de voz de WhatsApp (Opus, en .opus o .ogg), M4A, AAC...: con FFmpeg. Si
+        // está, también se intenta con un archivo de un formato conocido que JUCE no pudo leer.
+        if (reader == nullptr) {
+            const bool needsConverter = AudioConverter::isConvertible(sourceFile) || AudioConverter::isOggOpus(sourceFile);
+            if (!needsConverter && !converter.isAvailable()) {
+                juce::Logger::writeToLog("Import: unreadable file " + sourceFile.getFullPathName());
+                return ImportResult::Failed;
+            }
+            switch (converter.toFlac(sourceFile, converted.getFile(), [] { return juce::Thread::currentThreadShouldExit(); })) {
+                case AudioConverter::Result::Converted:   break;
+                case AudioConverter::Result::Unavailable: return ImportResult::NeedsFfmpeg;
+                case AudioConverter::Result::Failed:
+                case AudioConverter::Result::Cancelled:   return ImportResult::Failed;
+            }
+            stored = converted.getFile();
+        }
+    }
+    if (stored != sourceFile) {
+        extension = ".flac";
+        reader.reset(formatManager.createReaderFor(stored));
+    }
     if (reader == nullptr || reader->sampleRate <= 0) {
         juce::Logger::writeToLog("Import: unreadable file " + sourceFile.getFullPathName());
         return ImportResult::Failed;
     }
 
     // Artista y título propuestos: de las etiquetas o del nombre. En la música es solo una
-    // primera lectura; la revisión la corrige viendo el lote completo.
-    const auto tags = TagReader::read(sourceFile, reader->metadataValues);
+    // primera lectura; la revisión la corrige viendo el lote completo. (FFmpeg pasa las
+    // etiquetas al FLAC.)
+    const auto tags = TagReader::read(stored, reader->metadataValues);
     TrackNaming::Source source;
     source.fileName = sourceFile.getFileNameWithoutExtension();
     source.group = sourceFile.getParentDirectory().getFullPathName();
@@ -335,7 +403,10 @@ MusicLibrary::ImportResult MusicLibrary::processAndAddTrack(const juce::File& so
     }
     const bool music = !category.isSystem();
 
-    const auto hash = hashOf(sourceFile);
+    // La huella del archivo que queda en la biblioteca: con ella se verifican sus copias en
+    // los respaldos. Los WMA convertidos por versiones anteriores guardaron la del original.
+    const auto hash = hashOf(stored);
+    const auto sourceHash = stored != sourceFile ? hashOf(sourceFile) : hash;
     const double duration = (double) reader->lengthInSamples / reader->sampleRate;
 
     // ¿Ya está en la biblioteca? El mismo archivo, o la misma canción (mismo artista y
@@ -345,6 +416,7 @@ MusicLibrary::ImportResult MusicLibrary::processAndAddTrack(const juce::File& so
     {
         const juce::ScopedLock sl(dbLock);
         auto existing = db.findTrackByHash(hash);
+        if (existing.id == -1 && sourceHash != hash) existing = db.findTrackByHash(sourceHash);
         if (existing.id == -1 && music && proposal.artist.isNotEmpty())
             existing = db.findDuplicate(proposal.key().toStdString(), duration, duplicateToleranceSeconds, -1);
         if (existing.id != -1) {
@@ -368,12 +440,6 @@ MusicLibrary::ImportResult MusicLibrary::processAndAddTrack(const juce::File& so
         fingerprint = AcousticFingerprint::compute(*reader, t.cueIn, t.getAirDuration(),
                                                    [] { return juce::Thread::currentThreadShouldExit(); });
 
-    // El archivo se copia tal cual: recodificar un MP3 a otro formato con pérdida lo degrada.
-    // Lo que solo sabe leer Windows Media (WMA) se pasa a FLAC, que no pierde nada, para que
-    // el deck no dependa de Windows Media dentro del hilo de audio.
-    const bool copyAsIs = hasNativeDecoder(*reader);
-    const auto extension = copyAsIs ? sourceFile.getFileExtension().toLowerCase() : juce::String(".flac");
-
     juce::File destFile;
     if (music) {
         // Por revisar: en _Entrada con su nombre original, hasta que se confirme.
@@ -394,9 +460,8 @@ MusicLibrary::ImportResult MusicLibrary::processAndAddTrack(const juce::File& so
         destFile = freeFileIn(targetDir, makeSafeFileName(baseName), extension);
     }
 
-    const bool stored = copyAsIs ? sourceFile.copyFileTo(destFile) : writeFlacCopy(*reader, destFile);
     reader.reset();
-    if (!stored) {
+    if (!stored.copyFileTo(destFile)) {
         juce::Logger::writeToLog("Import: could not store " + destFile.getFullPathName());
         destFile.deleteFile();
         return ImportResult::Failed;
@@ -707,7 +772,7 @@ juce::File MusicLibrary::placeFile(const juce::File& current, const juce::File& 
 
     const auto folder = target.getParentDirectory();
     if (!folder.createDirectory().wasOk()) return current;
-    const auto destination = freeFileIn(folder, target.getFileNameWithoutExtension(), target.getFileExtension());
+    auto destination = freeFileIn(folder, target.getFileNameWithoutExtension(), target.getFileExtension());
     // Un archivo que está sonando no se puede mover en Windows: queda donde estaba.
     if (!current.moveFileTo(destination)) {
         juce::Logger::writeToLog("Library: could not move " + current.getFullPathName() + " (in use?)");
@@ -730,7 +795,7 @@ void MusicLibrary::removeEmptyFolders(juce::File folder) {
 void MusicLibrary::notifyRelocated(int trackId, const juce::File& file) {
     auto callback = onTrackRelocated;
     if (!callback) return;
-    const auto path = file.getFullPathName();
+    const auto& path = file.getFullPathName();
     if (juce::MessageManager::getInstanceWithoutCreating() != nullptr
         && juce::MessageManager::getInstance()->isThisTheMessageThread())
         callback(trackId, path);

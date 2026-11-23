@@ -1,4 +1,5 @@
 #include "OnlineSearchView.h"
+#include "../helpers/External.h"
 #include "../helpers/LanguageManager.h"
 #include "../helpers/ThemeManager.h"
 #include "../helpers/UiStyle.h"
@@ -57,17 +58,17 @@ OnlineSearchView::OnlineSearchView(MusicLibrary& lib, SongDownloader* songDownlo
     downloadButton.onClick = [this] { startDownload(); };
     copyButton.onClick = [this] { copyLink(); };
     youTubeButton.onClick = [this] {
-        if (chosenVideo >= 0) juce::URL(SongSearch::youTubeUrl(links.videos[(size_t) chosenVideo].id)).launchInDefaultBrowser();
+        if (chosenVideo >= 0) External::openUrl(SongSearch::youTubeUrl(links.videos[(size_t) chosenVideo].id));
     };
     musicButton.onClick = [this] {
-        if (chosenVideo >= 0) juce::URL(SongSearch::youTubeMusicUrl(links.videos[(size_t) chosenVideo].id)).launchInDefaultBrowser();
+        if (chosenVideo >= 0) External::openUrl(SongSearch::youTubeMusicUrl(links.videos[(size_t) chosenVideo].id));
     };
     deezerButton.onClick = [this] {
-        if (hasLinks) juce::URL(links.track.link.isNotEmpty() ? links.track.link
-                                                               : "https://www.deezer.com/track/" + juce::String(links.track.id)).launchInDefaultBrowser();
+        if (hasLinks) External::openUrl(links.track.link.isNotEmpty() ? links.track.link
+                                                                       : "https://www.deezer.com/track/" + juce::String(links.track.id));
     };
-    spotifyButton.onClick = [this] { if (hasLinks) juce::URL(SongSearch::spotifySearchUrl(links.track)).launchInDefaultBrowser(); };
-    searchYouTubeButton.onClick = [this] { if (hasLinks) juce::URL(SongSearch::youTubeSearchPageUrl(links.track)).launchInDefaultBrowser(); };
+    spotifyButton.onClick = [this] { if (hasLinks) External::openUrl(SongSearch::spotifySearchUrl(links.track)); };
+    searchYouTubeButton.onClick = [this] { if (hasLinks) External::openUrl(SongSearch::youTubeSearchPageUrl(links.track)); };
 
     addAndMakeVisible(closeButton);
     UiStyle::setVariant(closeButton, "ghost");
@@ -275,7 +276,7 @@ void OnlineSearchView::refreshButtons() {
 void OnlineSearchView::copyLink() {
     const auto link = chosenLink();
     if (link.isEmpty()) return;
-    juce::SystemClipboard::copyTextToClipboard(link);
+    External::copyText(link);
     flash(TRANS("online_search_copied").replace("%1", link), ThemeManager::getInstance().getSuccessColour());
 }
 
@@ -322,7 +323,7 @@ void OnlineSearchView::confirmDownload(int step) {
     juce::Component::SafePointer<OnlineSearchView> safe(this);
     // Cada pregunta, si se acepta, sigue con la siguiente.
     auto ask = [this, safe](juce::MessageBoxIconType icon, const juce::String& title, const juce::String& text,
-                            const juce::String& ok, std::function<void()> onOk) {
+                            const juce::String& ok, const std::function<void()>& onOk) {
         juce::AlertWindow::showOkCancelBox(icon, title, text, ok, TRANS("cancel"), this,
             juce::ModalCallbackFunction::create([safe, onOk](int answer) { if (safe != nullptr && answer == 1) onOk(); }));
     };
@@ -673,7 +674,7 @@ void OnlineSearchView::VideoModel::selectedRowsChanged(int lastRowSelected) {
 
 void OnlineSearchView::VideoModel::listBoxItemDoubleClicked(int row, const juce::MouseEvent&) {
     if (owner.hasLinks && row >= 0 && row < (int) owner.links.videos.size())
-        juce::URL(SongSearch::youTubeUrl(owner.links.videos[(size_t) row].id)).launchInDefaultBrowser();
+        External::openUrl(SongSearch::youTubeUrl(owner.links.videos[(size_t) row].id));
 }
 
 //==============================================================================

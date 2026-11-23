@@ -92,7 +92,7 @@ Result compute(juce::AudioFormatReader& reader, const std::function<bool()>& sho
         reader.read(&buffer, 0, n, pos, true, channels > 1);
         for (int i = 0; i < n; ++i)
             for (int ch = 0; ch < channels; ++ch)
-                interleaved[(size_t) (i * channels + ch)] = (int16_t) juce::jlimit(-32768, 32767, (int) std::lround(buffer.getSample(ch, i) * 32767.0f));
+                interleaved[(size_t) i * (size_t) channels + (size_t) ch] = (int16_t) juce::jlimit(-32768, 32767, (int) std::lround(buffer.getSample(ch, i) * 32767.0f));
         ok = lib.feed(context, interleaved.data(), n * channels) == 1;
     }
 

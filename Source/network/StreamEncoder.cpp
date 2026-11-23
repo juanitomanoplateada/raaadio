@@ -222,7 +222,7 @@ juce::String StreamEncoder::buildMetadataRequest(const Server& s, const juce::St
 }
 
 juce::String StreamEncoder::songText(const juce::String& artist, const juce::String& title) {
-    const auto a = artist.trim(), t = title.trim();
+    auto a = artist.trim(), t = title.trim();
     if (a.isEmpty()) return t;
     if (t.isEmpty()) return a;
     return a + " - " + t;

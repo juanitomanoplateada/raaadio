@@ -73,7 +73,7 @@ private:
     std::vector<int> selectedIndices() const;
 
     void rename();
-    void merge(std::vector<int> fromIds, int intoId);
+    void merge(const std::vector<int>& fromIds, int intoId);
     void markNotSame();
     void report(const MusicLibrary::ArtistResult& result, const juce::String& done);
     static juce::String pairKey(const std::string& a, const std::string& b);

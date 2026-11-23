@@ -14,8 +14,8 @@ class SettingsDialog : public juce::Component {
 public:
     SettingsDialog(juce::AudioDeviceManager& mainDevice, juce::AudioDeviceManager& cueDevice, MusicLibrary& lib, AdvertisingManager& ads,
                    StationConfig& station, StreamEncoder& streamEncoder, NowPlayingPublisher* nowPlaying,
-                   BackupService* backups, juce::File airLogFolder);
-    ~SettingsDialog();
+                   BackupService* backups, const juce::File& airLogFolder);
+    ~SettingsDialog() override;
     // La búsqueda en línea de la emisora (puede no haber).
     void setOnlineIdentifier(OnlineIdentifier* identifier);
     

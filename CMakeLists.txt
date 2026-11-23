@@ -234,6 +234,8 @@ target_sources(RAAADIO PRIVATE
     Source/library/TagWriter.h
     Source/library/TagWriter.cpp
     Source/library/MusicLibrary.h
+    Source/library/AudioConverter.h
+    Source/library/AudioConverter.cpp
     Source/library/MusicLibrary.cpp
     Source/library/TagReader.h
     Source/library/TagReader.cpp
@@ -365,10 +367,12 @@ if(RAAADIO_BUILD_TESTS)
 
     target_sources(RAAADIO_Tests PRIVATE
         Tests/RaaadioTests.cpp
+        Tests/CrashReport.cpp
         Source/database/Database.cpp
         Source/database/StationState.cpp
         Source/database/Catalog.cpp
         Source/library/MusicLibrary.cpp
+        Source/library/AudioConverter.cpp
         Source/library/Playlist.cpp
         Source/library/PlaylistStore.cpp
         Source/library/HistoryManager.cpp
@@ -415,15 +419,50 @@ if(RAAADIO_BUILD_TESTS)
         Source/helpers/StationHealth.cpp
         Source/helpers/StationLock.cpp
         Source/generator/TemplateManager.cpp
+        # La interfaz también se prueba: se construye, se dibuja y se opera sin ventana.
+        Source/MainComponent.cpp
+        Source/helpers/LanguageManager.cpp
+        Source/helpers/RaaadioLookAndFeel.cpp
+        Source/helpers/ThemeManager.cpp
+        Source/helpers/UiStyle.cpp
+        Source/helpers/UiSnapshot.cpp
+        Source/ui/AdsListView.cpp
+        Source/ui/AdvancedImportDialog.cpp
+        Source/ui/AdvertisingComponent.cpp
+        Source/ui/ArtistsView.cpp
+        Source/ui/AudioSettingsDialog.cpp
+        Source/ui/CartwallView.cpp
+        Source/ui/CategorySidebarComponent.cpp
+        Source/ui/CreditsEditor.cpp
+        Source/ui/DeckComponent.cpp
+        Source/ui/HistoryView.cpp
+        Source/ui/ImportReviewView.cpp
+        Source/ui/LibraryComponent.cpp
+        Source/ui/LibraryView.cpp
+        Source/ui/MixerComponent.cpp
+        Source/ui/OnlineSearchView.cpp
+        Source/ui/PlaylistComponent.cpp
+        Source/ui/PlaylistGeneratorDialog.cpp
+        Source/ui/RecordingPanel.cpp
+        Source/ui/ScheduleView.cpp
+        Source/ui/StatusBar.cpp
+        Source/ui/TrackDetailsDialog.cpp
+        Source/ui/WaveformComponent.cpp
     )
 
     target_compile_features(RAAADIO_Tests PRIVATE cxx_std_17)
     target_compile_definitions(RAAADIO_Tests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_USE_MP3AUDIOFORMAT=1)
     if(MSVC)
+        # Con .pdb también en Release: si una prueba se cae, Tests/CrashReport.cpp dice dónde.
+        target_compile_options(RAAADIO_Tests PRIVATE $<$<CONFIG:Release>:/Zi>)
+        target_link_options(RAAADIO_Tests PRIVATE $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>)
+    endif()
+    if(MSVC)
         target_compile_options(RAAADIO_Tests PRIVATE /FS /utf-8)
     endif()
 
     target_link_libraries(RAAADIO_Tests PRIVATE
+        RAAADIO_BinaryData
         juce::juce_audio_utils
         juce::juce_data_structures
         juce::juce_cryptography

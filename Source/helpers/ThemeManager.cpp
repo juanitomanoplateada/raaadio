@@ -1,4 +1,5 @@
 #include "ThemeManager.h"
+#include "AppSettings.h"
 #include "RaaadioLookAndFeel.h"
 
 ThemeManager& ThemeManager::getInstance()
@@ -9,12 +10,7 @@ ThemeManager& ThemeManager::getInstance()
 
 static juce::PropertiesFile::Options getSettingsOptions()
 {
-    juce::PropertiesFile::Options options;
-    options.applicationName = "raaadio";
-    options.filenameSuffix = ".settings";
-    options.osxLibrarySubFolder = "Application Support";
-    options.folderName = "raaadio";
-    return options;
+    return AppSettings::options();
 }
 
 void ThemeManager::initialise()

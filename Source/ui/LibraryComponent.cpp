@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 #include "LibraryComponent.h"
 #include "AdvancedImportDialog.h"
+#include "FileChoosers.h"
 #include "../network/OnlineIdentifier.h"
 #include "../helpers/ThemeManager.h"
 #include "../helpers/UiStyle.h"
@@ -205,22 +206,47 @@ void LibraryComponent::timerCallback() {
             importSummaryShortText << separator << summary.failed << " " << TRANS("import_failed");
         if (summary.toReview > 0)
             importSummaryShortText << separator << summary.toReview << " " << TRANS("import_to_review");
+        if (summary.needFfmpeg > 0)
+            importSummaryShortText << separator << summary.needFfmpeg << " " << TRANS("import_need_ffmpeg");
         importSummaryText = TRANS("import_done") + ": " + importSummaryShortText;
         importSummaryUntil = juce::Time::getMillisecondCounter() + 15000;
 
         // La música nueva espera que alguien confirme artista, título y categoría.
+        juce::Component::SafePointer<LibraryComponent> safe(this);
+        std::function<void()> review;
         if (summary.toReview > 0) {
             if (onlineIdentifier != nullptr) onlineIdentifier->enqueuePending();  // busca en línea lo nuevo
-            openReview(ImportReview::Scope::NewImports);
+            review = [safe] { if (safe != nullptr) safe->openReview(ImportReview::Scope::NewImports); };
         }
+        if (summary.needFfmpeg > 0) offerFfmpeg(review);
+        else if (review) review();
     }
 
     if (library.getCatalogVersion() != catalogVersionSeen) updateReviewButton();
+
+    // FFmpeg pedido por la importación: instalado, se importa lo que lo esperaba.
+    SongDownloader::Status tools;
+    if (!ffmpegImport.files.isEmpty() && songDownloader != nullptr) {
+        tools = songDownloader->getStatus();
+        if (!tools.installing && !importing) {
+            if (library.isConverterAvailable()) library.importFiles(ffmpegImport.files, ffmpegImport.category);
+            else if (tools.installError.isNotEmpty()) {
+                importSummaryText = importSummaryShortText = TRANS("online_tools_failed").replace("%1", tools.installErrorStep)
+                                                             .replace("%2", TRANS("online_tools_error_" + tools.installError));
+                importSummaryUntil = juce::Time::getMillisecondCounter() + 15000;
+            }
+            ffmpegImport = {};
+        }
+    }
 
     if (importing) {
         // Solo se lee el progreso (atómico): el texto de estado lo escribe el hilo de importación.
         progress = library.getProgress();
         setStatusText(TRANS("importing") + " " + juce::String(juce::roundToInt(progress * 100.0)) + "%");
+    } else if (!ffmpegImport.files.isEmpty() && tools.installing) {
+        auto text = TRANS("online_tools_installing").replace("%1", tools.installStep);
+        if (tools.installProgress >= 0.0) text << "  " << juce::roundToInt(tools.installProgress * 100) << " %";
+        setStatusText(text);
     } else if (juce::Time::getMillisecondCounter() < importSummaryUntil) {
         setStatusText(importSummaryText, importSummaryShortText);
     } else if (const int pending = library.getPendingAnalysisCount(); pending > 0) {
@@ -229,6 +255,40 @@ void LibraryComponent::timerCallback() {
     } else {
         setStatusText({});
     }
+}
+
+void LibraryComponent::offerFfmpeg(const std::function<void()>& then) {
+    const auto waiting = library.getFilesWaitingForFfmpeg();
+    if (songDownloader == nullptr || waiting.files.isEmpty()) {
+        if (then) then();
+        return;
+    }
+
+    juce::Component::SafePointer<LibraryComponent> safe(this);
+    auto install = [safe, waiting] {
+        if (safe == nullptr || safe->songDownloader == nullptr) return;
+        safe->ffmpegImport = waiting;
+        safe->songDownloader->installTools({ DownloadTools::ffmpegName });  // si ya se está instalando, se espera
+    };
+
+    std::vector<DownloadTools::Asset> missing;
+    for (const auto& asset : songDownloader->getMissingTools())
+        if (asset.name == DownloadTools::ffmpegName) missing.push_back(asset);
+    if (missing.empty() || songDownloader->getStatus().installing) {
+        install();
+        if (then) then();
+        return;
+    }
+
+    juce::AlertWindow::showOkCancelBox(juce::AlertWindow::QuestionIcon, TRANS("import_ffmpeg_title"),
+        TRANS("import_ffmpeg_text").replace("%1", juce::String(waiting.files.size()))
+                                   .replace("%2", juce::String(DownloadTools::totalMegabytes(missing)))
+                                   .replace("%3", DownloadTools::defaultFolder().getFullPathName()),
+        TRANS("import_ffmpeg_install"), TRANS("cancel"), this,
+        juce::ModalCallbackFunction::create([install, then](int answer) {
+            if (answer == 1) install();
+            if (then) then();
+        }));
 }
 
 void LibraryComponent::setStatusText(const juce::String& text, const juce::String& shortText) {
@@ -307,10 +367,9 @@ void LibraryComponent::setPlaylist(Playlist* p) {
 }
 
 void LibraryComponent::importAnuncios() {
-    fileChooser.reset(new juce::FileChooser(TRANS("select_files"), juce::File::getSpecialLocation(juce::File::userHomeDirectory), library.getSupportedFileWildcard()));
-    fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectMultipleItems,
-        [this](const juce::FileChooser& fc) {
-            auto files = fc.getResults();
+    FileChoosers::chooseFiles(fileChooser, TRANS("select_files"), juce::File::getSpecialLocation(juce::File::userHomeDirectory),
+                              library.getSupportedFileWildcard(),
+        [this](const juce::Array<juce::File>& files) {
             if (!files.isEmpty()) {
                 library.importFiles(files, library.getSystemCategory(CategoryRole::Spots).name);
             }

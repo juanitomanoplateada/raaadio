@@ -1,4 +1,5 @@
 #include "AudioEngine.h"
+#include "../helpers/AppSettings.h"
 
 AudioEngine::AudioEngine(MusicLibrary& library, bool openDevices) : devicesEnabled(openDevices) {
     formatManager.registerBasicFormats();
@@ -18,15 +19,9 @@ AudioEngine::AudioEngine(MusicLibrary& library, bool openDevices) : devicesEnabl
 
     if (!devicesEnabled) return;
 
-    juce::PropertiesFile::Options options;
-    options.applicationName = "raaadio";
-    options.filenameSuffix = ".settings";
-    options.folderName = "raaadio";
-    options.osxLibrarySubFolder = "Application Support";
-    
     juce::ApplicationProperties appProps;
-    appProps.setStorageParameters(options);
-    
+    appProps.setStorageParameters(AppSettings::options());
+
     std::unique_ptr<juce::XmlElement> mainXml(appProps.getCommonSettings(true)->getXmlValue("audioDeviceState"));
     std::unique_ptr<juce::XmlElement> cueXml(appProps.getCommonSettings(true)->getXmlValue("cueDeviceState"));
     
@@ -74,15 +69,9 @@ void AudioEngine::shutdown() {
 
     if (!devicesEnabled) return;
 
-    juce::PropertiesFile::Options options;
-    options.applicationName = "raaadio";
-    options.filenameSuffix = ".settings";
-    options.folderName = "raaadio";
-    options.osxLibrarySubFolder = "Application Support";
-    
     juce::ApplicationProperties appProps;
-    appProps.setStorageParameters(options);
-    
+    appProps.setStorageParameters(AppSettings::options());
+
     auto xmlMain = deviceManager.createStateXml();
     if (xmlMain) appProps.getCommonSettings(true)->setValue("audioDeviceState", xmlMain.get());
     

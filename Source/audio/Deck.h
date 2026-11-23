@@ -10,22 +10,31 @@ class Deck : public juce::AudioSource,
 {
 public:
     Deck(int id, MusicLibrary& library, juce::AudioFormatManager& formatManager, juce::AudioThumbnailCache& cache);
-    ~Deck();
+    ~Deck() override;
 
     void prepareToPlay(int samplesPerBlockExpected, double sampleRate) override;
     void releaseResources() override;
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) override;
 
-    // AutoDJ lanza la siguiente pista mixLeadSeconds antes del punto de salida de la que
-    // suena, salvo en pistas cortas (hasta minMixSeconds), que terminan antes de mezclar.
-    static constexpr double mixLeadSeconds = 3.5;
+    // AutoDJ lanza la siguiente pista en el punto de mezcla de la que suena (mixPointFor) y
+    // lo que queda de esta baja con un fundido de hasta mixFadeSeconds.
     static constexpr double minMixSeconds = 10.0;
+    static constexpr double mixFadeSeconds = 3.0;
+    static constexpr double skipFadeSeconds = 2.0;
+
+    // Dónde entra la siguiente pista. Identificaciones, cuñas y separadores se oyen enteros,
+    // igual que lo corto (hasta minMixSeconds): la siguiente entra en su punto de salida. La
+    // música, en su punto de mezcla, cuando ya solo queda su final que se desvanece; sin ese
+    // análisis, también en el punto de salida.
+    static double mixPointFor(const TrackInfo& track, double cueIn, double endPosition);
 
     bool loadTrack(const juce::File& file);  // false si el archivo no se puede leer
     void unload();
     void play();
     void stop();
-    void startSkip(); 
+    void startSkip();     // fundido de skipFadeSeconds; AutoDJ lanza la siguiente enseguida
+    void startMixFade();  // ya entró la siguiente: lo que queda hasta el punto de salida se desvanece
+    bool isFadingOut() const { return fadingOut; }
     void pause();
     void setGain(float gain);
     
@@ -48,6 +57,7 @@ public:
     double getCueIn() const { return cueIn; }
     double getEndPosition() const;
     double getRemainingSeconds() const;  // hasta el punto de salida
+    double getMixPoint() const { return mixPoint; }
 
     // Una pista que llega sin análisis (de una versión anterior, o de fuera de la
     // biblioteca) suena de inmediato y se analiza en otro hilo. Esto aplica el resultado:
@@ -90,8 +100,10 @@ private:
     float normalizationGain = 1.0f;
     std::atomic<double> targetSpeed { 1.0 };
     std::atomic<bool> loopingState { false }; 
-    std::atomic<bool> skipRequested { false };
-    float currentFadeLevel = 1.0f;
+    std::atomic<bool> fadingOut { false };
+    std::atomic<float> fadeSeconds { (float) skipFadeSeconds };
+    std::atomic<float> fadeProgress { 0.0f };  // 0 = empieza, 1 = terminó (silencio)
+    void startFadeOut(double seconds);
     double currentSampleRate = 44100.0;
     std::atomic<bool> prepared { false };
     
@@ -106,6 +118,7 @@ private:
 
     double cueIn = 0.0;
     double cueOut = 0.0;  // 0 = hasta el final del archivo
+    double mixPoint = 0.0;
 
     class AnalysisJob;
     std::unique_ptr<AnalysisJob> analysisJob;

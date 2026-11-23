@@ -346,7 +346,7 @@ ImportReview::Issue ImportReviewView::mainIssue(const ImportReview::Item& item) 
     using I = ImportReview::Issue;
     for (auto issue : { I::Duplicate, I::OnlineDiffers, I::NoArtist, I::FormatUnverified, I::Opposite, I::FeaturedGuess, I::DidYouMean })
         if (item.has(issue)) return issue;
-    return (I) -1;
+    return I::None;
 }
 
 juce::String ImportReviewView::issueText(const ImportReview::Item& item, ImportReview::Issue issue) const {
@@ -663,7 +663,7 @@ void ImportReviewView::finishConfirm() {
     if (onLibraryChanged) onLibraryChanged();
 }
 
-void ImportReviewView::discardRows(std::vector<int> rows) {
+void ImportReviewView::discardRows(const std::vector<int>& rows) {
     if (rows.empty() || busy()) return;
     commitEdit(false);
     juce::Component::SafePointer<ImportReviewView> safe(this);

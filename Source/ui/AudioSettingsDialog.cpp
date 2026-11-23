@@ -1,4 +1,6 @@
 #include "AudioSettingsDialog.h"
+#include "FileChoosers.h"
+#include "../helpers/External.h"
 #include "BinaryData.h"
 #include "../helpers/ThemeManager.h"
 #include "../helpers/UiStyle.h"
@@ -498,11 +500,9 @@ void SettingsDialog::LibraryTab::setExternalFolder(const juce::File& folder) {
 }
 
 void SettingsDialog::LibraryTab::chooseExternalFolder() {
-    fileChooser = std::make_unique<juce::FileChooser>(TRANS("backup_external_choose"),
-                                                      juce::File::getSpecialLocation(juce::File::userHomeDirectory));
-    fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-        [this](const juce::FileChooser& fc) {
-            const auto folder = fc.getResult();
+    FileChoosers::chooseFolder(fileChooser, TRANS("backup_external_choose"),
+                          juce::File::getSpecialLocation(juce::File::userHomeDirectory),
+        [this](const juce::File& folder) {
             if (!folder.isDirectory()) return;
 
             const auto lab = PersistenceManager::getLabRoot();
@@ -548,10 +548,8 @@ void SettingsDialog::LibraryTab::performBackup()
 
 void SettingsDialog::LibraryTab::performRestore()
 {
-    fileChooser = std::make_unique<juce::FileChooser>(TRANS("btn_restore"), PersistenceManager::getBackupsFolder());
-    fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-        [this](const juce::FileChooser& fc) {
-            const auto dir = fc.getResult();
+    FileChoosers::chooseFolder(fileChooser, TRANS("btn_restore"), PersistenceManager::getBackupsFolder(),
+        [this](const juce::File& dir) {
             if (!dir.isDirectory()) return;
             const auto res = PersistenceManager::stageRestore(dir);
             updateTexts();
@@ -564,10 +562,8 @@ void SettingsDialog::LibraryTab::performRestore()
 
 void SettingsDialog::LibraryTab::performExport()
 {
-    fileChooser = std::make_unique<juce::FileChooser>(TRANS("btn_export"), juce::File::getSpecialLocation(juce::File::userHomeDirectory));
-    fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-        [this](const juce::FileChooser& fc) {
-            const auto dir = fc.getResult();
+    FileChoosers::chooseFolder(fileChooser, TRANS("btn_export"), juce::File::getSpecialLocation(juce::File::userHomeDirectory),
+        [this](const juce::File& dir) {
             if (!dir.isDirectory()) return;
             juce::File folder;
             const auto res = PersistenceManager::exportPersistence(dir, databaseSnapshot(), &folder);
@@ -581,10 +577,8 @@ void SettingsDialog::LibraryTab::performExport()
 
 void SettingsDialog::LibraryTab::performImport()
 {
-    fileChooser = std::make_unique<juce::FileChooser>(TRANS("btn_import"), juce::File::getSpecialLocation(juce::File::userHomeDirectory));
-    fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-        [this](const juce::FileChooser& fc) {
-            const auto dir = fc.getResult();
+    FileChoosers::chooseFolder(fileChooser, TRANS("btn_import"), juce::File::getSpecialLocation(juce::File::userHomeDirectory),
+        [this](const juce::File& dir) {
             if (!dir.isDirectory()) return;
 
             juce::Component::SafePointer<LibraryTab> safeThis(this);
@@ -604,10 +598,8 @@ void SettingsDialog::LibraryTab::performImport()
 
 void SettingsDialog::LibraryTab::changeLabRoot()
 {
-    fileChooser = std::make_unique<juce::FileChooser>(TRANS("select_folder"), juce::File::getSpecialLocation(juce::File::userHomeDirectory));
-    fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-        [this](const juce::FileChooser& fc) {
-            const auto chosen = fc.getResult();
+    FileChoosers::chooseFolder(fileChooser, TRANS("select_folder"), juce::File::getSpecialLocation(juce::File::userHomeDirectory),
+        [this](const juce::File& chosen) {
             if (!chosen.isDirectory()) return;
 
             const auto target = PersistenceManager::labFolderFor(chosen);
@@ -863,7 +855,7 @@ SettingsDialog::BroadcastTab::BroadcastTab(StationConfig& config, StreamEncoder&
     UiStyle::setIcon(openLogFolderButton, "folder");
     openLogFolderButton.onClick = [this] {
         airLogFolder.createDirectory();
-        airLogFolder.revealToUser();
+        External::reveal(airLogFolder);
     };
 
     // Transmisión: los campos se guardan al salir de ellos o con Enter.
@@ -924,7 +916,7 @@ SettingsDialog::BroadcastTab::BroadcastTab(StationConfig& config, StreamEncoder&
     nowPlayingHint.setJustificationType(juce::Justification::topLeft);
     addAndMakeVisible(viewDataButton);
     UiStyle::setVariant(viewDataButton, "ghost");
-    viewDataButton.onClick = [] { juce::URL("http://127.0.0.1:8080/nowplaying.json").launchInDefaultBrowser(); };
+    viewDataButton.onClick = [] { External::openUrl("http://127.0.0.1:8080/nowplaying.json"); };
     addAndMakeVisible(pushStatusLabel);
 
     lookAndFeelChanged();
@@ -1211,7 +1203,7 @@ void SettingsDialog::ScrollingTab::resized() {
 //==============================================================================
 SettingsDialog::SettingsDialog(juce::AudioDeviceManager& m, juce::AudioDeviceManager& c, MusicLibrary& lib, AdvertisingManager& ads,
                                StationConfig& station, StreamEncoder& streamEncoder, NowPlayingPublisher* nowPlaying,
-                               BackupService* backups, juce::File airLogFolder)
+                               BackupService* backups, const juce::File& airLogFolder)
 {
     audioTab = std::make_unique<AudioTab>(m, c);
     libraryTab = std::make_unique<LibraryTab>(lib, ads, station, backups);

@@ -1,13 +1,10 @@
 #include "PersistenceManager.h"
+#include "AppSettings.h"
 #include "../database/Database.h"
 
 static juce::PropertiesFile::Options settingsOptions()
 {
-    juce::PropertiesFile::Options options;
-    options.applicationName = "raaadio";
-    options.filenameSuffix = ".settings";
-    options.folderName = "raaadio";
-    return options;
+    return AppSettings::options();
 }
 
 juce::File PersistenceManager::getDefaultLabRoot()
@@ -297,7 +294,7 @@ juce::Result PersistenceManager::createBackup(const DatabaseSnapshot& snapshotDa
     for (int n = 2; folder.exists(); ++n)  // dos respaldos en el mismo segundo
         folder = folder.getSiblingFile(now.formatted("%H_%M_%S") + "_" + juce::String(n));
 
-    const auto result = writeBackupContents(folder, snapshotDatabase, mustBeHealthy);
+    auto result = writeBackupContents(folder, snapshotDatabase, mustBeHealthy);
     if (result.failed())
     {
         folder.deleteRecursively();
@@ -355,7 +352,7 @@ std::vector<size_t> PersistenceManager::backupsToPrune(const std::vector<juce::T
         keep[i] = true;
 
     // El más reciente de cada día, semana (desde el lunes) y mes dentro de su ventana.
-    auto keepNewestPer = [&](juce::RelativeTime window, const std::function<juce::String(juce::Time)>& period) {
+    auto keepNewestPer = [&](const juce::RelativeTime& window, const std::function<juce::String(juce::Time)>& period) {
         std::set<juce::String> seen;
         for (size_t i = 0; i < newestFirst.size(); ++i)
         {
@@ -380,6 +377,7 @@ void PersistenceManager::pruneBackups(const juce::File& root, juce::Time now)
 {
     const auto backups = listBackups(root);
     std::vector<juce::Time> times;
+    times.reserve(backups.size());
     for (const auto& b : backups) times.push_back(b.time);
 
     for (const auto index : backupsToPrune(times, now))
@@ -578,7 +576,7 @@ juce::Result PersistenceManager::exportPersistence(const juce::File& targetDirec
     const auto folder = targetDirectory.getNonexistentChildFile(
         "RAAADIO_Export_" + juce::Time::getCurrentTime().formatted("%Y-%m-%d_%H%M%S"), {}, false);
 
-    const auto result = writeBackupContents(folder, snapshotDatabase, true);
+    auto result = writeBackupContents(folder, snapshotDatabase, true);
     if (result.failed())
     {
         folder.deleteRecursively();
@@ -617,7 +615,7 @@ juce::Result PersistenceManager::stageRestore(const juce::File& sourceDirectory)
     const auto legacyAds = sourceDirectory.getChildFile("ads_data.json");  // respaldos de versiones anteriores
 
     // Solo un respaldo que pasa la revisión: archivos iguales al manifiesto y base sana.
-    const auto verified = verifyBackup(sourceDirectory);
+    auto verified = verifyBackup(sourceDirectory);
     if (verified.failed())
         return verified;
 

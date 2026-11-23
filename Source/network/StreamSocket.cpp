@@ -38,7 +38,7 @@ struct StreamSocket::Tls {
 namespace {
     // Los motivos más comunes, con el nombre que traen en la documentación de Windows.
     juce::String describe(SECURITY_STATUS status) {
-        const auto code = "0x" + juce::String::toHexString((int) status).toUpperCase();
+        auto code = "0x" + juce::String::toHexString((int) status).toUpperCase();
         switch (status) {
             case SEC_E_UNTRUSTED_ROOT:      return "certificate not trusted (SEC_E_UNTRUSTED_ROOT)";
             case SEC_E_WRONG_PRINCIPAL:     return "certificate is for another name (SEC_E_WRONG_PRINCIPAL)";

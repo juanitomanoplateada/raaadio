@@ -124,7 +124,7 @@ void AirLogRecorder::openSegment(juce::Time start) {
         juce::Logger::writeToLog("AirLog: could not create " + file.getFullPathName());
         return;
     }
-    stream.release();
+    (void) stream.release();  // ahora es del writer
     writerRate = preparedRate.load();
 
     const juce::ScopedLock sl(fileLock);

@@ -64,6 +64,34 @@ void findCuePoints(const std::vector<float>& levels, double windowSeconds,
     }
 }
 
+double findMixPoint(const std::vector<float>& levels, double windowSeconds,
+                    double loudnessLufs, double cueIn, double cueOut) {
+    if (levels.empty() || windowSeconds <= 0.0 || loudnessLufs <= -69.9 || cueOut <= cueIn) return cueOut;
+
+    const double threshold = juce::Decibels::decibelsToGain(loudnessLufs - mixDropDb);
+    const double thresholdPower = threshold * threshold;
+    const int span = juce::jmax(1, (int) std::lround(mixWindowSeconds / windowSeconds));
+
+    // Del punto de salida hacia atrás. El promedio de cada ventana incluye las anteriores:
+    // donde baja del umbral, el sonido que lo sostenía ya terminó.
+    const double earliest = juce::jmax(cueIn, cueOut - maxMixLeadSeconds);
+    const int last = juce::jmin((int) levels.size(), (int) std::ceil(cueOut / windowSeconds)) - 1;
+    const int first = juce::jmax(0, (int) std::floor(earliest / windowSeconds));
+
+    for (int i = last; i >= first; --i) {
+        const int from = juce::jmax(0, i - span + 1);
+        double power = 0.0;
+        for (int j = from; j <= i; ++j)
+            power += (double) levels[(size_t) j] * levels[(size_t) j];
+        if (power / (i - from + 1) >= thresholdPower)
+            return juce::jlimit(cueIn, cueOut, (i + 1) * windowSeconds);
+    }
+
+    // Todo lo revisado ya es final que se desvanece (una salida larga y suave): la siguiente
+    // entra en el tope. Si se revisó la pista entera, algo no cuadra y no se adelanta nada.
+    return earliest > cueIn ? earliest : cueOut;
+}
+
 TrackAnalysis analyse(juce::AudioFormatReader& reader, const std::function<bool()>& shouldAbort) {
     TrackAnalysis result;
     const double sampleRate = reader.sampleRate;
@@ -101,8 +129,8 @@ TrackAnalysis analyse(juce::AudioFormatReader& reader, const std::function<bool(
         const float* left = buffer.getReadPointer(0);
         const float* right = buffer.getReadPointer(1);
         for (int i = 0; i < numSamples; ++i) {
-            interleaved[(size_t) (2 * i)] = left[i];
-            interleaved[(size_t) (2 * i + 1)] = right[i];
+            interleaved[2 * (size_t) i] = left[i];
+            interleaved[2 * (size_t) i + 1] = right[i];
 
             sumLeft += (double) left[i] * left[i];
             sumRight += (double) right[i] * right[i];
@@ -131,6 +159,7 @@ TrackAnalysis analyse(juce::AudioFormatReader& reader, const std::function<bool(
 
     result.lengthSeconds = (double) totalSamples / sampleRate;
     findCuePoints(levels, window / sampleRate, result.lengthSeconds, result.cueIn, result.cueOut);
+    result.mixPoint = findMixPoint(levels, window / sampleRate, result.loudnessLufs, result.cueIn, result.cueOut);
     result.valid = true;
     return result;
 }

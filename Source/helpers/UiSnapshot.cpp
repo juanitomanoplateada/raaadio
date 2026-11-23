@@ -64,7 +64,7 @@ static juce::File writeDemoAudio(const juce::File& file, double seconds, int see
 
     std::unique_ptr<juce::AudioFormatWriter> writer(wav.createWriterFor(stream.get(), sampleRate, 1, 16, {}, 0));
     if (writer == nullptr) return {};
-    stream.release();
+    (void) stream.release();  // ahora es del writer
 
     juce::Random rng(seed);
     const int total = (int) (seconds * sampleRate);
@@ -229,6 +229,13 @@ UiSnapshotRunner::UiSnapshotRunner(const Options& o) : options(o)
     startTime = juce::Time::getMillisecondCounter();
     startTimer(50);
 }
+
+MusicLibrary& UiSnapshotRunner::getLibrary() const { return main->library; }
+AudioEngine& UiSnapshotRunner::getAudioEngine() const { return main->audioEngine; }
+Playlist& UiSnapshotRunner::getPlaylist() const { return main->playlist; }
+AdvertisingManager& UiSnapshotRunner::getAdsManager() const { return main->adsManager; }
+StationConfig& UiSnapshotRunner::getStationConfig() const { return *main->stationConfig; }
+StreamEncoder& UiSnapshotRunner::getStreamEncoder() const { return main->streamEncoder; }
 
 UiSnapshotRunner::~UiSnapshotRunner()
 {

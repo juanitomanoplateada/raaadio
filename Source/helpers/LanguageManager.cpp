@@ -1,4 +1,5 @@
 #include "LanguageManager.h"
+#include "AppSettings.h"
 #include "BinaryData.h"
 
 LanguageManager& LanguageManager::getInstance()
@@ -10,14 +11,8 @@ LanguageManager& LanguageManager::getInstance()
 void LanguageManager::initialise()
 {
      
-    juce::PropertiesFile::Options options;
-    options.applicationName = "raaadio";
-    options.filenameSuffix = ".settings";
-    options.osxLibrarySubFolder = "Application Support";
-    options.folderName = "raaadio";
-
     juce::ApplicationProperties appProperties;
-    appProperties.setStorageParameters(options);
+    appProperties.setStorageParameters(AppSettings::options());
 
     auto* props = appProperties.getUserSettings();
     juce::String savedLang = props->getValue("ui.language", "en");
@@ -32,14 +27,8 @@ void LanguageManager::setLanguage(const juce::String& languageCode, bool persist
 
     if (persist)
     {
-        juce::PropertiesFile::Options options;
-        options.applicationName = "raaadio";
-        options.filenameSuffix = ".settings";
-        options.osxLibrarySubFolder = "Application Support";
-        options.folderName = "raaadio";
-
         juce::ApplicationProperties appProperties;
-        appProperties.setStorageParameters(options);
+        appProperties.setStorageParameters(AppSettings::options());
 
         if (auto* props = appProperties.getUserSettings())
         {

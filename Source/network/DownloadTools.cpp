@@ -78,7 +78,7 @@ std::vector<Asset> missing(const Paths& found, const juce::File& folder) {
     }
     if (!found.ffmpegFolder.getChildFile(Paths::exe("ffmpeg")).existsAsFile()) {
         Asset a;
-        a.name = "FFmpeg";
+        a.name = ffmpegName;
         a.url = juce::String(ffmpegRelease) + ffmpegZip;
         a.checksumUrl = juce::String(ffmpegRelease) + "checksums.sha256";
         a.checksumName = ffmpegZip;

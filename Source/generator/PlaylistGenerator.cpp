@@ -179,9 +179,9 @@ int PlaylistGenerator::feasibleCategorySeparation(int requested, const Pool& poo
         if (it != pool.categoriesOf.end())
             for (int c : it->second) ++songsIn[c];
     }
-    if (songsIn.empty()) return 0;
     int largest = 0;
     for (const auto& [category, count] : songsIn) largest = juce::jmax(largest, count);
+    if (largest == 0) return 0;  // ninguna candidata tiene categoría
     // Con una sola categoría no hay a cuál cambiar; y una categoría con un tercio de las
     // canciones solo puede sonar cada tres sin que las otras se repitan.
     const int byDistinct = (int) songsIn.size() - 1;

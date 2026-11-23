@@ -1,0 +1,44 @@
+# clang-tidy de RAAADIO. Lo usan tools/sonar-scan.ps1 (para SonarQube) y cualquier editor con
+# clangd. Se buscan errores reales antes que estilo: fallos lógicos (bugprone), el analizador
+# de rutas de Clang (clang-analyzer), concurrencia y rendimiento.
+#
+# Fuera por ruido en este código: parámetros intercambiables y conversiones de estrechamiento
+# (el audio mezcla int, float y double a propósito), el tamaño de los enum, concurrency-mt-unsafe
+# (getenv, strerror... fuera del hilo de audio), no-int-to-ptr (SQLITE_TRANSIENT de la API de
+# SQLite) y VirtualCall (los componentes de JUCE llaman a resized() y lookAndFeelChanged() en el
+# constructor a propósito).
+#
+# exception-escape también queda fuera: RAAADIO no lanza excepciones propias (solo Main.cpp
+# atrapa lo que se escape), y lo que avisa viene de la STL de MSVC (mover un std::map no es
+# noexcept, std::function, reservar memoria) sin decir dónde, así que no hay nada que corregir.
+Checks: >-
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  -bugprone-narrowing-conversions,
+  -bugprone-implicit-widening-of-multiplication-result,
+  clang-analyzer-*,
+  -clang-analyzer-optin.performance.Padding,
+  -clang-analyzer-optin.cplusplus.VirtualCall,
+  concurrency-*,
+  -concurrency-mt-unsafe,
+  performance-*,
+  -performance-enum-size,
+  -performance-no-int-to-ptr,
+  misc-redundant-expression,
+  misc-misplaced-const,
+  misc-throw-by-value-catch-by-reference,
+  misc-unconventional-assign-operator,
+  misc-uniqueptr-reset-release,
+  modernize-use-override,
+  modernize-use-nullptr,
+  readability-misleading-indentation
+# Solo se informan los encabezados propios (Source/ y Tests/), no los de JUCE ni las dependencias.
+HeaderFilterRegex: '.*[\\/](Source|Tests)[\\/].*'
+WarningsAsErrors: ''
+FormatStyle: none
+CheckOptions:
+  # "(void) stream.release();" dice a propósito que el valor no se usa: el AudioFormatWriter de
+  # JUCE se queda con el stream cuando se crea bien.
+  bugprone-unused-return-value.AllowCastToVoid: true

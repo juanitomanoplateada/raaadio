@@ -20,6 +20,7 @@ public:
         NoArtist,          // el nombre no trae artista
         Duplicate,         // la misma canción ya está
         OnlineDiffers,     // MusicBrainz dice otra cosa (artista o título)
+        None,              // sin dudas (no se guarda en issues; lo devuelve la ventana de revisión)
     };
 
     struct Item {

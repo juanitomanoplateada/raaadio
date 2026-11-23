@@ -11,7 +11,7 @@ class HistoryView : public juce::Component,
 {
 public:
     HistoryView(HistoryManager& historyManager);
-    ~HistoryView();
+    ~HistoryView() override;
 
     void paint(juce::Graphics& g) override;
     void paintOverChildren(juce::Graphics& g) override;

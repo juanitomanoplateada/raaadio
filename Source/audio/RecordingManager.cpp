@@ -1,4 +1,5 @@
 #include "RecordingManager.h"
+#include "../helpers/External.h"
 #include "../helpers/PersistenceManager.h"
 
 RecordingManager::RecordingManager() : juce::Thread("Recording Thread") {
@@ -26,7 +27,7 @@ void RecordingManager::setRecordingsFolder(const juce::File& folder) {
 }
 
 void RecordingManager::openRecordingsFolder() {
-    recordingsFolder.revealToUser();
+    External::reveal(recordingsFolder);
 }
 
 juce::String RecordingManager::startRecording(bool deckA_Air, bool deckB_Air) {
@@ -69,7 +70,7 @@ juce::String RecordingManager::startRecording(bool deckA_Air, bool deckB_Air) {
     // createWriterFor() solo toma posesión del stream si tiene éxito.
     writer.reset(wavFmt->createWriterFor(stream.get(), sampleRate, 2, 16, {}, 0));
     if (!writer) return "Failed to initialize WAV Writer";
-    stream.release();
+    (void) stream.release();  // ahora es del writer
 
     // El hilo de escritura arranca cuando el writer ya existe.
     samplesRecorded = 0;

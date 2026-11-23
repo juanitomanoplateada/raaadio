@@ -40,8 +40,9 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 Las pruebas usan laboratorios temporales: nunca tocan tu emisora ni tu configuración.
-Tardan alrededor de un minuto; es normal, porque detener un deck sin tarjeta de sonido
-espera un momento dentro de JUCE.
+Tardan unos 15 minutos; es normal, porque muchas esperan temporizadores reales (los
+fundidos, la protección contra silencio, el dibujo de cada pantalla de la interfaz) y
+detener un deck sin tarjeta de sonido espera un momento dentro de JUCE.
 
 Si tu cambio corrige un error, agrega una prueba que falle sin la corrección. Si toca la
 lógica de audio, de la cola o de la pauta, pruébala sin interfaz (mira cómo lo hacen

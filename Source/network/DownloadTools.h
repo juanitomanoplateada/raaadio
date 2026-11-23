@@ -25,6 +25,9 @@ juce::File defaultFolder();
 // Lo de la carpeta de RAAADIO primero; si falta algo, lo que haya en el PATH del sistema.
 Paths find(const juce::File& folder, const juce::String& pathVariable);
 
+// El nombre de FFmpeg como Asset (la importación lo instala solo, para convertir).
+constexpr const char* ffmpegName = "FFmpeg";
+
 // Un programa por instalar: de dónde se baja, dónde está su SHA-256 y qué se extrae.
 struct Asset {
     juce::String name;          // "yt-dlp", "FFmpeg", "Deno"

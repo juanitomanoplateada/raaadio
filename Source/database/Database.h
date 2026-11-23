@@ -9,6 +9,15 @@
 #include <iostream>
 #include <JuceHeader.h>
 
+// Categorías fijas de la emisora: siempre existen, van primero y en este orden, y no se
+// renombran, mueven ni borran. La app las reconoce por su rol, nunca por el nombre.
+enum class CategoryRole {
+    None = 0,        // categoría normal (música), creada por el usuario
+    StationIds = 1,  // IDENTIFICACIONES: abren cada tanda comercial
+    Spots = 2,       // CUÑAS: la publicidad paga, con número y horario en la pauta
+    Sweepers = 3     // SEPARADORES: cortinillas, jingles y promos entre canciones
+};
+
 struct TrackInfo {
     int id;
     std::string path;
@@ -28,6 +37,7 @@ struct TrackInfo {
     double truePeakDb = -70.0;    // pico real, dBTP
     double cueIn = 0.0;           // segundos
     double cueOut = 0.0;          // segundos; 0 = hasta el final del archivo
+    double mixPoint = 0.0;        // segundos: desde aquí solo queda el final que se desvanece; 0 = sin calcular
     int analysisVersion = 0;
     std::string fileHash;         // SHA-256 del archivo, para detectar duplicados
 
@@ -40,21 +50,16 @@ struct TrackInfo {
     // Por revisar: se puede poner al aire a mano, pero AutoDJ y el generador no la usan.
     bool isPending() const { return status == 1; }
 
+    // Si está en una categoría del sistema (identificaciones, cuñas, separadores), cuál; si
+    // está en varias, la de rol mayor, como getSystemRolesByTrack(). Se lee con la pista.
+    CategoryRole systemRole = CategoryRole::None;
+
     // Solo en la cola (no se guarda en la base de datos): la tanda comercial a la que
     // pertenece, con la clave de AdScheduler ("AAAA-MM-DD HH:MM"). Vacía si no es de una tanda.
     std::string breakKey;
 
     // Lo que dura al aire, del punto de entrada al de salida.
     double getAirDuration() const { return cueOut > cueIn ? cueOut - cueIn : duration; }
-};
-
-// Categorías fijas de la emisora: siempre existen, van primero y en este orden, y no se
-// renombran, mueven ni borran. La app las reconoce por su rol, nunca por el nombre.
-enum class CategoryRole {
-    None = 0,        // categoría normal (música), creada por el usuario
-    StationIds = 1,  // IDENTIFICACIONES: abren cada tanda comercial
-    Spots = 2,       // CUÑAS: la publicidad paga, con número y horario en la pauta
-    Sweepers = 3     // SEPARADORES: cortinillas, jingles y promos entre canciones
 };
 
 struct Category {

@@ -1,6 +1,7 @@
  
 
 #include "AdsListView.h"
+#include "../helpers/External.h"
 #include "../library/TrackNaming.h"
 #include "TrackDetailsDialog.h"
 #include "CartwallView.h"
@@ -368,7 +369,7 @@ void AdsListView::cellClicked(int rowNumber, int columnId, const juce::MouseEven
                      int row = selectedRows[0];
                      if (row < cachedTracks.size()) {
                         juce::File f(cachedTracks[row].path);
-                        if (f.exists()) f.revealToUser();
+                        if (f.exists()) External::reveal(f);
                      }
                  }
              });

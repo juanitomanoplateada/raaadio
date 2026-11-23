@@ -45,7 +45,7 @@ StationSettings StationSettings::fromVar(const juce::var& v) {
     StationSettings s;
     if (!v.isObject()) return s;
 
-    auto read = [&v](const char* name, auto fallback) {
+    auto read = [&v](const char* name, const auto& fallback) {
         return v.hasProperty(name) ? v[name] : juce::var(fallback);
     };
     s.deadAirEnabled = read("deadAirEnabled", s.deadAirEnabled);

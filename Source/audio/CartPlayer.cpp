@@ -170,6 +170,7 @@ void CartPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToF
 void CartPlayer::saveState() const {
     if (!rememberAssignments) return;
     std::vector<int> ids;
+    ids.reserve(carts.size());
     for (const auto& cart : carts)
         ids.push_back(cart.reader != nullptr ? cart.track.id : -1);
     if (!library.withDatabase([&ids](Database& db) { return db.saveCartwall(ids); }))

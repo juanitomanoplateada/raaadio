@@ -17,14 +17,14 @@ namespace {
     bool exec(sqlite3* db, const char* sql, const std::function<void(sqlite3_stmt*)>& bind = {}) {
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-            std::cerr << "SQL error: " << sqlite3_errmsg(db) << " in SQL: " << sql << std::endl;
+            std::cerr << "SQL error: " << sqlite3_errmsg(db) << " in SQL: " << sql << "\n";
             return false;
         }
         if (bind) bind(stmt);
         const int rc = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
         if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
-            std::cerr << "SQL error: " << sqlite3_errmsg(db) << " in SQL: " << sql << std::endl;
+            std::cerr << "SQL error: " << sqlite3_errmsg(db) << " in SQL: " << sql << "\n";
             return false;
         }
         return true;
@@ -57,7 +57,10 @@ namespace {
     // Las filas que apuntan a una pista solo se escriben si la pista existe todavía.
     bool writeAdPlan(sqlite3* db, const Database::AdPlan& plan) {
         bool ok = exec(db, "DELETE FROM ad_numbers;") && exec(db, "DELETE FROM ad_slots;");
-        for (const auto& [trackId, number] : plan.numberByTrack) {
+        // Las lambdas capturan copias y no los nombres de [a, b]: capturar un structured binding
+        // es de C++20 (el proyecto es C++17) y confunde al analizador de Clang.
+        for (const auto& entry : plan.numberByTrack) {
+            const int trackId = entry.first, number = entry.second;
             if (number < 0 || number > 99) continue;
             ok = ok && exec(db, "INSERT INTO ad_numbers (track_id, number) SELECT ?1, ?2 "
                                 "WHERE EXISTS (SELECT 1 FROM tracks WHERE id = ?1);", [&](sqlite3_stmt* s) {
@@ -65,9 +68,10 @@ namespace {
                 sqlite3_bind_int(s, 2, number);
             });
         }
-        for (const auto& [number, slots] : plan.slotsByNumber) {
+        for (const auto& entry : plan.slotsByNumber) {
+            const int number = entry.first;
             if (number < 0 || number > 99) continue;
-            for (const auto& slot : slots)
+            for (const auto& slot : entry.second)
                 ok = ok && exec(db, "INSERT OR IGNORE INTO ad_slots (number, slot) VALUES (?1, ?2);", [&](sqlite3_stmt* s) {
                     sqlite3_bind_int(s, 1, number);
                     bindText(s, 2, slot);
@@ -140,7 +144,7 @@ bool Database::each(const char* sql, const std::function<void(sqlite3_stmt*)>& b
                     const std::function<void(sqlite3_stmt*)>& row) {
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "SQL error: " << sqlite3_errmsg(db) << " in SQL: " << sql << std::endl;
+        std::cerr << "SQL error: " << sqlite3_errmsg(db) << " in SQL: " << sql << "\n";
         return false;
     }
     if (bind) bind(stmt);

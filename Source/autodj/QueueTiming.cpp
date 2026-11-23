@@ -4,16 +4,14 @@
 namespace QueueTiming {
 
 double secondsUntilNext(const TrackInfo& track) {
-    const double air = track.getAirDuration();
-    return air > Deck::minMixSeconds ? air - Deck::mixLeadSeconds : air;
+    const double end = track.cueIn + track.getAirDuration();
+    return Deck::mixPointFor(track, track.cueIn, end) - track.cueIn;
 }
 
 double secondsUntilNext(const Deck& deck) {
+    if (deck.isFadingOut()) return 0.0;  // la siguiente ya entró, o entra ahora
     const double speed = deck.getSpeed() > 0.01 ? deck.getSpeed() : 1.0;
-    double seconds = deck.getRemainingSeconds();
-    if (deck.getEndPosition() - deck.getCueIn() > Deck::minMixSeconds)
-        seconds -= Deck::mixLeadSeconds;
-    return juce::jmax(0.0, seconds) / speed;
+    return juce::jmax(0.0, deck.getMixPoint() - deck.getCurrentPosition()) / speed;
 }
 
 double secondsUntilQueueStarts(const Deck& deckA, const Deck& deckB) {

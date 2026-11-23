@@ -25,6 +25,7 @@
 #include "../Source/network/SongDownloader.h"
 #include "../Source/helpers/ProcessRunner.h"
 #include "../Source/library/TagWriter.h"
+#include "../Source/library/AudioConverter.h"
 #include "../Source/library/AdvertisingManager.h"
 #include "../Source/generator/PlaylistGenerator.h"
 #include "../Source/autodj/QueueTiming.h"
@@ -34,6 +35,7 @@
 #include "../Source/autodj/AutoDJ.h"
 #include "../Source/audio/AudioEngine.h"
 #include "../Source/audio/AirLogRecorder.h"
+#include "../Source/audio/RecordingManager.h"
 #include "../Source/audio/CartPlayer.h"
 #include "../Source/network/StreamEncoder.h"
 #include "../Source/network/Mp3Encoder.h"
@@ -47,7 +49,43 @@
 #include "../Source/helpers/StationLock.h"
 #include "../Source/generator/TemplateManager.h"
 #include "../Source/ui/DragFormats.h"
+#include "../Source/helpers/UiSnapshot.h"
+#include "../Source/helpers/LanguageManager.h"
+#include "../Source/helpers/ThemeManager.h"
+#include "../Source/helpers/RaaadioLookAndFeel.h"
+#include "../Source/MainComponent.h"
+#include "../Source/ui/ImportReviewView.h"
+#include "../Source/ui/CreditsEditor.h"
+#include "../Source/ui/FileChoosers.h"
+#include "../Source/ui/AudioSettingsDialog.h"
+#include "../Source/ui/PlaylistComponent.h"
+#include "../Source/ui/TrackDetailsDialog.h"
+#include "../Source/ui/PlaylistGeneratorDialog.h"
+#include "../Source/ui/LibraryComponent.h"
+#include "../Source/ui/LibraryView.h"
+#include "../Source/ui/CategorySidebarComponent.h"
+#include "../Source/ui/AdvancedImportDialog.h"
+#include "../Source/ui/AdsListView.h"
+#include "../Source/ui/ScheduleView.h"
+#include "../Source/ui/CartwallView.h"
+#include "../Source/ui/DeckComponent.h"
+#include "../Source/ui/WaveformComponent.h"
+#include "../Source/ui/MixerComponent.h"
+#include "../Source/ui/RecordingPanel.h"
+#include "../Source/ui/StatusBar.h"
+#include "../Source/ui/HistoryView.h"
+#include "../Source/ui/ArtistsView.h"
+#include "../Source/ui/OnlineSearchView.h"
+#include "../Source/helpers/AppSettings.h"
+#include "../Source/helpers/External.h"
 #include <thread>
+
+// Despacha el siguiente mensaje de la cola del sistema (false si no hay). Es la función que
+// usa el bucle de mensajes de JUCE (juce_events); las pruebas la llaman para atender
+// temporizadores y avisos sin abrir un bucle modal.
+namespace juce::detail { bool dispatchNextMessageOnSystemQueue(bool returnIfNoPendingMessages); }
+
+void installCrashReport();  // CrashReport.cpp: si las pruebas se caen, dice dónde
 #include <mutex>
 
 namespace
@@ -117,6 +155,28 @@ namespace
         };
     }
 
+    // Como el final de muchas canciones: tono de 440 Hz a -6 dBFS hasta fadeStart y un
+    // fundido de 6.25 dB/s (50 dB en 8 s) hasta el silencio.
+    Signal toneWithFadeOut(double fadeStart)
+    {
+        return [fadeStart](double t) {
+            if (t < fadeStart) return tone(t, 0.5f, 440.0);
+            if (t >= fadeStart + 8.0) return 0.0f;
+            return tone(t, 0.5f * juce::Decibels::decibelsToGain(-6.25f * (float) (t - fadeStart)), 440.0);
+        };
+    }
+
+    // Una persona hablando, grabada con el teléfono: sílabas de 0.25 s a -6 dBFS con pausas
+    // de 0.15 s hasta 11.85 s, una última sílaba 10 dB más suave en 12.0-12.3 s y un zumbido
+    // de fondo a -40 dBFS de principio a fin.
+    float voiceWithHum(double t)
+    {
+        float speech = 0.0f;
+        if (t < 11.85 && std::fmod(t, 0.4) < 0.25) speech = tone(t, 0.5f, 440.0);
+        else if (t >= 12.0 && t < 12.3) speech = tone(t, 0.16f, 440.0);
+        return speech + tone(t, 0.01f, 120.0);
+    }
+
     juce::File writeAudio(juce::AudioFormat& format, const juce::File& file, double seconds, const Signal& signal,
                           const juce::StringPairArray& metadata = {}, int bits = 24, int quality = 0)
     {
@@ -126,7 +186,7 @@ namespace
         auto stream = file.createOutputStream();
         std::unique_ptr<juce::AudioFormatWriter> writer(format.createWriterFor(stream.get(), sampleRate, 2, bits, metadata, quality));
         if (writer == nullptr) return {};
-        stream.release();
+        (void) stream.release();  // ahora es del writer
 
         const int total = (int) std::lround(seconds * sampleRate);
         juce::AudioBuffer<float> block(2, 4096);
@@ -172,6 +232,114 @@ namespace
             mixer.getNextAudioBlock(info);
         }
     }
+
+    // Atiende la cola de mensajes durante unos milisegundos, como el bucle de la aplicación.
+    // No se usa runDispatchLoopUntil porque exige JUCE_MODAL_LOOPS_PERMITTED, y con esa opción
+    // JUCE muestra algunos avisos de forma síncrona: las pruebas ya no se comportarían como la
+    // aplicación, que la tiene apagada.
+    void dispatchMessagesFor(int milliseconds)
+    {
+        const auto end = juce::Time::getMillisecondCounter() + (juce::uint32) milliseconds;
+        do
+        {
+            while (juce::detail::dispatchNextMessageOnSystemQueue(true)) {}
+            juce::Thread::sleep(1);
+        } while (juce::Time::getMillisecondCounter() < end);
+    }
+
+    // Procesa los mensajes pendientes (temporizadores, avisos asíncronos) hasta que done()
+    // o hasta que pase el tiempo. Las pruebas corren en el hilo de mensajes.
+    bool pumpMessagesUntil(const std::function<bool()>& done, int timeoutMs = 30000)
+    {
+        const auto start = juce::Time::getMillisecondCounter();
+        while (!done())
+        {
+            if ((int) (juce::Time::getMillisecondCounter() - start) > timeoutMs) return false;
+            dispatchMessagesFor(20);
+        }
+        return true;
+    }
+
+    // Contesta el diálogo modal que esté abierto (un AlertWindow de JUCE; 1 = Aceptar) y
+    // espera a que su respuesta se procese.
+    bool answerModal(int result, int timeoutMs = 5000)
+    {
+        juce::Component* modal = nullptr;
+        pumpMessagesUntil([&] { modal = juce::Component::getCurrentlyModalComponent(); return modal != nullptr; }, timeoutMs);
+        if (modal == nullptr) return false;
+        juce::Component::SafePointer<juce::Component> watched(modal);
+        modal->exitModalState(result);
+        const bool closed = pumpMessagesUntil([&] { return watched == nullptr; }, timeoutMs);
+        dispatchMessagesFor(20);
+        return closed;
+    }
+
+    // Una respuesta HTTP completa. claimedLength: el Content-Length que se anuncia (para
+    // simular una conexión que se corta antes de tiempo).
+    juce::String httpResponse(int status, const juce::String& body, int claimedLength = -1)
+    {
+        return "HTTP/1.1 " + juce::String(status) + (status == 200 ? " OK" : " Not Found") + "\r\n"
+             + "Connection: close\r\nContent-Type: text/plain; charset=utf-8\r\n"
+             + "Content-Length: " + juce::String(claimedLength >= 0 ? claimedLength : (int) body.getNumBytesAsUTF8())
+             + "\r\n\r\n" + body;
+    }
+
+    // Un servidor HTTP mínimo en 127.0.0.1, para probar los pedidos de verdad sin internet.
+    class LocalHttpServer : private juce::Thread
+    {
+    public:
+        using Handler = std::function<juce::String(const juce::String& method, const juce::String& path, const juce::String& body)>;
+
+        explicit LocalHttpServer(Handler h) : juce::Thread("Local HTTP server"), handler(std::move(h))
+        {
+            listener.createListener(0, "127.0.0.1");
+            startThread();
+        }
+        ~LocalHttpServer() override
+        {
+            signalThreadShouldExit();
+            listener.close();
+            stopThread(3000);
+        }
+        juce::String url(const juce::String& path) const
+        {
+            return "http://127.0.0.1:" + juce::String(listener.getBoundPort()) + path;
+        }
+
+    private:
+        void run() override
+        {
+            while (!threadShouldExit())
+            {
+                std::unique_ptr<juce::StreamingSocket> client(listener.waitForNextConnection());
+                if (client == nullptr) break;
+                juce::MemoryBlock received;
+                juce::String text;
+                int headerEnd = -1;
+                char buffer[4096];
+                while (client->waitUntilReady(true, 2000) == 1)
+                {
+                    const int n = client->read(buffer, (int) sizeof(buffer), false);
+                    if (n <= 0) break;
+                    received.append(buffer, (size_t) n);
+                    text = received.toString();
+                    headerEnd = text.indexOf("\r\n\r\n");
+                    const int length = text.fromFirstOccurrenceOf("Content-Length:", false, true).getIntValue();
+                    if (headerEnd >= 0 && (int) received.getSize() >= headerEnd + 4 + length) break;
+                }
+                if (headerEnd < 0) continue;
+                const auto requestLine = text.upToFirstOccurrenceOf("\r\n", false, false);
+                const auto method = requestLine.upToFirstOccurrenceOf(" ", false, false);
+                const auto path = requestLine.fromFirstOccurrenceOf(" ", false, false).upToFirstOccurrenceOf(" ", false, false);
+                const auto response = handler(method, path, text.substring(headerEnd + 4));
+                client->write(response.toRawUTF8(), (int) response.getNumBytesAsUTF8());
+                client->close();
+            }
+        }
+
+        Handler handler;
+        juce::StreamingSocket listener;
+    };
 }
 
 //==============================================================================
@@ -182,6 +350,13 @@ public:
 
     void runTest() override
     {
+        beginTest("Una base en una carpeta que no existe no se abre (y se avisa)");
+        {
+            TempLab lab;
+            Database db;
+            expect(!db.open(lab.root.getChildFile("NO EXISTE/raaadio.db").getFullPathName().toStdString()));
+        }
+
         beginTest("Las pistas del laboratorio se guardan con ruta relativa y se leen absolutas");
         {
             TempLab lab;
@@ -407,6 +582,8 @@ struct LibraryFixture
         PersistenceManager::getDatabaseFolder().createDirectory();
         PersistenceManager::getLibraryFolder().createDirectory();
         library.initialise(PersistenceManager::getDatabaseFolder().getChildFile("raaadio.db"));
+        // Sin el FFmpeg del equipo: las pruebas de conversión ponen el suyo.
+        library.setConverter({ [] { return juce::File(); }, {} });
     }
 
     TrackInfo add(const juce::String& relativePath, const juce::String& title)
@@ -502,7 +679,7 @@ public:
             auto stream = wav.createOutputStream();
             std::unique_ptr<juce::AudioFormatWriter> writer(format.createWriterFor(stream.get(), 44100.0, 2, 16, {}, 0));
             expect(writer != nullptr);
-            stream.release();
+            (void) stream.release();  // ahora es del writer
             juce::AudioBuffer<float> tone(2, 44100 * 2);
             for (int i = 0; i < tone.getNumSamples(); ++i)
                 for (int ch = 0; ch < 2; ++ch)
@@ -665,6 +842,33 @@ public:
         TrackAnalyzer::findCuePoints(levels({ { 10.0, -120.0f } }), w, 10.0, cueIn, cueOut);
         expectWithinAbsoluteError(cueIn, 0.0, 0.001);
         expectWithinAbsoluteError(cueOut, 10.0, 0.001);
+
+        beginTest("Punto de mezcla: lo que termina en seco no se pisa; un fundido se pisa cuando ya bajó");
+        {
+            expectWithinAbsoluteError(TrackAnalyzer::findMixPoint(levels({ { 30.0, -10.0f } }), w, -10.0, 0.0, 30.0),
+                                      30.0, 0.001, "termina en seco: la siguiente entra al final");
+
+            // 30 s a -10 dB y un fundido de 50 dB en 8 s: baja de -28 dB a los 2.88 s.
+            auto fade = levels({ { 30.0, -10.0f } });
+            for (int k = 0; k < 400; ++k)
+                fade.push_back(juce::Decibels::decibelsToGain(-10.0f - 50.0f * (float) k / 400.0f));
+            const double mix = TrackAnalyzer::findMixPoint(fade, w, -10.0, 0.0, 38.0);
+            expect(mix > 32.88 && mix < 33.2, "entra cuando el fundido ya bajó 18 dB: " + juce::String(mix, 3));
+
+            expectWithinAbsoluteError(TrackAnalyzer::findMixPoint(levels({ { 60.0, -10.0f }, { 20.0, -35.0f } }), w, -10.0, 0.0, 80.0),
+                                      70.0, 0.001, "una salida larga y suave se pisa como mucho 10 s antes del final");
+            expectWithinAbsoluteError(TrackAnalyzer::findMixPoint(levels({ { 10.0, -120.0f } }), w, -70.0, 0.0, 10.0),
+                                      10.0, 0.001, "un archivo en silencio no se adelanta");
+        }
+
+        beginTest("Una voz con ruido de fondo: la siguiente entra después de su última palabra, aunque sea más suave");
+        {
+            TempLab lab;
+            const auto a = analyseFile(writeWav(lab.root.getChildFile("voz.wav"), 15.0, voiceWithHum));
+            expect(a.valid);
+            expectWithinAbsoluteError(a.cueOut, 15.0, 0.03, "el zumbido sigue hasta el final del archivo");
+            expect(a.mixPoint >= 12.3 && a.mixPoint < 12.6, "la última sílaba termina a los 12.3 s: " + juce::String(a.mixPoint, 3));
+        }
     }
 };
 
@@ -1466,9 +1670,12 @@ namespace
                 t += length;
             }
         }
-        for (double t = 0.3; t < seconds; t += 0.4 + 0.6 * random.nextDouble())
-            for (size_t i = (size_t) (t * musicRate); i < juce::jmin(samples->size(), (size_t) ((t + 0.05) * musicRate)); ++i)
+        double burst = 0.3;  // ráfagas de ruido de 50 ms a intervalos al azar
+        while (burst < seconds) {
+            for (size_t i = (size_t) (burst * musicRate); i < juce::jmin(samples->size(), (size_t) ((burst + 0.05) * musicRate)); ++i)
                 (*samples)[i] += 0.2f * (random.nextFloat() * 2.0f - 1.0f);
+            burst += 0.4 + 0.6 * random.nextDouble();
+        }
 
         return [samples, pad, gain](double t) {
             const auto i = (long) ((t - pad) * musicRate);
@@ -2441,7 +2648,7 @@ public:
                     onLine(errorOutput);
                     return 1;
                 }
-                const auto outputTemplate = command[command.indexOf("-o") + 1];
+                const auto& outputTemplate = command[command.indexOf("-o") + 1];
                 const auto id = command[command.size() - 1].fromLastOccurrenceOf("v=", false, false);
                 const auto file = juce::File(outputTemplate).getParentDirectory().getChildFile(id + ".mp3");
                 file.replaceWithData(mp3.getData(), mp3.getSize());
@@ -2930,6 +3137,280 @@ public:
 };
 
 //==============================================================================
+class ConversionTests : public juce::UnitTest
+{
+public:
+    ConversionTests() : juce::UnitTest("Importar audios de WhatsApp, M4A y AAC", "RAAADIO") {}
+
+    // Un FFmpeg de mentira: escribe en el FLAC de destino un tono que depende del tamaño del
+    // original (como si lo hubiera decodificado) y cuenta las veces que corre.
+    struct FakeFfmpeg
+    {
+        juce::File exe;
+        int runs = 0;
+        int exitCode = 0;
+
+        AudioConverter::Services services()
+        {
+            return { [this] { return exe; },
+                     [this](const juce::StringArray& command, const ProcessRunner::LineCallback& onLine, const ProcessRunner::StopCheck&) {
+                         ++runs;
+                         if (exitCode != 0) {
+                             onLine("Invalid data found when processing input");
+                             return exitCode;
+                         }
+                         const juce::File source(command[command.indexOf("-i") + 1].fromFirstOccurrenceOf("file:", false, false));
+                         const juce::File target(command[command.size() - 1].fromFirstOccurrenceOf("file:", false, false));
+                         const double frequency = 300.0 + (double) (source.getSize() % 400);
+                         juce::FlacAudioFormat flac;
+                         writeAudio(flac, target, 4.0, [frequency](double t) { return tone(t, 0.4f, frequency); }, {}, 16);
+                         return 0;
+                     } };
+        }
+    };
+
+    // La primera página de un Ogg con Opus, como empiezan las notas de voz de WhatsApp.
+    static juce::File writeOggOpusHeader(const juce::File& file)
+    {
+        juce::MemoryOutputStream page;
+        page.write("OggS", 4);
+        const juce::uint8 header[22] = { 0, 2 };  // versión, primera página; el resto en cero
+        page.write(header, sizeof(header));
+        page.writeByte(1);    // un segmento
+        page.writeByte(19);   // de 19 bytes
+        page.write("OpusHead", 8);
+        const juce::uint8 opusHead[11] = { 1, 1 };
+        page.write(opusHead, sizeof(opusHead));
+        file.replaceWithData(page.getData(), page.getDataSize());
+        return file;
+    }
+
+    static void importAndWait(MusicLibrary& library, const juce::Array<juce::File>& files, const juce::String& category = {})
+    {
+        library.importFiles(files, category);
+        for (int i = 0; i < 600 && library.isImporting(); ++i) juce::Thread::sleep(20);
+    }
+
+    void runTest() override
+    {
+        beginTest("Se aceptan los formatos de WhatsApp, M4A y AAC; un video no");
+        {
+            LibraryFixture fx;
+            for (auto* name : { "PTT-20261022-WA0003.opus", "WhatsApp Audio.mpeg", "cancion.M4A", "audio.aac", "viejo.amr",
+                                "radio.mpga", "WhatsApp Ptt.ogg", "cancion.mp3" })
+                expect(fx.library.isImportable(fx.lab.root.getChildFile(name)), name);
+            expect(!fx.library.isImportable(fx.lab.root.getChildFile("video.mp4")));
+            expect(!fx.library.isImportable(fx.lab.root.getChildFile("notas.txt")));
+            const auto wildcard = fx.library.getSupportedFileWildcard();
+            for (auto* pattern : { "*.opus", "*.m4a", "*.aac", "*.mpeg", "*.ogg", "*.mp3" })
+                expect(wildcard.contains(pattern), wildcard);
+        }
+
+        beginTest("FFmpeg: el primer audio a FLAC con sus etiquetas, sin su versión, y nombres que no se confunden con opciones");
+        {
+            TempLab lab;
+            const auto ffmpeg = lab.root.getChildFile("ffmpeg.exe");
+            const auto source = lab.root.getChildFile("-raro: WhatsApp Ptt 2026.ogg");
+            const auto target = lab.root.getChildFile("salida.flac");
+            const auto args = AudioConverter::arguments(ffmpeg, source, target);
+            expectEquals(args[0], ffmpeg.getFullPathName());
+            expectEquals(args[args.indexOf("-i") + 1], "file:" + source.getFullPathName());
+            expectEquals(args[args.size() - 1], "file:" + target.getFullPathName());
+            expectEquals(args[args.indexOf("-map") + 1], juce::String("0:a:0"));
+            expect(args.contains("0:s:a:0"), "las etiquetas del Opus van en el audio");
+            expectEquals(args[args.indexOf("-c:a") + 1], juce::String("flac"));
+            expect(args.contains("+bitexact") && args.contains("-nostdin"));
+        }
+
+        beginTest("Un .mpeg de WhatsApp que es MP3 se guarda como .mp3, igual al original, sin FFmpeg");
+        {
+            LibraryFixture fx;
+            TempLab outside;
+            const auto audio = SongDownloadTests::encodeMp3(6.0);
+            expect(audio.getSize() > 1000, "LAME está junto a las pruebas");
+            const auto mpeg = outside.root.getChildFile("WhatsApp Audio 2026-10-22 at 10.15.22.mpeg");
+            mpeg.replaceWithData(audio.getData(), audio.getSize());
+            TagWriter::Tags tags;
+            tags.artist = "Diomedes Diaz";
+            tags.title = "Sin Ti";
+            expect(TagWriter::writeMp3(mpeg, tags));
+            expect(AudioConverter::looksLikeMp3(mpeg), "después de la etiqueta ID3 empieza el MP3");
+
+            expect(fx.library.processAndAddTrack(mpeg) == MusicLibrary::ImportResult::Added);
+            const auto tracks = fx.library.search("", "");
+            expectEquals((int) tracks.size(), 1);
+            const auto track = tracks.empty() ? TrackInfo {} : tracks.front();
+            const juce::File stored(juce::String::fromUTF8(track.path.c_str()));
+            expectEquals(stored.getFileName(), juce::String("WhatsApp Audio 2026-10-22 at 10.15.22.mp3"));
+            expect(stored.hasIdenticalContentTo(mpeg), "sin recodificar");
+            expectEquals(juce::String(track.fileHash), juce::SHA256(mpeg).toHexString());
+            expectEquals(juce::String::fromUTF8(track.artist.c_str()), juce::String("Diomedes Diaz"));
+            expectEquals(juce::String::fromUTF8(track.title.c_str()), juce::String("Sin Ti"));
+            expectWithinAbsoluteError(track.duration, 6.0, 0.1);
+
+            const auto video = outside.root.getChildFile("video.mpeg");
+            const juce::uint8 packHeader[] = { 0x00, 0x00, 0x01, 0xba, 0x44, 0x00, 0x04, 0x00, 0x04, 0x01, 0xff, 0xfb, 0x90, 0x00 };
+            video.replaceWithData(packHeader, sizeof(packHeader));
+            expect(!AudioConverter::looksLikeMp3(video), "un video MPEG no es un MP3");
+            expect(fx.library.processAndAddTrack(video) == MusicLibrary::ImportResult::NeedsFfmpeg);
+        }
+
+        beginTest("Las notas de voz de WhatsApp (Ogg con Opus) se distinguen de un Ogg Vorbis");
+        {
+            TempLab lab;
+            expect(AudioConverter::isOggOpus(writeOggOpusHeader(lab.root.getChildFile("WhatsApp Ptt.ogg"))));
+            juce::OggVorbisAudioFormat ogg;
+            const auto vorbis = writeAudio(ogg, lab.root.getChildFile("vorbis.ogg"), 1.0, toneBetween({ { 0.0, 1.0 } }), {}, 16, 1);
+            expect(!AudioConverter::isOggOpus(vorbis));
+            expect(!AudioConverter::isOggOpus(lab.touch("vacio.ogg")));
+        }
+
+        beginTest("Sin FFmpeg: lo que necesita conversión queda esperando; un archivo dañado falla");
+        {
+            LibraryFixture fx;
+            TempLab outside;
+            const auto opus = outside.root.getChildFile("PTT-20261022-WA0003.opus");
+            opus.replaceWithText("nota de voz");
+            expect(fx.library.processAndAddTrack(opus) == MusicLibrary::ImportResult::NeedsFfmpeg);
+            const auto ptt = writeOggOpusHeader(outside.root.getChildFile("WhatsApp Ptt 2026-10-22 at 10.15.22.ogg"));
+            expect(fx.library.processAndAddTrack(ptt) == MusicLibrary::ImportResult::NeedsFfmpeg);
+            const auto broken = outside.root.getChildFile("rota.wav");
+            broken.replaceWithText("no soy audio");
+            expect(fx.library.processAndAddTrack(broken) == MusicLibrary::ImportResult::Failed);
+            expect(fx.library.search("", "").empty());
+        }
+
+        beginTest("Con FFmpeg: se guarda como FLAC con el nombre original y la huella del FLAC");
+        {
+            LibraryFixture fx;
+            TempLab outside;
+            FakeFfmpeg ffmpeg;
+            ffmpeg.exe = outside.touch("ffmpeg/ffmpeg.exe");
+            fx.library.setConverter(ffmpeg.services());
+
+            const auto opus = outside.root.getChildFile("PTT-20261022-WA0003.opus");
+            opus.replaceWithText("nota de voz");
+            expect(fx.library.processAndAddTrack(opus) == MusicLibrary::ImportResult::Added);
+            expectEquals(ffmpeg.runs, 1);
+            const auto tracks = fx.library.search("", "");
+            expectEquals((int) tracks.size(), 1);
+            const auto track = tracks.empty() ? TrackInfo {} : tracks.front();
+            const juce::File stored(juce::String::fromUTF8(track.path.c_str()));
+            expectEquals(stored.getFileName(), juce::String("PTT-20261022-WA0003.flac"));
+            expect(stored.isAChildOf(fx.lab.root.getChildFile("Library/_Entrada")), "por revisar, como la música importada");
+            expectEquals(juce::String(track.fileHash), juce::SHA256(stored).toHexString(),
+                         "los respaldos verifican la copia con la huella del archivo guardado");
+            expectWithinAbsoluteError(track.duration, 4.0, 0.01);
+            expect(track.analysisVersion == TrackAnalyzer::version);
+
+            expect(fx.library.processAndAddTrack(opus) == MusicLibrary::ImportResult::Duplicate,
+                   "la misma conversión da el mismo FLAC");
+            expectEquals((int) fx.library.search("", "").size(), 1);
+
+            beginTest("Con FFmpeg: lo que FFmpeg no lee falla; un formato conocido que JUCE no lee se intenta");
+            ffmpeg.exitCode = 1;
+            const auto bad = outside.root.getChildFile("AUD-20261022-WA0001.m4a");
+            bad.replaceWithText("no soy un m4a");
+            expect(fx.library.processAndAddTrack(bad) == MusicLibrary::ImportResult::Failed);
+            expectEquals((int) fx.library.search("", "").size(), 1);
+
+            ffmpeg.exitCode = 0;
+            const auto mp2InWav = outside.root.getChildFile("CUNA FERRETERIA.wav");
+            mp2InWav.replaceWithText("un WAV con MP2 adentro, como los de las automatizaciones viejas");
+            const int before = ffmpeg.runs;
+            expect(fx.library.processAndAddTrack(mp2InWav) == MusicLibrary::ImportResult::Added);
+            expectEquals(ffmpeg.runs, before + 1);
+            expect(fx.lab.root.getChildFile("Library/_Entrada/0/CUNA FERRETERIA.flac").existsAsFile());
+        }
+
+        beginTest("Una carpeta sin FFmpeg: el resumen cuenta lo que espera y esos archivos se importan después");
+        {
+            LibraryFixture fx;
+            TempLab outside;
+            const auto folder = outside.root.getChildFile("WhatsApp");
+            writeWav(folder.getChildFile("cuna.wav"), 3.0, toneBetween({ { 0.0, 3.0 } }));
+            folder.getChildFile("PTT-20261022-WA0001.opus").replaceWithText("a");
+            folder.getChildFile("AUD-20261022-WA0002.m4a").replaceWithText("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            folder.getChildFile("foto.jpg").replaceWithText("no es audio");
+
+            const auto spots = fx.library.getSystemCategory(CategoryRole::Spots).name;
+            importAndWait(fx.library, { folder }, spots);
+            auto summary = fx.library.getLastImportSummary();
+            expectEquals(summary.added, 1);
+            expectEquals(summary.needFfmpeg, 2);
+            expectEquals(summary.failed, 0);
+            const auto waiting = fx.library.getFilesWaitingForFfmpeg();
+            expectEquals(waiting.files.size(), 2);
+            expectEquals(waiting.category, juce::String(spots));
+
+            FakeFfmpeg ffmpeg;
+            ffmpeg.exe = outside.touch("ffmpeg/ffmpeg.exe");
+            fx.library.setConverter(ffmpeg.services());
+            importAndWait(fx.library, waiting.files, waiting.category);
+            summary = fx.library.getLastImportSummary();
+            expectEquals(summary.added, 2);
+            expectEquals(summary.needFfmpeg, 0);
+            expect(fx.library.getFilesWaitingForFfmpeg().files.isEmpty());
+            expectEquals((int) fx.library.getTracksWithRole(CategoryRole::Spots).size(), 3);
+        }
+
+        // Con el FFmpeg de verdad, si está instalado (lo instala la descarga de canciones).
+        const auto tools = DownloadTools::find(DownloadTools::defaultFolder(), juce::SystemStats::getEnvironmentVariable("PATH", {}));
+        const auto ffmpeg = tools.ffmpegFolder == juce::File() ? juce::File() : tools.ffmpegFolder.getChildFile(DownloadTools::Paths::exe("ffmpeg"));
+        if (!ffmpeg.existsAsFile()) {
+            logMessage("FFmpeg no está instalado: se omite la conversión de verdad");
+            return;
+        }
+
+        beginTest("De verdad: una nota de voz en Opus y un M4A con etiquetas entran como FLAC");
+        {
+            LibraryFixture fx;
+            TempLab outside;
+            fx.library.setConverter({});
+            const auto wav = writeWav(outside.root.getChildFile("fuente.wav"), 5.0, toneBetween({ { 0.5, 5.0 } }));
+            auto encode = [&](const juce::File& target, const juce::StringArray& options) {
+                juce::StringArray command { ffmpeg.getFullPathName(), "-nostdin", "-loglevel", "error", "-y", "-i", wav.getFullPathName() };
+                command.addArray(options);
+                command.add(target.getFullPathName());
+                juce::String output;
+                const int code = ProcessRunner::run(command, [&output](const juce::String& l) { output << l << "\n"; }, {});
+                expect(code == 0 && target.existsAsFile(), output);
+                return target;
+            };
+            const auto ptt = encode(outside.root.getChildFile("WhatsApp Ptt 2026-10-22 at 10.15.22.ogg"),
+                                    { "-ac", "1", "-c:a", "libopus", "-b:a", "24k" });
+            const auto m4a = encode(outside.root.getChildFile("AUD-20261022-WA0007.m4a"),
+                                    { "-c:a", "aac", "-metadata", "artist=Joe Arroyo", "-metadata", utf8("title=La Rebelión") });
+            expect(AudioConverter::isOggOpus(ptt));
+
+            expect(fx.library.processAndAddTrack(ptt) == MusicLibrary::ImportResult::Added);
+            expect(fx.library.processAndAddTrack(m4a) == MusicLibrary::ImportResult::Added);
+            expect(fx.library.processAndAddTrack(ptt) == MusicLibrary::ImportResult::Duplicate, "FFmpeg da siempre el mismo FLAC");
+
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            for (const auto& track : fx.library.search("", "")) {
+                const juce::File stored(juce::String::fromUTF8(track.path.c_str()));
+                expect(stored.hasFileExtension(".flac"), stored.getFileName());
+                std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(stored));
+                expect(reader != nullptr && reader->getFormatName() == "FLAC file" && reader->bitsPerSample == 16);
+                expectWithinAbsoluteError(track.duration, 5.0, 0.05);
+                expectWithinAbsoluteError(track.cueIn, 0.5, 0.05);
+                if (stored.getFileNameWithoutExtension() == "AUD-20261022-WA0007") {
+                    expectEquals(juce::String::fromUTF8(track.artist.c_str()), juce::String("Joe Arroyo"));
+                    expectEquals(juce::String::fromUTF8(track.title.c_str()), utf8("La Rebelión"));
+                    expectEquals((int) reader->numChannels, 2);
+                } else {
+                    expectEquals((int) reader->numChannels, 1);
+                    expectEquals(reader->sampleRate, 48000.0);
+                }
+            }
+            expectEquals((int) fx.library.search("", "").size(), 2);
+        }
+    }
+};
+
+//==============================================================================
 class DeckCueTests : public juce::UnitTest
 {
 public:
@@ -2948,8 +3429,8 @@ public:
         mixer.prepareToPlay(512, 44100.0);
         expect(!deck.isLoaded() && !deck.hasFinished(), "un deck vacío no ha terminado nada (y no se cae al preguntarle)");
 
-        auto import = [&](const juce::String& name, double seconds, Signal signal) {
-            const auto file = writeWav(outside.root.getChildFile(name + ".wav"), seconds, std::move(signal));
+        auto import = [&](const juce::String& name, double seconds, const Signal& signal) {
+            const auto file = writeWav(outside.root.getChildFile(name + ".wav"), seconds, signal);
             fx.library.processAndAddTrack(file);
             return juce::File(fx.library.search(name.fromFirstOccurrenceOf(" - ", false, false), "").front().path);
         };
@@ -2964,13 +3445,68 @@ public:
 
             deck.setPosition(11.0);
             deck.play();
-            expect(!deck.isReadyToMix());
-            pump(mixer, 1.0, { &deck });
-            expect(deck.isReadyToMix(), "la siguiente entra 3.5 s antes del punto de salida");
+            expectWithinAbsoluteError(deck.getMixPoint(), deck.getEndPosition(), 1e-9,
+                                      "termina en seco: no hay final que se desvanezca");
+            pump(mixer, 3.0, { &deck });
+            expect(!deck.isReadyToMix(), "la siguiente no entra antes del punto de salida");
             expect(!deck.hasFinished());
-            pump(mixer, 3.2, { &deck });
-            expect(deck.hasFinished(), "al llegar al punto de salida termina, sin esperar el silencio final");
+            pump(mixer, 1.2, { &deck });
+            expect(deck.isReadyToMix() && deck.hasFinished(), "al llegar al punto de salida termina, sin esperar el silencio final");
             deck.unload();
+        }
+
+        auto toSystemCategory = [&](const juce::File& file, CategoryRole role) {
+            const auto track = fx.library.getTrackByPath(file.getFullPathName());
+            fx.library.getDatabase().addTrackCategory(track.id, fx.library.getSystemCategory(role).id);
+        };
+
+        beginTest("Una canción con final largo: la siguiente entra cuando el fundido ya bajó y lo que queda se desvanece");
+        {
+            // Fundido desde los 20 s: baja 18 dB de su sonoridad poco después de los 22.5 s y
+            // llega a -50 dBFS a los 26.6 s.
+            const auto file = import("PRUEBA - FINAL LARGO", 30.0, toneWithFadeOut(20.0));
+            deck.loadTrack(file);
+            const double mix = deck.getMixPoint();
+            expect(mix > 22.3 && mix < 22.9, "punto de mezcla: " + juce::String(mix, 3));
+            expectWithinAbsoluteError(deck.getEndPosition(), 26.6, 0.1);
+
+            deck.setPosition(mix - 0.5);
+            deck.play();
+            pump(mixer, 0.3, { &deck });
+            expect(!deck.isReadyToMix());
+            pump(mixer, 0.4, { &deck });
+            expect(deck.isReadyToMix(), "llegó al punto de mezcla");
+
+            deck.startMixFade();  // lo que hace AutoDJ al poner la siguiente
+            expect(deck.isFadingOut());
+            pump(mixer, 1.5, { &deck });
+            expect(!deck.hasFinished(), "a mitad del fundido todavía se oye");
+            pump(mixer, 1.6, { &deck });
+            expect(deck.hasFinished(), "el fundido de 3 s terminó antes del punto de salida");
+            expect(deck.getCurrentPosition() < deck.getEndPosition());
+            deck.unload();
+
+            toSystemCategory(file, CategoryRole::Sweepers);
+            deck.loadTrack(file);
+            expectWithinAbsoluteError(deck.getMixPoint(), deck.getEndPosition(), 1e-9,
+                                      "un separador se oye entero: la siguiente entra en su punto de salida");
+            deck.unload();
+        }
+
+        beginTest("Las identificaciones, cuñas y separadores se oyen enteros, aunque terminen con la voz más suave");
+        {
+            const auto file = import("PRUEBA - VOZ", 15.0, voiceWithHum);
+            deck.loadTrack(file);
+            expect(deck.getMixPoint() >= 12.3 && deck.getMixPoint() < deck.getEndPosition() - 2.0,
+                   "en una categoría de música, la siguiente entra después de la última palabra, sin esperar el zumbido");
+            deck.unload();
+
+            for (auto role : { CategoryRole::StationIds, CategoryRole::Spots }) {
+                toSystemCategory(file, role);
+                deck.loadTrack(file);
+                expectWithinAbsoluteError(deck.getMixPoint(), deck.getEndPosition(), 1e-9);
+                deck.unload();
+            }
         }
 
         beginTest("Una pausa intencional al final de la canción ya no la corta");
@@ -3283,6 +3819,7 @@ public:
             LibraryFixture fx;
             auto& lib = fx.library;
             std::vector<TrackInfo> songs;
+            songs.reserve(8);
             for (int i = 0; i < 8; ++i) songs.push_back(fx.add("Library/M/" + juce::String(i) + ".wav", "TEMA " + juce::String(i)));
             juce::File(juce::String::fromUTF8(songs[7].path.c_str())).deleteFile();  // a esta le falta el archivo
 
@@ -3521,14 +4058,24 @@ public:
 
     void runTest() override
     {
-        beginTest("La siguiente pista entra 3.5 s antes del punto de salida; las cortas terminan antes");
+        beginTest("La siguiente pista entra en el punto de mezcla de la música; lo demás se oye entero");
         {
-            expectWithinAbsoluteError(QueueTiming::secondsUntilNext(song(1, "A", "A", 200.0)), 196.5, 1e-9);
-            expectWithinAbsoluteError(QueueTiming::secondsUntilNext(song(2, "ID", "ID", 8.0)), 8.0, 1e-9);
+            expectWithinAbsoluteError(QueueTiming::secondsUntilNext(song(1, "A", "A", 200.0)), 200.0, 1e-9,
+                                      "sin análisis no se adelanta");
             auto trimmed = song(3, "B", "B", 200.0);
             trimmed.cueIn = 1.0;
             trimmed.cueOut = 191.0;
-            expectWithinAbsoluteError(QueueTiming::secondsUntilNext(trimmed), 186.5, 1e-9, "cuenta de entrada a salida");
+            trimmed.mixPoint = 186.0;
+            expectWithinAbsoluteError(QueueTiming::secondsUntilNext(trimmed), 185.0, 1e-9, "cuenta de entrada a mezcla");
+
+            auto spot = trimmed;
+            spot.systemRole = CategoryRole::Spots;
+            expectWithinAbsoluteError(QueueTiming::secondsUntilNext(spot), 190.0, 1e-9, "una cuña, hasta su punto de salida");
+
+            auto shortTrack = song(2, "ID", "ID", 8.0);
+            shortTrack.cueOut = 8.0;
+            shortTrack.mixPoint = 6.0;
+            expectWithinAbsoluteError(QueueTiming::secondsUntilNext(shortTrack), 8.0, 1e-9, "lo corto, también");
         }
 
         beginTest("Una tanda se inserta donde empieza más cerca de su hora");
@@ -3536,7 +4083,7 @@ public:
             const std::vector<TrackInfo> queue = { song(1, "A", "A", 180.0), song(2, "B", "B", 180.0), song(3, "C", "C", 180.0) };
             const auto offsets = QueueTiming::startOffsets(queue);
             expectEquals((int) offsets.size(), 3);
-            expectWithinAbsoluteError(offsets[2], 353.0, 1e-9);
+            expectWithinAbsoluteError(offsets[2], 360.0, 1e-9);
 
             const juce::Time start(2026, 8, 22, 12, 0, 0, 0, true);
             auto at = [&](double seconds) { return start + juce::RelativeTime(seconds); };
@@ -3606,6 +4153,7 @@ public:
 
             Playlist playlist;
             std::vector<TrackInfo> queue;
+            queue.reserve(10);
             for (int i = 0; i < 10; ++i) queue.push_back(song(1000 + i, "A" + juce::String(i), "T", 180.0));
             playlist.insertTracks(queue, 0);
 
@@ -3624,8 +4172,8 @@ public:
                 scheduler.checkNow(now);
                 const auto withBreak = playlist.getQueue();
                 expectEquals((int) withBreak.size(), (int) queue.size() + 1);
-                // Nada suena: la cola empieza ya; cada pista abre 176.5 s después de la anterior,
-                // así que la posición 3 (a las 11:58:49) es la más cercana a las 12:00.
+                // Nada suena: la cola empieza ya; cada pista abre 180 s después de la anterior,
+                // así que la posición 3 (a las 11:59:00) es la más cercana a las 12:00.
                 expectEquals(withBreak[3].id, ad.id);
 
                 scheduler.checkNow(now + juce::RelativeTime::minutes(1));
@@ -3648,6 +4196,7 @@ public:
 
             Playlist playlist;
             std::vector<TrackInfo> queue;
+            queue.reserve(10);
             for (int i = 0; i < 10; ++i) queue.push_back(song(1000 + i, "A" + juce::String(i), "T", 180.0));
             playlist.insertTracks(queue, 0);
 
@@ -3768,6 +4317,166 @@ public:
             expect(!OnAir::playNow(a, b, outside.root.getChildFile("NO EXISTE.wav")));
             expect(loaded(a, third) && OnAir::isOnAir(a));
             expect(!b.isLoaded());
+        }
+
+        beginTest("Con A al aire y B en preescucha, reproducir ahora toma B y A baja con el fundido");
+        {
+            b.loadTrack(first);
+            b.setRouting(false, true);  // solo CUE
+            b.play();
+            expect(OnAir::playNow(a, b, second));
+            expect(loaded(b, second) && OnAir::isOnAir(b), "la pista nueva entra en el deck de la preescucha");
+            expect(loaded(a, third) && a.isPlaying(), "A no se corta en seco");
+            pump(mixer, 2.2, { &a, &b });
+            expect(a.hasFinished());
+            a.unload();
+        }
+
+        beginTest("En plena mezcla (los dos al aire), reproducir ahora reemplaza al que arrancó antes");
+        {
+            a.loadTrack(first);
+            a.setRouting(true, false);
+            juce::Thread::sleep(20);  // B arrancó antes: es el que ya se está yendo
+            a.play();
+            expect(OnAir::isOnAir(a) && OnAir::isOnAir(b));
+            expect(OnAir::playNow(a, b, third));
+            expect(loaded(b, third) && OnAir::isOnAir(b), "entra en B");
+            expect(loaded(a, first) && a.isPlaying(), "A sigue sonando y se despide con el fundido");
+            pump(mixer, 2.2, { &a, &b });
+            expect(a.hasFinished());
+            expect(OnAir::nowPlaying(a, b) == &b);
+            a.unload();
+        }
+
+        auto trackOf = [](const juce::File& f) {
+            TrackInfo t;
+            t.path = f.getFullPathName().toStdString();
+            t.artist = "ARTISTA";
+            t.title = "TITULO";
+            return t;
+        };
+
+        beginTest("Desde la cola, con algo al aire, primero pregunta: cancelar no cambia nada y aceptar la pone");
+        {
+            int started = 0;
+            OnAir::requestPlayNow(a, b, trackOf(first), [&] { ++started; return true; });
+            expect(!a.isLoaded(), "mientras se pregunta no se toca nada");
+            expect(answerModal(0), "se cancela");
+            expect(started == 0 && !a.isLoaded() && OnAir::isOnAir(b));
+
+            OnAir::requestPlayNow(a, b, trackOf(first), [&] { ++started; return true; });
+            expect(answerModal(1), "se acepta");
+            expect(started == 1 && loaded(a, first) && OnAir::isOnAir(a));
+            pump(mixer, 2.2, { &a, &b });
+            b.unload();
+        }
+
+        beginTest("Si mientras preguntaba la pista ya salió de la cola, aceptar no la pone; si no se puede leer, avisa");
+        {
+            OnAir::requestPlayNow(a, b, trackOf(second), [] { return false; });
+            expect(answerModal(1));
+            expect(!b.isLoaded() && loaded(a, first), "la cola cambió: no se pone");
+
+            OnAir::requestPlayNow(a, b, trackOf(outside.root.getChildFile("ROTA.wav")), {});
+            expect(answerModal(1), "pregunta");
+            expect(answerModal(1), "y avisa que no se pudo poner");
+            expect(loaded(a, first) && OnAir::isOnAir(a), "lo que estaba al aire sigue");
+        }
+
+        beginTest("Sin nada al aire, reproducir ahora no pregunta");
+        {
+            a.stop();
+            a.unload();
+            OnAir::requestPlayNow(a, b, trackOf(second), {});
+            expect(juce::Component::getCurrentlyModalComponent() == nullptr);
+            expect(loaded(a, second) && OnAir::isOnAir(a));
+            a.stop();
+            a.unload();
+        }
+    }
+};
+
+//==============================================================================
+class AutoMixTests : public juce::UnitTest
+{
+public:
+    AutoMixTests() : juce::UnitTest("Encadenado de AutoDJ", "RAAADIO") {}
+
+    void runTest() override
+    {
+        LibraryFixture fx;
+        TempLab outside;
+        auto import = [&](const juce::String& name, double seconds, const Signal& signal, CategoryRole role) {
+            const auto file = writeWav(outside.root.getChildFile(name + ".wav"), seconds, signal);
+            fx.library.processAndAddTrack(file);
+            const auto track = fx.library.search(name.fromFirstOccurrenceOf(" - ", false, false), "").front();
+            if (role != CategoryRole::None)
+                fx.library.getDatabase().addTrackCategory(track.id, fx.library.getSystemCategory(role).id);
+            return fx.library.getTrackById(track.id);
+        };
+        const auto music = import("PRUEBA - CANCION", 30.0, toneWithFadeOut(20.0), CategoryRole::None);
+        const auto sweeper = import("PRUEBA - SEPARADOR", 15.0, voiceWithHum, CategoryRole::Sweepers);
+        const auto stationId = import("PRUEBA - ID", 2.0, toneBetween({ { 0.0, 2.0 } }), CategoryRole::StationIds);
+        const auto next = import("PRUEBA - SIGUIENTE", 30.0, toneBetween({ { 0.0, 30.0 } }), CategoryRole::None);
+
+        AudioEngine engine(fx.library, false);
+        auto& mixer = engine.getMixer();
+        mixer.prepareToPlay(512, 44100.0);
+        auto& a = engine.getDeck(0);
+        auto& b = engine.getDeck(1);
+        Playlist playlist;
+        AutoDJ autoDJ(engine, playlist);
+
+        auto playing = [](const Deck& d, const TrackInfo& t) { return d.isPlaying() && d.getCurrentTrack().id == t.id; };
+        // Como el temporizador de AutoDJ: una revisión cada ~46 ms de audio.
+        auto run = [&](double seconds) {
+            const double tick = 4 * 512 / 44100.0;
+            for (int i = 0; i * tick < seconds; ++i) {
+                pump(mixer, tick + 1.0e-9, { &a, &b });
+                autoDJ.timerCallback();
+            }
+        };
+
+        beginTest("Una canción con final largo: lo siguiente entra en su punto de mezcla y ella se desvanece");
+        {
+            playlist.insertTracks({ music, sweeper, next }, 0);
+            expect(autoDJ.resumePlayback());
+            expect(playing(a, music));
+            a.setPosition(a.getMixPoint() - 0.3);
+            run(0.2);
+            expect(!b.isPlaying(), "todavía no");
+            run(0.3);
+            expect(playing(b, sweeper), "el separador entra en el punto de mezcla");
+            expect(a.isPlaying() && a.isFadingOut(), "la canción no se corta: se desvanece");
+            run(3.2);
+            expect(!a.isLoaded(), "terminado el fundido, AutoDJ la descarga");
+        }
+
+        beginTest("Un separador se oye entero: lo siguiente no entra mientras habla");
+        {
+            b.setPosition(12.0);  // la última palabra, más suave, va de 12.0 a 12.3 s; el zumbido, hasta 15 s
+            run(2.5);
+            expect(playing(b, sweeper) && !a.isPlaying(), "ni durante el zumbido del final");
+            run(0.7);
+            expect(playing(a, next), "al terminar el separador entra la siguiente");
+            expect(!b.isLoaded());
+        }
+
+        beginTest("Una identificación más corta que el fundido de la canción anterior: lo siguiente no espera al fundido");
+        {
+            a.unload();
+            playlist.clear();
+            playlist.insertTracks({ music, stationId, next }, 0);
+            expect(autoDJ.resumePlayback());
+            expect(playing(a, music));
+            a.setPosition(a.getMixPoint() - 0.1);
+            run(0.3);
+            expect(playing(b, stationId) && a.isFadingOut());
+            run(2.3);
+            expect(playing(b, next), "la identificación terminó: entra la siguiente en el mismo deck");
+            expect(a.isFadingOut(), "mientras la canción todavía se desvanece");
+            run(1.0);
+            expect(!a.isLoaded() && playing(b, next));
         }
     }
 };
@@ -3891,6 +4600,23 @@ public:
             expect(PersistenceManager::findLatestVerifiedBackup(station.backups()) == second);
         }
 
+        beginTest("Exportar la emisora a otra carpeta deja una copia verificada; si falla, no queda nada a medias");
+        {
+            Station station;
+            station.addTrack("A");
+            TempLab outside;
+
+            juce::File exported;
+            expect(PersistenceManager::exportPersistence(outside.root, station.snapshot(), &exported).wasOk());
+            expect(exported.isAChildOf(outside.root) && exported.getFileName().startsWith("RAAADIO_Export_"));
+            expect(PersistenceManager::verifyBackup(exported).wasOk());
+            expect(titlesIn(exported.getChildFile("raaadio.db")) == juce::StringArray { "A" });
+
+            expect(PersistenceManager::exportPersistence(outside.root, {}, nullptr).failed(), "sin copia de la base no se exporta");
+            expectEquals(outside.root.getNumberOfChildFiles(juce::File::findDirectories), 1, "y la carpeta a medias se borra");
+            expect(PersistenceManager::exportPersistence(outside.root.getChildFile("NO EXISTE"), station.snapshot(), nullptr).failed());
+        }
+
         beginTest("Retención escalonada: todos los días de dos semanas, un respaldo por semana y uno por mes");
         {
             const juce::Time now(2026, 8, 23, 12, 0, 0, 0, true);
@@ -3899,6 +4625,7 @@ public:
                 return juce::Time(d.getYear(), d.getMonth(), d.getDayOfMonth(), 3, 0, 0, 0, true);
             };
             std::vector<juce::Time> times;
+            times.reserve(400);
             for (int d = 0; d < 400; ++d) times.push_back(dayAt(d));  // uno por día, del más reciente al más viejo
             std::set<size_t> pruned;
             for (auto i : PersistenceManager::backupsToPrune(times, now)) pruned.insert(i);
@@ -4233,6 +4960,35 @@ public:
 
     void runTest() override
     {
+        beginTest("Una grabación queda en un WAV de su carpeta del día, con todo lo que entró mientras grababa");
+        {
+            TempLab lab;
+            PersistenceManager::setLabRootOverride(lab.root);  // el grabador crea su carpeta al construirse
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            RecordingManager recorder;
+            recorder.initialise(formats);
+            recorder.setRecordingsFolder(lab.root.getChildFile("Grabaciones"));
+            recorder.prepare(44100.0);
+
+            expect(recorder.startRecording(true, false).isEmpty());
+            expect(recorder.getState() == RecordingManager::Recording);
+            juce::AudioBuffer<float> block(2, 4410);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < block.getNumSamples(); ++i)
+                    block.setSample(ch, i, 0.25f * std::sin(juce::MathConstants<float>::twoPi * 440.0f * (float) i / 44100.0f));
+            for (int n = 0; n < 10; ++n) recorder.pushBlock(block, 0, block.getNumSamples());  // 1 s
+            expectEquals(recorder.getDurationString(), juce::String("00:00:01"));
+            recorder.stopRecording();
+            expect(recorder.getState() == RecordingManager::Idle);
+
+            const auto file = recorder.getLastRecording();
+            expect(file.existsAsFile() && file.isAChildOf(lab.root.getChildFile("Grabaciones")));
+            std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(file));
+            expect(reader != nullptr);
+            if (reader != nullptr) expectEquals((int) reader->lengthInSamples, 44100, "no se pierde ninguna muestra");
+        }
+
         beginTest("Un archivo por hora, sin cortar el audio al cambiar de hora");
         {
             TempLab lab;
@@ -5417,7 +6173,8 @@ public:
             expect(!lock.otherOwner(now).has_value(), "el de este equipo (quedó de un cierre inesperado)");
 
             lock.acquire();
-            expect(StationLock::parse(lab.root.getChildFile("raaadio.lock").loadFileAsString())->computer == StationLock::thisComputer());
+            const auto owner = StationLock::parse(lab.root.getChildFile("raaadio.lock").loadFileAsString());
+            expect(owner.has_value() && owner->computer == StationLock::thisComputer());
             lock.release();
             expect(!lab.root.getChildFile("raaadio.lock").exists(), "al cerrar se libera");
             expect(!StationLock::parse("basura").has_value());
@@ -5469,6 +6226,1960 @@ public:
 };
 
 //==============================================================================
+class PreviewTests : public juce::UnitTest
+{
+public:
+    PreviewTests() : juce::UnitTest("Preescucha de la revisión", "RAAADIO") {}
+
+    void runTest() override
+    {
+        TempLab lab;
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        const auto file = writeWav(lab.root.getChildFile("PREESCUCHA.wav"), 9.0, [this](double t) { return tone(t, 0.3f, 440.0); });
+
+        beginTest("Suena desde el primer tercio de lo que sale al aire y se detiene");
+        {
+            PreviewPlayer preview(formats);
+            preview.prepareToPlay(512, 44100.0);
+            TrackInfo track;
+            track.id = 7;
+            track.path = file.getFullPathName().toStdString();
+            track.cueIn = 0.0;
+            track.cueOut = 6.0;
+            track.normalizationGain = 0.5;
+            expect(preview.play(track));
+            expect(preview.isPlaying());
+            expectEquals(preview.getTrackId(), 7);
+
+            juce::AudioBuffer<float> out(2, 512);
+            float peak = 0.0f;
+            pumpMessagesUntil([&] {
+                out.clear();
+                juce::AudioSourceChannelInfo info(&out, 0, 512);
+                preview.getNextAudioBlock(info);
+                peak = juce::jmax(peak, out.getMagnitude(0, 512));
+                return peak > 0.05f;
+            }, 5000);
+            expect(peak > 0.05f && peak < 0.2f, "suena con la ganancia de la pista (0,3 × 0,5)");
+
+            preview.stop();
+            expect(!preview.isPlaying());
+            expectEquals(preview.getTrackId(), -1);
+            preview.releaseResources();
+        }
+
+        beginTest("Un archivo que no es audio no suena");
+        {
+            PreviewPlayer preview(formats);
+            TrackInfo track;
+            track.path = lab.touch("NO ES AUDIO.wav").getFullPathName().toStdString();
+            expect(!preview.play(track));
+            expect(!preview.isPlaying());
+        }
+    }
+};
+
+//==============================================================================
+class HttpTransportTests : public juce::UnitTest
+{
+public:
+    HttpTransportTests() : juce::UnitTest("Pedidos HTTP de verdad, contra un servidor local", "RAAADIO") {}
+
+    void runTest() override
+    {
+        LocalHttpServer server([](const juce::String& method, const juce::String& path, const juce::String& body) {
+            if (path == "/hola") return httpResponse(200, "hola");
+            if (path == "/eco") return httpResponse(200, method + ":" + body);
+            if (path == "/archivo") return httpResponse(200, juce::String::repeatedString("x", 200000));
+            if (path == "/cortado") return httpResponse(200, "abc", 1000);
+            return httpResponse(404, "no existe");
+        });
+
+        beginTest("GET y POST traen el estado y el cuerpo; un pedido binario trae los datos");
+        {
+            HttpTransport::Request get;
+            get.url = server.url("/hola");
+            auto response = HttpTransport::send(get);
+            expectEquals(response.status, 200);
+            expectEquals(response.body, juce::String("hola"));
+
+            HttpTransport::Request post;
+            post.url = server.url("/eco");
+            post.body = "{\"a\":1}";
+            post.headers = "Content-Type: application/json";
+            expectEquals(HttpTransport::send(post).body, juce::String("POST:{\"a\":1}"));
+
+            HttpTransport::Request binary;
+            binary.url = server.url("/hola");
+            binary.binary = true;
+            expectEquals((int) HttpTransport::send(binary).data.getSize(), 4);
+
+            HttpTransport::Request missing;
+            missing.url = server.url("/nada");
+            expectEquals(HttpTransport::send(missing).status, 404);
+
+            HttpTransport::Request nobody;
+            nobody.url = "http://127.0.0.1:1/x";
+            expectEquals(HttpTransport::send(nobody).status, 0, "sin servidor no hay respuesta");
+        }
+
+        beginTest("Bajar un archivo: llega completo con su avance; si se corta, se cancela o no existe, no queda nada");
+        {
+            TempLab lab;
+            const auto target = lab.root.getChildFile("bajado/archivo.bin");
+            int calls = 0;
+            expect(HttpTransport::downloadToFile(server.url("/archivo"), target, [&calls](double) { ++calls; return true; }));
+            expectEquals(target.getSize(), (juce::int64) 200000);
+            expect(calls > 0 && !target.getSiblingFile("archivo.bin.part").exists());
+
+            const auto cancelled = lab.root.getChildFile("cancelado.bin");
+            expect(!HttpTransport::downloadToFile(server.url("/archivo"), cancelled, [](double) { return false; }));
+            expect(!cancelled.exists() && !cancelled.getSiblingFile("cancelado.bin.part").exists());
+
+            const auto cut = lab.root.getChildFile("cortado.bin");
+            expect(!HttpTransport::downloadToFile(server.url("/cortado"), cut, {}));
+            expect(!cut.exists() && !cut.getSiblingFile("cortado.bin.part").exists());
+
+            expect(!HttpTransport::downloadToFile(server.url("/nada"), lab.root.getChildFile("nada.bin"), {}));
+        }
+    }
+};
+
+//==============================================================================
+class DeadAirGuardTests : public juce::UnitTest
+{
+public:
+    DeadAirGuardTests() : juce::UnitTest("Protección contra silencio, funcionando", "RAAADIO") {}
+
+    // Hace sonar el mezclador y deja correr los temporizadores hasta que done().
+    bool runUntil(Mixer& mixer, std::initializer_list<Deck*> decks, const std::function<bool()>& done, int timeoutMs = 8000)
+    {
+        return pumpMessagesUntil([&] { pump(mixer, 0.05, decks); return done(); }, timeoutMs);
+    }
+
+    TrackInfo addSong(LibraryFixture& fx, const juce::String& name, int categoryId)
+    {
+        const auto file = writeWav(fx.lab.root.getChildFile("Library/M/" + name + ".wav"), 20.0,
+                                   [this](double t) { return tone(t, 0.3f, 523.0); });
+        fx.library.getDatabase().addTrack(makeTrack(file.getFullPathName(), "ARTISTA " + name, name));
+        const auto track = fx.library.getTrackByPath(file.getFullPathName());
+        if (categoryId >= 0) fx.library.getDatabase().addTrackCategory(track.id, categoryId);
+        return track;
+    }
+
+    static int categoryIdOf(MusicLibrary& library, const juce::String& name)
+    {
+        library.addCategory(name);
+        for (const auto& c : library.getCategories())
+            if (juce::String(c.name) == name) return c.id;
+        return -1;
+    }
+
+    void runTest() override
+    {
+        beginTest("Antes de que algo salga al aire no hace nada; en manual solo avisa; apagada no avisa");
+        {
+            LibraryFixture fx;
+            AudioEngine engine(fx.library, false);
+            auto& mixer = engine.getMixer();
+            mixer.prepareToPlay(512, 44100.0);
+            auto& a = engine.getDeck(0);
+            auto& b = engine.getDeck(1);
+            Playlist playlist;
+            AutoDJ autoDJ(engine, playlist);
+            DeadAirGuard guard(engine, autoDJ, playlist, fx.library);
+            guard.setThresholdSeconds(0.3);
+
+            runUntil(mixer, {}, [] { return false; }, 1200);
+            expect(!guard.isAlarmActive(), "sin haber salido nada al aire, el silencio es el de una emisora recién abierta");
+
+            const auto silence = writeWav(fx.lab.root.getChildFile("SILENCIO.wav"), 30.0, [](double) { return 0.0f; });
+            a.loadTrack(silence);
+            a.setRouting(true, false);
+            a.play();
+            autoDJ.setEnabled(false);
+            expect(runUntil(mixer, { &a, &b }, [&] { return guard.isAlarmActive(); }), "en manual, el silencio solo se avisa");
+            expect(a.isPlaying(), "y no se toca nada");
+
+            guard.setEnabled(false);
+            expect(!guard.isAlarmActive());
+            a.stop();
+        }
+
+        beginTest("En automático salta una pista que es silencio, reanuda la cola y si está vacía pone música de emergencia");
+        {
+            LibraryFixture fx;
+            const int emergency = categoryIdOf(fx.library, "EMERGENCIA");
+            const auto rescue = addSong(fx, "RESCATE", emergency);
+
+            AudioEngine engine(fx.library, false);
+            auto& mixer = engine.getMixer();
+            mixer.prepareToPlay(512, 44100.0);
+            auto& a = engine.getDeck(0);
+            auto& b = engine.getDeck(1);
+            Playlist playlist;
+            AutoDJ autoDJ(engine, playlist);
+            autoDJ.setEnabled(true);
+            DeadAirGuard guard(engine, autoDJ, playlist, fx.library);
+            guard.setThresholdSeconds(0.3);
+            guard.setEmergencyCategory("emergencia");
+
+            const auto silence = writeWav(fx.lab.root.getChildFile("SILENCIO.wav"), 30.0, [](double) { return 0.0f; });
+            // Al terminar el salto, la misma vuelta de mensajes puede rellenar la cola y poner
+            // la música en ese mismo deck: lo que cuenta es que ya no suene la pista muda.
+            auto music = [&](Deck& d) {
+                return d.isPlaying() && juce::File(juce::String(d.getCurrentTrack().path)) != silence;
+            };
+            a.loadTrack(silence);
+            a.setRouting(true, false);
+            a.play();
+            expect(runUntil(mixer, { &a, &b }, [&] { return !a.isPlaying() || music(a); }), "la pista muda se salta");
+
+            expect(runUntil(mixer, { &a, &b }, [&] { return music(a) || music(b); }),
+                   "con la cola vacía entra la música de emergencia");
+            const auto& playing = music(a) ? a : b;
+            expectEquals(juce::String(playing.getCurrentTrack().title), juce::String(rescue.title));
+        }
+
+        beginTest("Sin música en la categoría de emergencia, usa la de toda la biblioteca");
+        {
+            LibraryFixture fx;
+            categoryIdOf(fx.library, "EMERGENCIA");  // existe, pero está vacía
+            const auto any = addSong(fx, "CUALQUIERA", -1);
+
+            AudioEngine engine(fx.library, false);
+            auto& mixer = engine.getMixer();
+            mixer.prepareToPlay(512, 44100.0);
+            auto& a = engine.getDeck(0);
+            auto& b = engine.getDeck(1);
+            Playlist playlist;
+            AutoDJ autoDJ(engine, playlist);
+            autoDJ.setEnabled(true);
+            DeadAirGuard guard(engine, autoDJ, playlist, fx.library);
+            guard.setThresholdSeconds(0.3);
+
+            const auto silence = writeWav(fx.lab.root.getChildFile("SILENCIO.wav"), 30.0, [](double) { return 0.0f; });
+            auto music = [&](Deck& d) {
+                return d.isPlaying() && juce::File(juce::String(d.getCurrentTrack().path)) != silence;
+            };
+            b.loadTrack(silence);
+            b.setRouting(true, false);
+            b.play();
+            expect(runUntil(mixer, { &a, &b }, [&] { return !b.isPlaying() || music(b); }), "también en el deck B");
+            expect(runUntil(mixer, { &a, &b }, [&] { return music(a) || music(b); }));
+            const auto& playing = music(a) ? a : b;
+            expectEquals(juce::String(playing.getCurrentTrack().title), juce::String(any.title));
+        }
+    }
+};
+
+//==============================================================================
+// Interfaz. Se construye y se dibuja sin ventana, igual que el modo --ui-snapshot, con el
+// aspecto de la aplicación (RaaadioLookAndFeel). Nunca guarda el idioma ni el tema del
+// usuario: setLanguage y setTheme se llaman sin persistir y el estado global se restaura.
+
+struct UiEnvironment
+{
+    UiEnvironment(const juce::String& language = "es", bool dark = true)
+    {
+        LanguageManager::getInstance().setLanguage(language, false);
+        ThemeManager::getInstance().setTheme(dark ? ThemeManager::Theme::Dark : ThemeManager::Theme::Light, false);
+        juce::LookAndFeel::setDefaultLookAndFeel(&lookAndFeel);
+    }
+    ~UiEnvironment()
+    {
+        juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
+        juce::LocalisedStrings::setCurrentMappings(nullptr);  // las demás pruebas comparan claves
+    }
+    RaaadioLookAndFeel lookAndFeel;
+};
+
+// Para operar la interfaz como un usuario: buscar controles por su texto (la clave de
+// TRANS, con o sin su "%1"), pulsarlos, hacer clic, elegir opciones de un menú y contestar
+// diálogos.
+namespace ui
+{
+    // Lo que la interfaz quiso abrir o copiar fuera de RAAADIO ("acción:destino").
+    juce::StringArray& externalActions()
+    {
+        static juce::StringArray actions;
+        return actions;
+    }
+
+    // Los diálogos de archivos contestan "Cancelar".
+    void cancelFileChoosers()
+    {
+        FileChoosers::setHandler([](FileChoosers::Kind, const juce::String&,
+                                    const std::function<void(const juce::Array<juce::File>&)>& onChosen) { onChosen({}); });
+    }
+
+    template <typename T>
+    T* find(juce::Component& root, const std::function<bool(T&)>& matches = {})
+    {
+        for (auto* child : root.getChildren())
+        {
+            if (child == nullptr) continue;
+            if (auto* c = dynamic_cast<T*>(child))
+                if (!matches || matches(*c)) return c;
+            if (auto* found = find<T>(*child, matches)) return found;
+        }
+        return nullptr;
+    }
+
+    // Pulsar un control puede rehacer la pantalla (una tabla vuelve a crear sus filas): lo que
+    // se va a recorrer se guarda como SafePointer, que queda en nada si el control se borra.
+    template <typename T>
+    std::vector<juce::Component::SafePointer<T>> safe(const std::vector<T*>& components)
+    {
+        return { components.begin(), components.end() };
+    }
+
+    template <typename T>
+    std::vector<T*> findAll(juce::Component& root)
+    {
+        std::vector<T*> result;
+        for (auto* child : root.getChildren())
+        {
+            if (child == nullptr) continue;
+            if (auto* c = dynamic_cast<T*>(child)) result.push_back(c);
+            const auto inner = findAll<T>(*child);
+            result.insert(result.end(), inner.begin(), inner.end());
+        }
+        return result;
+    }
+
+    // Visible con todos sus padres (isShowing() además exige una ventana en el escritorio, y
+    // estas pantallas se dibujan sin ventana).
+    bool shown(juce::Component& c)
+    {
+        for (auto* p = &c; p != nullptr; p = p->getParentComponent())
+            if (!p->isVisible()) return false;
+        return true;
+    }
+
+    // El texto que se ve para una clave: el mismo, o uno que tiene, en orden, todas las partes
+    // fijas que hay entre sus %1, %2...
+    bool matchesKey(const juce::String& shown, const juce::String& key)
+    {
+        const auto text = TRANS(key);
+        if (shown == text) return true;
+        if (!text.containsChar('%') || shown.isEmpty()) return false;
+        auto pattern = text;
+        for (int n = 1; n <= 9; ++n) pattern = pattern.replace("%" + juce::String(n), juce::String::charToString(1));
+        int from = 0, fixedParts = 0;
+        for (const auto& part : juce::StringArray::fromTokens(pattern, juce::String::charToString(1), ""))
+        {
+            if (part.isEmpty()) continue;
+            const int at = shown.indexOf(from, part);
+            if (at < 0) return false;
+            from = at + part.length();
+            ++fixedParts;
+        }
+        return fixedParts > 0;
+    }
+
+    juce::Button* button(juce::Component& root, const juce::String& key)
+    {
+        return find<juce::Button>(root, [&](juce::Button& b) {
+            return matchesKey(b.getButtonText(), key) || matchesKey(b.getTooltip(), key) || b.getName() == key;
+        });
+    }
+
+    // Pulsa el botón como lo haría el usuario (solo si está habilitado).
+    bool click(juce::Component& root, const juce::String& key)
+    {
+        if (auto* b = button(root, key))
+        {
+            b->triggerClick();
+            dispatchMessagesFor(30);
+            return true;
+        }
+        return false;
+    }
+
+    juce::MouseEvent mouseAt(juce::Component& c, juce::Point<float> position, juce::ModifierKeys mods = {}, int clicks = 1)
+    {
+        const auto now = juce::Time::getCurrentTime();
+        return { juce::Desktop::getInstance().getMainMouseSource(), position, mods,
+                 juce::MouseInputSource::defaultPressure, juce::MouseInputSource::defaultOrientation,
+                 juce::MouseInputSource::defaultRotation, juce::MouseInputSource::defaultTiltX,
+                 juce::MouseInputSource::defaultTiltY, &c, &c, now, position, now, clicks, false };
+    }
+
+    const juce::ModifierKeys rightButton { juce::ModifierKeys::rightButtonModifier };
+
+    juce::AccessibilityHandler* findMenuItemWhere(juce::Component& c, const std::function<bool(const juce::String&)>& matches)
+    {
+        if (auto* handler = c.getAccessibilityHandler())
+            if (handler->getRole() == juce::AccessibilityRole::menuItem && matches(handler->getTitle()))
+                return handler;
+        for (auto* child : c.getChildren())
+            if (auto* found = findMenuItemWhere(*child, matches)) return found;
+        return nullptr;
+    }
+
+    juce::AccessibilityHandler* findMenuItem(juce::Component& c, const juce::String& key)
+    {
+        return findMenuItemWhere(c, [&key](const juce::String& title) { return matchesKey(title, key); });
+    }
+
+    // Elige una opción del menú emergente abierto por su texto, con la acción "press" de
+    // accesibilidad de JUCE (lo mismo que hace un lector de pantalla).
+    bool chooseMenuItemWhere(const std::function<bool(const juce::String&)>& matches, const juce::String& description,
+                             int timeoutMs = 3000)
+    {
+        juce::AccessibilityHandler* item = nullptr;
+        pumpMessagesUntil([&] {
+            auto& desktop = juce::Desktop::getInstance();
+            for (int i = desktop.getNumComponents(); --i >= 0 && item == nullptr;)
+                if (auto* window = desktop.getComponent(i)) item = findMenuItemWhere(*window, matches);
+            return item != nullptr;
+        }, timeoutMs);
+        if (item == nullptr)
+        {
+            // Para saber por qué: las opciones que sí hay a la vista.
+            std::function<void(juce::Component&)> list = [&list](juce::Component& c) {
+                if (auto* handler = c.getAccessibilityHandler())
+                    if (handler->getRole() == juce::AccessibilityRole::menuItem)
+                        std::cout << "    opción del menú: \"" << handler->getTitle() << "\"\n";
+                for (auto* child : c.getChildren()) list(*child);
+            };
+            std::cout << "  no se encontró " << description << " en el menú\n";
+            auto& desktop = juce::Desktop::getInstance();
+            for (int i = 0; i < desktop.getNumComponents(); ++i)
+                if (auto* window = desktop.getComponent(i)) list(*window);
+            juce::PopupMenu::dismissAllActiveMenus();
+            dispatchMessagesFor(30);
+            return false;
+        }
+        item->getActions().invoke(juce::AccessibilityActionType::press);
+        dispatchMessagesFor(50);
+        return true;
+    }
+
+    bool chooseMenuItem(const juce::String& key, int timeoutMs = 3000)
+    {
+        return chooseMenuItemWhere([&key](const juce::String& title) { return matchesKey(title, key); },
+                                   "\"" + TRANS(key) + "\"", timeoutMs);
+    }
+
+    // Abre un submenú y elige una de sus opciones sin dejar pasar mensajes en medio: JUCE
+    // cierra los menús en su temporizador cuando el proceso no está en primer plano.
+    bool chooseSubmenuItem(const juce::String& parentKey, const std::function<bool(const juce::String&)>& matches,
+                           int timeoutMs = 3000)
+    {
+        juce::AccessibilityHandler* parent = nullptr;
+        pumpMessagesUntil([&] {
+            auto& desktop = juce::Desktop::getInstance();
+            for (int i = desktop.getNumComponents(); --i >= 0 && parent == nullptr;)
+                if (auto* window = desktop.getComponent(i)) parent = findMenuItem(*window, parentKey);
+            return parent != nullptr;
+        }, timeoutMs);
+        if (parent == nullptr) return false;
+        parent->getActions().invoke(juce::AccessibilityActionType::press);  // muestra el submenú
+        juce::AccessibilityHandler* item = nullptr;
+        auto& desktop = juce::Desktop::getInstance();
+        for (int i = desktop.getNumComponents(); --i >= 0 && item == nullptr;)
+            if (auto* window = desktop.getComponent(i)) item = findMenuItemWhere(*window, matches);
+        if (item == nullptr)
+        {
+            juce::PopupMenu::dismissAllActiveMenus();
+            dispatchMessagesFor(30);
+            return false;
+        }
+        item->getActions().invoke(juce::AccessibilityActionType::press);
+        dispatchMessagesFor(50);
+        return true;
+    }
+
+    bool chooseMenuItemStartingWith(const juce::String& prefix, int timeoutMs = 3000)
+    {
+        return chooseMenuItemWhere([&prefix](const juce::String& title) { return title.startsWith(prefix); },
+                                   "\"" + prefix + "…\"", timeoutMs);
+    }
+
+    // Cierra lo que quede abierto (menús y diálogos), contestando "Cancelar" (o answer).
+    void closeEverything(int answer = 0)
+    {
+        juce::PopupMenu::dismissAllActiveMenus();
+        for (int i = 0; i < 10 && juce::Component::getCurrentlyModalComponent() != nullptr; ++i) answerModal(answer, 1000);
+        dispatchMessagesFor(30);
+    }
+
+    // Contesta el diálogo de JUCE que se abrió escribiendo en su campo (si lo tiene).
+    bool answerWithText(const juce::String& field, const juce::String& text, int result)
+    {
+        juce::Component* modal = nullptr;
+        pumpMessagesUntil([&] { modal = juce::Component::getCurrentlyModalComponent(); return modal != nullptr; }, 3000);
+        auto* alert = dynamic_cast<juce::AlertWindow*>(modal);
+        if (alert == nullptr) return false;
+        if (auto* editor = alert->getTextEditor(field)) editor->setText(text);
+        return answerModal(result);
+    }
+
+    void setText(juce::TextEditor& editor, const juce::String& text)
+    {
+        editor.setText(text, true);
+        dispatchMessagesFor(10);
+    }
+
+    void press(juce::Component& c, const juce::KeyPress& key)
+    {
+        c.keyPressed(key);
+        dispatchMessagesFor(20);
+    }
+
+    bool isOneOf(juce::Button& b, const juce::StringArray& keys)
+    {
+        for (const auto& key : keys)
+            if (matchesKey(b.getButtonText(), key) || matchesKey(b.getTooltip(), key)) return true;
+        return false;
+    }
+
+    // Opera todos los controles visibles de un contenedor: recorre cada opción de cada lista,
+    // escribe en cada campo (con Enter y al salir de él) y pulsa cada botón, menos los de
+    // skipKeys (los que abren el navegador o el Explorador, o se conectan a internet). Lo que
+    // se abra (un menú, un diálogo) se cierra cancelando.
+    void exercise(juce::Component& root, const juce::StringArray& skipKeys, const juce::String& text = "prueba",
+                  int dialogAnswer = 0)
+    {
+        // Las primeras filas de cada lista y tabla: clic en cada columna, doble clic y Enter.
+        for (auto& list : safe(findAll<juce::ListBox>(root)))
+        {
+            if (list == nullptr || !shown(*list)) continue;
+            const auto mouse = mouseAt(*list, { 5.0f, 5.0f });
+            if (auto* table = dynamic_cast<juce::TableListBox*>(list.getComponent()))
+            {
+                auto* model = table->getTableListBoxModel();
+                const int rows = model != nullptr ? juce::jmin(3, model->getNumRows()) : 0;
+                const int columns = table->getHeader().getNumColumns(true);
+                for (int row = 0; row < rows && list != nullptr; ++row)
+                {
+                    table->selectRow(row);
+                    for (int c = 0; c < columns && list != nullptr; ++c)
+                    {
+                        const int id = table->getHeader().getColumnIdOfIndex(c, true);
+                        model->getCellTooltip(row, id);
+                        model->cellClicked(row, id, mouse);
+                        if (list == nullptr) break;
+                        model->cellDoubleClicked(row, id, mouse);
+                        closeEverything(dialogAnswer);
+                    }
+                    if (list == nullptr) break;
+                    model->returnKeyPressed(row);
+                    closeEverything(dialogAnswer);
+                }
+            }
+            else if (auto* model = list->getListBoxModel())
+            {
+                const int rows = juce::jmin(3, model->getNumRows());
+                for (int row = 0; row < rows && list != nullptr; ++row)
+                {
+                    list->selectRow(row);
+                    model->getTooltipForRow(row);
+                    model->listBoxItemClicked(row, mouse);
+                    if (list == nullptr) break;
+                    model->listBoxItemDoubleClicked(row, mouse);
+                    closeEverything(dialogAnswer);
+                    if (list == nullptr) break;
+                    model->returnKeyPressed(row);
+                    closeEverything(dialogAnswer);
+                }
+            }
+        }
+
+        for (auto& combo : safe(findAll<juce::ComboBox>(root)))
+        {
+            if (combo == nullptr || !shown(*combo) || !combo->isEnabled()) continue;
+            const int original = combo->getSelectedItemIndex();
+            for (int i = 0; combo != nullptr && i < combo->getNumItems(); ++i)
+                combo->setSelectedItemIndex(i, juce::sendNotificationSync);
+            if (combo != nullptr) combo->setSelectedItemIndex(juce::jmax(0, original), juce::sendNotificationSync);
+            closeEverything(dialogAnswer);
+        }
+        for (auto& editor : safe(findAll<juce::TextEditor>(root)))
+        {
+            if (editor == nullptr || !shown(*editor) || editor->isReadOnly()) continue;
+            const auto original = editor->getText();
+            for (const auto& value : { text, original })
+            {
+                if (editor == nullptr) break;
+                editor->setText(value, true);
+                if (editor != nullptr && editor->onReturnKey) editor->onReturnKey();
+                if (editor != nullptr && editor->onFocusLost) editor->onFocusLost();
+                dispatchMessagesFor(10);
+            }
+            closeEverything(dialogAnswer);
+        }
+        for (auto& slider : safe(findAll<juce::Slider>(root)))
+        {
+            if (slider == nullptr || !shown(*slider) || !slider->isEnabled()) continue;
+            const auto original = slider->getValue();
+            for (const auto value : { slider->getMinimum(), (slider->getMinimum() + slider->getMaximum()) / 2.0,
+                                      slider->getMaximum(), original })
+            {
+                if (slider == nullptr) break;
+                slider->setValue(value, juce::sendNotificationSync);
+                if (slider != nullptr && slider->onDragEnd) slider->onDragEnd();
+            }
+            dispatchMessagesFor(10);
+        }
+        for (auto& b : safe(findAll<juce::Button>(root)))
+        {
+            if (b == nullptr || !shown(*b) || !b->isEnabled() || isOneOf(*b, skipKeys)) continue;
+            b->triggerClick();
+            dispatchMessagesFor(20);
+            closeEverything(dialogAnswer);
+        }
+    }
+
+    // Dibuja el componente completo, para recorrer su paint() en el estado actual.
+    bool draws(juce::Component& c)
+    {
+        if (c.getWidth() <= 0 || c.getHeight() <= 0) return false;
+        const auto image = c.createComponentSnapshot(c.getLocalBounds(), true, 1.0f);
+        return image.isValid();
+    }
+
+    // Espera el diálogo modal que se abre (una ventana de diálogo de JUCE).
+    juce::Component* waitForModal(int timeoutMs = 3000)
+    {
+        juce::Component* modal = nullptr;
+        pumpMessagesUntil([&] { modal = juce::Component::getCurrentlyModalComponent(); return modal != nullptr; }, timeoutMs);
+        return modal;
+    }
+
+    // Pone el componente en una ventana de verdad mientras dura (un menú anclado a un
+    // componente, o las teclas de la ventana, necesitan que esté en el escritorio) y al
+    // terminar lo saca sin borrarlo.
+    struct OnScreen
+    {
+        explicit OnScreen(juce::Component& c) : window("RAAADIO (pruebas)", juce::Colours::black, 0)
+        {
+            window.setContentNonOwned(&c, true);
+            window.setVisible(true);
+            dispatchMessagesFor(50);
+        }
+        ~OnScreen()
+        {
+            juce::PopupMenu::dismissAllActiveMenus();
+            window.clearContentComponent();
+            dispatchMessagesFor(30);
+        }
+        bool pressKey(const juce::KeyPress& key)
+        {
+            auto* peer = window.getPeer();
+            const bool used = peer != nullptr && peer->handleKeyPress(key);
+            dispatchMessagesFor(20);
+            return used;
+        }
+        juce::DocumentWindow window;
+    };
+
+    // La pantalla de --ui-snapshot armada con sus datos de demostración, en un laboratorio
+    // propio, sin llegar a capturarla.
+    struct Screen
+    {
+        // prepare: lo que tiene la carpeta de la emisora antes de abrirla (un respaldo a
+        // medio restaurar, una base dañada...).
+        explicit Screen(const juce::String& view, int width = 1366, int height = 768,
+                        const std::function<void(const juce::File& station)>& prepare = {})
+        {
+            // La emisora en "raaadio_lab", como cuando se elige una carpeta en la aplicación.
+            station = lab.root.getChildFile("raaadio_lab");
+            station.createDirectory();
+            PersistenceManager::setLabRootOverride(station);
+            if (prepare) prepare(station);
+            UiSnapshotRunner::Options options;
+            options.output = lab.root.getChildFile("captura.png");
+            options.width = width;
+            options.height = height;
+            options.view = view;
+            runner = std::make_unique<UiSnapshotRunner>(options);
+            dispatchMessagesFor(50);
+        }
+        ~Screen()
+        {
+            closeEverything();
+            runner.reset();
+            dispatchMessagesFor(30);
+        }
+        juce::Component& view() { return *runner->getView(); }
+        MainComponent& main() { return runner->getMainComponent(); }
+        MusicLibrary& library() { return runner->getLibrary(); }
+        AudioEngine& engine() { return runner->getAudioEngine(); }
+        Playlist& playlist() { return runner->getPlaylist(); }
+
+        TempLab lab;
+        juce::File station;
+        std::unique_ptr<UiSnapshotRunner> runner;
+    };
+}
+
+class UiReviewTests : public juce::UnitTest
+{
+public:
+    UiReviewTests() : juce::UnitTest("Interfaz: revisión de lo importado", "RAAADIO") {}
+
+    // El botón de una duda que se está viendo (sí o no), si hay alguno.
+    static juce::Button* issueButton(juce::Component& view, bool yes)
+    {
+        static const char* yesKeys[] = { "review_btn_remove_copy", "review_btn_use_online", "review_btn_format_ok",
+                                         "review_btn_its_fine", "review_btn_featured_yes", "review_btn_use_known" };
+        static const char* noKeys[] = { "review_btn_keep_both", "review_btn_keep_mine", "review_btn_swap_folder",
+                                        "review_btn_swap", "review_btn_featured_no", "review_btn_other_artist" };
+        for (const auto* key : (yes ? yesKeys : noKeys))
+            if (auto* b = ui::find<juce::Button>(view, [key](juce::Button& b) {
+                    return ui::shown(b) && ui::matchesKey(b.getButtonText(), key); }))
+                return b;
+        return nullptr;
+    }
+
+    void runTest() override
+    {
+        UiEnvironment environment;
+
+        beginTest("Filtros, carpetas y formato de la carpeta");
+        {
+            ui::Screen screen("review");
+            auto& view = screen.view();
+            auto* table = ui::find<juce::TableListBox>(view);
+            expect(table != nullptr && table->getNumRows() > 0);
+
+            for (const auto* key : { "review_filter_check", "review_filter_duplicates", "review_filter_ready", "review_filter_all" })
+            {
+                expect(ui::click(view, key), key);
+                expect(ui::draws(view), key);
+            }
+            auto* folders = ui::find<juce::ComboBox>(view);
+            expect(folders != nullptr && folders->getNumItems() > 1);
+            for (int i = folders->getNumItems(); --i >= 0;)
+            {
+                folders->setSelectedItemIndex(i, juce::sendNotificationSync);
+                expect(ui::click(view, "review_format_artist_title"));
+                expect(ui::click(view, "review_format_title_artist"));
+                expect(ui::draws(view));
+            }
+            folders->setSelectedItemIndex(0, juce::sendNotificationSync);
+
+            expect(ui::click(view, "review_scope_library"));
+            expect(ui::draws(view), "la biblioteca sin revisar");
+            expect(ui::click(view, "review_scope_new"));
+            int shownArtists = 0;
+            dynamic_cast<ImportReviewView&>(view).onShowArtists = [&shownArtists] { ++shownArtists; };
+            expect(ui::click(view, "review_scope_artists") && shownArtists == 1);
+        }
+
+        beginTest("Cada duda se contesta con un clic, por sí y por no");
+        {
+            for (const bool yes : { true, false })
+            {
+                ui::Screen screen("review");
+                auto& view = screen.view();
+                auto* table = ui::find<juce::TableListBox>(view);
+                int answered = 0;
+                for (int pass = 0; pass < 3; ++pass)
+                    for (int row = 0; row < table->getNumRows(); ++row)
+                    {
+                        table->selectRow(row);
+                        dispatchMessagesFor(10);
+                        expect(ui::draws(view));
+                        if (auto* b = issueButton(view, yes))
+                        {
+                            b->triggerClick();
+                            dispatchMessagesFor(30);
+                            ++answered;
+                        }
+                    }
+                expect(answered > 0, yes ? "sí" : "no");
+            }
+        }
+
+        beginTest("Editar los créditos: sin título no se guarda; con título se guarda y pasa a la siguiente");
+        {
+            ui::Screen screen("review");
+            auto& view = screen.view();
+            auto* table = ui::find<juce::TableListBox>(view);
+            table->selectRow(0);
+            dispatchMessagesFor(20);
+            auto* editor = ui::find<CreditsEditor>(view);
+            expect(editor != nullptr);
+            auto fields = ui::findAll<juce::TextEditor>(*editor);
+            expect(fields.size() >= 6);
+            const auto original = editor->getValues();
+
+            auto* title = ui::find<juce::TextEditor>(*editor, [&](juce::TextEditor& e) { return e.getText() == original.title; });
+            expect(title != nullptr);
+            ui::setText(*title, {});
+            expect(ui::click(view, "review_save_edit"));
+            expect(editor->hasChanges(), "sin título no se guarda");
+
+            ui::setText(*title, "Un Titulo Nuevo");
+            auto* artist = fields.front();
+            ui::setText(*artist, "Wilf");  // sugerencias de artistas conocidos
+            for (auto* suggestion : ui::findAll<juce::TextButton>(*editor))
+                if (ui::shown(*suggestion)) { suggestion->triggerClick(); dispatchMessagesFor(20); break; }
+            ui::setText(*artist, "Artista Corregido");
+            expect(ui::click(view, "review_save_edit"));
+            expect(!editor->hasChanges(), "se guardó");
+
+            table->selectRow(1);
+            dispatchMessagesFor(20);
+            if (auto* first = ui::findAll<juce::TextEditor>(*editor).front())
+            {
+                ui::setText(*first, "Otro Artista");
+                table->selectRow(2);  // cambiar de fila guarda lo editado
+                dispatchMessagesFor(20);
+            }
+            expect(ui::draws(view));
+        }
+
+        beginTest("Menús de categoría, mayúsculas y de la fila; el teclado; quitar y confirmar");
+        {
+            ui::Screen screen("review");
+            auto& view = screen.view();
+            auto& review = dynamic_cast<ImportReviewView&>(view);
+            auto* table = ui::find<juce::TableListBox>(view);
+            int changes = 0;
+            review.onLibraryChanged = [&changes] { ++changes; };
+            table->selectRow(0);
+            dispatchMessagesFor(20);
+
+            expect(ui::click(view, "review_category"));
+            juce::String category;
+            for (const auto& c : screen.library().getCategories())
+                if (!c.isSystem()) { category = MusicLibrary::getDisplayName(c); break; }
+            expect(ui::chooseMenuItem(category), "se elige una categoría");
+            expect(ui::click(view, "review_category"));
+            expect(ui::chooseMenuItem(category), "y se quita");
+
+            expect(ui::click(view, "review_case"));
+            expect(ui::chooseMenuItem("review_case_upper"));
+            expect(ui::click(view, "review_case"));
+            expect(ui::chooseMenuItem("review_case_title"));
+            expect(ui::click(view, "review_swap"));
+
+            review.cellClicked(0, 1, ui::mouseAt(*table, { 10.0f, 10.0f }, ui::rightButton));
+            expect(ui::chooseMenuItem("review_swap"), "menú de la fila: intercambiar");
+            review.cellClicked(0, 1, ui::mouseAt(*table, { 10.0f, 10.0f }));  // un clic normal no abre el menú
+            ui::closeEverything();
+
+            ui::press(view, juce::KeyPress('i', juce::ModifierKeys::commandModifier, 0));
+            ui::press(view, juce::KeyPress('x'));
+            review.returnKeyPressed(0);
+
+            review.deleteKeyPressed(0);
+            expect(answerModal(0), "quitar pregunta; se cancela");
+            review.cellClicked(0, 1, ui::mouseAt(*table, { 10.0f, 10.0f }, ui::rightButton));
+            expect(ui::chooseMenuItem("review_discard_btn"));
+            expect(answerModal(1), "y se acepta");
+            expect(changes == 1, "quitar avisa que cambió la biblioteca");
+
+            table->selectRow(0);
+            review.cellClicked(0, 1, ui::mouseAt(*table, { 10.0f, 10.0f }, ui::rightButton));
+            expect(ui::chooseMenuItem("review_confirm_selection"));
+            expect(pumpMessagesUntil([&] { return changes == 2; }, 10000), "confirmar la fila elegida");
+
+            ui::press(view, juce::KeyPress(juce::KeyPress::returnKey, juce::ModifierKeys::commandModifier, 0));
+            pumpMessagesUntil([&] { return changes >= 3; }, 10000);
+
+            expect(ui::click(view, "review_confirm_ready"));
+            pumpMessagesUntil([&] { return changes >= 4; }, 20000);
+            expect(ui::click(view, "review_confirm_ready"));  // ya no queda nada listo
+            expect(ui::draws(view));
+        }
+
+        beginTest("Deshacer una importación desde la revisión; preescuchar por Cue");
+        {
+            ui::Screen screen("review");
+            auto& engine = screen.engine();
+            // Un lote de verdad: los datos de demostración entran sin pasar por la importación.
+            TempLab outside;
+            for (int i = 0; i < 2; ++i)
+                writeWav(outside.root.getChildFile("LOTE/CANCION " + juce::String(i) + " - GRUPO LOTE.wav"), 2.0,
+                         [i](double t) { return tone(t, 0.3f, 600.0 + 50.0 * i); });
+            screen.library().addCategory("LOTE");
+            screen.library().importFiles({ outside.root.getChildFile("LOTE") }, "LOTE");
+            pumpMessagesUntil([&] { return !screen.library().isImporting(); }, 20000);
+            ImportReviewView review(screen.library(), &engine.getPreview(), ImportReview::Scope::NewImports);
+            review.setSize(1366, 768);
+            int changes = 0;
+            review.onLibraryChanged = [&changes] { ++changes; };
+
+            expect(ui::click(review, "review_undo_import"));
+            ui::closeEverything();
+            expect(ui::click(review, "review_undo_import"));
+            const auto batches = screen.library().getImportBatches();
+            expect(!batches.empty());
+            juce::AccessibilityHandler* item = nullptr;
+            pumpMessagesUntil([&] {
+                auto& desktop = juce::Desktop::getInstance();
+                for (int i = desktop.getNumComponents(); --i >= 0 && item == nullptr;)
+                    if (auto* window = desktop.getComponent(i))
+                        item = ui::findMenuItem(*window, "review_undo_item");
+                return item != nullptr;
+            }, 3000);
+            expect(item != nullptr, "el lote aparece en el menú");
+            if (item != nullptr)
+            {
+                const int before = (int) screen.library().getPendingCount();
+                item->getActions().invoke(juce::AccessibilityActionType::press);
+                expect(answerModal(1), "deshacer pregunta");
+                expect(changes == 1 && (int) screen.library().getPendingCount() < before, "el lote salió de la biblioteca");
+            }
+            expect(ui::draws(review));
+
+            ui::Screen again("review");
+            ImportReviewView withPreview(again.library(), &again.engine().getPreview(), ImportReview::Scope::NewImports);
+            withPreview.setSize(1366, 768);
+            auto* table = ui::find<juce::TableListBox>(withPreview);
+            table->selectRow(0);
+            dispatchMessagesFor(20);
+            expect(ui::click(withPreview, "review_listen"), "las pistas de la demostración no son audio: avisa");
+            withPreview.cellClicked(0, 1, ui::mouseAt(*table, { 10.0f, 10.0f }, ui::rightButton));
+            ui::chooseMenuItem("review_listen");
+            expect(ui::draws(withPreview));
+        }
+
+        beginTest("La ventana de revisión cambia entre lo nuevo, la biblioteca y los artistas");
+        {
+            ui::Screen screen("review");
+            ImportReviewWindow window(screen.library(), nullptr, ImportReview::Scope::NewImports);
+            int closed = 0, changed = 0;
+            window.onClosed = [&closed] { ++closed; };
+            window.onLibraryChanged = [&changed] { ++changed; };
+            window.showArtists();
+            window.showReview(ImportReview::Scope::Library);
+            window.showReview(ImportReview::Scope::NewImports);
+            expect(ui::click(window, "review_close"));
+            expect(closed == 1);
+            window.closeButtonPressed();
+            expect(closed == 2);
+        }
+    }
+};
+
+class UiSettingsTests : public juce::UnitTest
+{
+public:
+    UiSettingsTests() : juce::UnitTest("Interfaz: configuración", "RAAADIO") {}
+
+    static juce::Component& tab(juce::Component& view, int index)
+    {
+        auto* tabs = ui::find<juce::TabbedComponent>(view);
+        tabs->setCurrentTabIndex(index);
+        dispatchMessagesFor(20);
+        return *tabs->getCurrentContentComponent();
+    }
+
+    // Lo que "elige" el usuario en el diálogo de carpetas.
+    juce::File answer;
+
+    void runTest() override
+    {
+        UiEnvironment environment;
+        FileChoosers::setHandler([this](FileChoosers::Kind, const juce::String&,
+                                        const std::function<void(const juce::Array<juce::File>&)>& onChosen) {
+            onChosen(answer == juce::File() ? juce::Array<juce::File>() : juce::Array<juce::File> { answer });
+        });
+        // Se conectan a internet: se prueban aparte, sin conexión.
+        const juce::StringArray external { "stream_enable", "online_toggle" };
+
+        beginTest("Biblioteca y datos: opciones, respaldo, destino externo, exportar, restaurar e importar");
+        {
+            ui::Screen screen("settings");
+            auto& library = tab(screen.view(), 1);
+            answer = juce::File();
+            ui::exercise(library, external);
+            expect(ui::draws(screen.view()));
+
+            answer = screen.station.getChildFile("Backups");
+            answer.createDirectory();
+            expect(ui::click(library, "backup_external_choose"));
+            expect(answerModal(1), "un destino dentro de la emisora no sirve");
+            TempLab externalDrive;
+            answer = externalDrive.root;
+            expect(ui::click(library, "backup_external_choose"));
+            expect(answerModal(1), "en el mismo disco se avisa y se acepta igual");
+            expect(screen.runner->getMainComponent().isVisible());
+            expect(ui::click(library, "backup_external_clear"));
+            expect(ui::click(library, "btn_backup"));
+            expect(ui::draws(library));
+
+            TempLab exportTarget;
+            answer = exportTarget.root;
+            expect(ui::click(library, "btn_export"));
+            expect(answerModal(1), "exportado");
+
+            juce::File backup;
+            expect(PersistenceManager::createBackup([&screen](const juce::File& target) {
+                return screen.library().backupDatabaseTo(target); }, &backup).wasOk());
+            answer = backup;
+            expect(ui::click(library, "btn_restore"));
+            expect(answerModal(0), "restaurar queda preparado y ofrece reiniciar");
+            answer = exportTarget.root;
+            expect(ui::click(library, "btn_restore"));
+            expect(answerModal(1), "una carpeta que no es un respaldo da error");
+            answer = backup;
+            expect(ui::click(library, "btn_import"));
+            expect(answerModal(0), "importar pregunta; se cancela");
+            expect(ui::click(library, "btn_import"));
+            expect(answerModal(1), "se acepta");
+            expect(answerModal(0), "y ofrece reiniciar");
+            expect(ui::draws(library), "con una restauración pendiente");
+        }
+
+        beginTest("Sin el servicio de respaldo, respaldar avisa al terminar");
+        {
+            ui::Screen screen("settings");
+            SettingsDialog dialog(screen.engine().getDeviceManager(), screen.engine().getCueDeviceManager(),
+                                  screen.library(), screen.runner->getAdsManager(),
+                                  screen.runner->getStationConfig(), screen.runner->getStreamEncoder(),
+                                  nullptr, nullptr, PersistenceManager::getAirLogFolder());
+            dialog.setSize(600, 640);
+            auto& library = tab(dialog, 1);
+            expect(ui::click(library, "btn_backup"));
+            expect(answerModal(1), "respaldo hecho");
+            dialog.sendLookAndFeelChange();
+        }
+
+        beginTest("Mover la emisora: la misma, una que ya existe, una carpeta ocupada y una copia completa");
+        {
+            ui::Screen screen("settings");
+            auto& library = tab(screen.view(), 1);
+
+            answer = juce::File();
+            expect(ui::click(library, "btn_change_lab_root"), "cancelar no hace nada");
+            answer = screen.lab.root;
+            expect(ui::click(library, "btn_change_lab_root"));
+            expect(answerModal(1), "es la misma carpeta");
+
+            TempLab other;
+            other.touch("raaadio_lab/Database/raaadio.db");
+            answer = other.root;
+            expect(ui::click(library, "btn_change_lab_root"));
+            expect(answerModal(1), "ya hay una emisora: se usa esa");
+            expect(answerModal(0), "y ofrece reiniciar");
+
+            answer = screen.station.getChildFile("Library");
+            expect(ui::click(library, "btn_change_lab_root"));
+            expect(answerModal(1), "dentro de la emisora no se puede");
+
+            TempLab busy;
+            busy.touch("raaadio_lab/otra cosa.txt");
+            answer = busy.root;
+            expect(ui::click(library, "btn_change_lab_root"));
+            expect(answerModal(1), "una carpeta con otras cosas no se usa");
+
+            TempLab empty;
+            answer = empty.root;
+            expect(ui::click(library, "btn_change_lab_root"));
+            expect(answerModal(0), "copiar pregunta; se cancela");
+            expect(ui::click(library, "btn_change_lab_root"));
+            expect(answerModal(1), "se acepta: copia con avance");
+            expect(answerModal(0, 60000), "al terminar ofrece reiniciar");
+            expect(PersistenceManager::containsStation(empty.root.getChildFile("raaadio_lab")), "la copia está completa");
+        }
+
+        beginTest("Borrar la biblioteca pregunta y respalda antes");
+        {
+            ui::Screen screen("settings");
+            auto& library = tab(screen.view(), 1);
+            expect(ui::click(library, "db_reset"));
+            expect(answerModal(0), "se cancela");
+            expect(!screen.library().getCategories().empty());
+            expect(ui::click(library, "db_reset"));
+            expect(answerModal(1), "se acepta");
+            expect(answerModal(1), "y avisa que quedó vacía");
+        }
+
+        beginTest("Emisión, idioma y tema");
+        {
+            ui::Screen screen("settings");
+            auto& broadcast = tab(screen.view(), 2);
+            ui::exercise(broadcast, external, "http://127.0.0.1:1/ahora.php");  // nada sale del equipo
+            ui::exercise(broadcast, external, "no es una dirección");
+            if (auto* host = ui::find<juce::TextEditor>(broadcast, [](juce::TextEditor& e) {
+                    return e.getText() == "stream.example.org"; }))
+            {
+                // Sin servidor, "Transmitir" no se queda marcado ni se conecta a nada.
+                ui::setText(*host, {});
+                if (host->onFocusLost) host->onFocusLost();
+                expect(ui::click(broadcast, "stream_enable"));
+                expect(!ui::button(broadcast, "stream_enable")->getToggleState());
+            }
+            expect(ui::draws(broadcast));
+
+            auto& language = tab(screen.view(), 3);
+            ui::exercise(language, external);
+            expect(ui::draws(language));
+            LanguageManager::getInstance().setLanguage("es", false);
+            ThemeManager::getInstance().setTheme(ThemeManager::Theme::Dark, false);
+
+            for (int i = 0; i < 5; ++i) expect(ui::draws(tab(screen.view(), i)));
+            screen.view().sendLookAndFeelChange();
+        }
+
+        ui::cancelFileChoosers();
+    }
+};
+
+class UiQueueTests : public juce::UnitTest
+{
+public:
+    UiQueueTests() : juce::UnitTest("Interfaz: cola de reproducción", "RAAADIO") {}
+
+    static void clickMoveButtons(juce::Component& queue)
+    {
+        for (auto& b : ui::safe(ui::findAll<juce::Button>(queue)))
+            if (b != nullptr && ui::shown(*b)
+                && (ui::matchesKey(b->getTooltip(), "tip_move_up") || ui::matchesKey(b->getTooltip(), "tip_move_down")))
+            {
+                b->triggerClick();
+                dispatchMessagesFor(10);
+            }
+    }
+
+    void runTest() override
+    {
+        UiEnvironment environment;
+
+        beginTest("Subir y bajar filas y bloques, el menú de la fila, quitar y vaciar la cola");
+        {
+            ui::Screen screen("main");
+            auto* queue = ui::find<PlaylistComponent>(screen.main());
+            auto* table = queue != nullptr ? ui::find<juce::TableListBox>(*queue) : nullptr;
+            expect(table != nullptr && table->getNumRows() > 6);
+            auto size = [&screen] { return (int) screen.playlist().getQueue().size(); };
+            const int start = size();
+            auto rightClick = [&](int row) { queue->cellClicked(row, 1, ui::mouseAt(*table, { 10.0f, 10.0f }, ui::rightButton)); };
+
+            table->selectRow(3);
+            table->updateContent();
+            expect(ui::draws(*queue));
+            clickMoveButtons(*queue);
+            table->selectRangeOfRows(2, 4);
+            table->updateContent();
+            expect(ui::draws(*queue), "un bloque seleccionado: solo subir el primero y bajar el último");
+            clickMoveButtons(*queue);
+            expectEquals(size(), start, "mover no quita nada");
+
+            table->selectRow(4);
+            rightClick(4);
+            expect(ui::chooseMenuItem("menu_move_to_top"));
+            rightClick(3);
+            expect(ui::chooseMenuItem("menu_remove"));
+            expectEquals(size(), start - 1);
+            queue->cellClicked(2, 1, ui::mouseAt(*table, { 10.0f, 10.0f }));  // un clic normal no abre el menú
+            rightClick(9999);
+            table->selectRow(2);
+            queue->deleteKeyPressed(2);
+            expectEquals(size(), start - 2, "Suprimir quita la fila");
+
+            table->selectRow(1);
+            rightClick(1);
+            expect(ui::chooseMenuItem("menu_play_now"));
+            expect(answerModal(1), "con algo al aire, pregunta");
+            ui::closeEverything();  // la pista de ejemplo no es audio: avisa que no pudo
+            expectEquals(size(), start - 3, "la pista sale de la cola");
+
+            rightClick(1);
+            expect(ui::chooseMenuItem("menu_clear_queue"));
+            expect(answerModal(0) && size() > 0, "vaciar pregunta; se cancela");
+            rightClick(1);
+            expect(ui::chooseMenuItem("menu_clear_queue"));
+            expect(answerModal(1) && size() == 0, "se vacía");
+            expect(ui::draws(*queue), "la cola vacía");
+        }
+
+        beginTest("Arrastrar desde la biblioteca y reordenar la cola arrastrando");
+        {
+            ui::Screen screen("main");
+            auto* queue = ui::find<PlaylistComponent>(screen.main());
+            auto* table = ui::find<juce::TableListBox>(*queue);
+            auto size = [&screen] { return (int) screen.playlist().getQueue().size(); };
+            const auto tracks = screen.library().search("", "");
+            expect(tracks.size() > 2);
+
+            const juce::var fromLibrary("track_list_" + juce::String(tracks[0].path) + "|" + juce::String(tracks[1].path));
+            using Source = juce::DragAndDropTarget::SourceDetails;
+            expect(queue->isInterestedInDragSource(Source(fromLibrary, nullptr, {})));
+            expect(!queue->isInterestedInDragSource(Source(juce::var("otra cosa"), nullptr, {})));
+            queue->itemDragEnter(Source(fromLibrary, nullptr, {}));
+            for (const int y : { 2, 30, table->getHeight() / 2, table->getHeight() - 10, table->getHeight() + 60 })
+            {
+                queue->itemDragMove(Source(fromLibrary, nullptr, { 20, table->getY() + y }));
+                expect(ui::draws(*queue));
+            }
+            const int before = size();
+            queue->itemDropped(Source(fromLibrary, nullptr, { 20, table->getY() + 30 }));
+            expectEquals(size(), before + 2);
+            queue->itemDragExit(Source(fromLibrary, nullptr, {}));
+
+            juce::SparseSet<int> rows;
+            rows.addRange({ 1, 3 });
+            const auto reorder = queue->getDragSourceDescription(rows);
+            expect(reorder.toString().startsWith("playlist_drag_"));
+            expect(queue->getDragSourceDescription(juce::SparseSet<int>()).isVoid());
+            queue->itemDragMove(Source(reorder, nullptr, { 20, table->getY() + table->getHeight() / 2 }));
+            queue->itemDropped(Source(reorder, nullptr, {}));
+            expectEquals(size(), before + 2, "reordenar no cambia cuántas hay");
+        }
+
+        beginTest("Doble clic abre la ficha de la pista; el botón abre el generador");
+        {
+            ui::Screen screen("main");
+            auto* queue = ui::find<PlaylistComponent>(screen.main());
+            auto* table = ui::find<juce::TableListBox>(*queue);
+
+            queue->cellDoubleClicked(1, 1, ui::mouseAt(*table, { 10.0f, 10.0f }, {}, 2));
+            auto* modal = ui::waitForModal();
+            auto* details = modal != nullptr ? ui::find<TrackDetailsDialog>(*modal) : nullptr;
+            expect(details != nullptr, "se abre la ficha");
+            if (details != nullptr)
+            {
+                details->onSave();
+                details->onCancel();
+            }
+            pumpMessagesUntil([] { return juce::Component::getCurrentlyModalComponent() == nullptr; }, 3000);
+
+            expect(ui::click(*queue, "generator_btn"));
+            modal = ui::waitForModal();
+            auto* generator = modal != nullptr ? ui::find<PlaylistGeneratorDialog>(*modal) : nullptr;
+            expect(generator != nullptr, "se abre el generador");
+            if (generator != nullptr)
+            {
+                generator->onGenerateSuccess();
+                generator->onCancel();
+            }
+            pumpMessagesUntil([] { return juce::Component::getCurrentlyModalComponent() == nullptr; }, 3000);
+        }
+    }
+};
+
+class UiLibraryTests : public juce::UnitTest
+{
+public:
+    UiLibraryTests() : juce::UnitTest("Interfaz: biblioteca, categorías e importación", "RAAADIO") {}
+
+    // Lo que "elige" el usuario en los diálogos de archivos.
+    juce::Array<juce::File> answer;
+
+    // Contesta el diálogo de JUCE que se abrió escribiendo en su campo (si lo tiene).
+    static bool answerWithText(const juce::String& field, const juce::String& text, int result)
+    {
+        auto* alert = dynamic_cast<juce::AlertWindow*>(ui::waitForModal());
+        if (alert == nullptr) return false;
+        if (auto* editor = alert->getTextEditor(field)) editor->setText(text);
+        return answerModal(result);
+    }
+
+    void runTest() override
+    {
+        UiEnvironment environment;
+        FileChoosers::setHandler([this](FileChoosers::Kind, const juce::String&,
+                                        const std::function<void(const juce::Array<juce::File>&)>& onChosen) { onChosen(answer); });
+
+        beginTest("Canciones: buscar, refrescar, menú de la fila, categorías, ficha y arrastrar");
+        {
+            ui::Screen screen("main");
+            auto* view = ui::find<LibraryView>(screen.main());
+            auto* table = ui::find<juce::TableListBox>(*view);
+            expect(table != nullptr && table->getNumRows() > 3);
+            juce::String searched;
+            view->onSearchOnline = [&searched](const juce::String& query) { searched = query; };  // sin internet
+            juce::TextEditor* search = nullptr;
+            for (auto* child : view->getChildren())
+                if (auto* box = dynamic_cast<juce::TextEditor*>(child)) search = box;
+            expect(search != nullptr);
+
+            ui::setText(*search, "zzzz no existe");
+            expect(ui::draws(*view), "sin resultados");
+            expect(ui::click(*view, "library_search_online") && searched == "zzzz no existe");
+            expect(ui::click(*view, "tip_online_search"));
+            ui::setText(*search, {});
+            expect(ui::click(*view, "btn_refresh"));
+            for (int column = 0; column < 12; ++column) view->getCellTooltip(0, column);
+
+            juce::String category;
+            for (const auto& c : screen.library().getCategories())
+                if (!c.isSystem()) { category = MusicLibrary::getDisplayName(c); break; }
+            auto menu = [&](int row) { view->cellClicked(row, 1, ui::mouseAt(*table, { 10.0f, 10.0f }, ui::rightButton)); };
+            const auto queued = screen.playlist().getQueue().size();
+            table->selectRow(0);
+            menu(0);
+            expect(ui::chooseMenuItem("menu_add_to_start"));
+            menu(0);
+            expect(ui::chooseMenuItem("menu_add_to_end"));
+            expectEquals((int) screen.playlist().getQueue().size(), (int) queued + 2);
+            menu(0);
+            expect(ui::chooseSubmenuItem("menu_add_to_category", [&category](const juce::String& t) { return t == category; }), "agregar a una categoría");
+            menu(0);
+            expect(ui::chooseSubmenuItem("menu_remove_from_category", [&category](const juce::String& t) { return t == category; }), "y quitarla");
+            menu(0);
+            expect(ui::chooseMenuItem("menu_remove_from_all_categories"));
+            menu(0);
+            expect(ui::chooseMenuItem("menu_play_now"));
+            ui::closeEverything();
+            view->cellClicked(0, 1, ui::mouseAt(*table, { 10.0f, 10.0f }));
+            table->selectRangeOfRows(0, 2);
+            menu(1);
+            expect(ui::chooseMenuItem("menu_add_to_end"), "varias a la vez");
+            expect(ui::draws(*view));
+
+            juce::SparseSet<int> rows;
+            rows.addRange({ 0, 2 });
+            expect(view->getDragSourceDescription(rows).toString().startsWith("track_list_"));
+
+            view->cellDoubleClicked(0, 1, ui::mouseAt(*table, { 10.0f, 10.0f }, {}, 2));
+            auto* modal = ui::waitForModal();
+            auto* details = modal != nullptr ? ui::find<TrackDetailsDialog>(*modal) : nullptr;
+            expect(details != nullptr, "doble clic abre la ficha");
+            if (details != nullptr)
+            {
+                details->onSave();
+                details->onCancel();
+            }
+            pumpMessagesUntil([] { return juce::Component::getCurrentlyModalComponent() == nullptr; }, 3000);
+        }
+
+        beginTest("Categorías: filtrar, crear, renombrar, formato de carpeta, quitar y reordenar");
+        {
+            ui::Screen screen("main");
+            auto* sidebar = ui::find<CategorySidebarComponent>(screen.main());
+            auto* list = ui::find<juce::ListBox>(*sidebar);
+            auto editors = ui::findAll<juce::TextEditor>(*sidebar);
+            expect(list != nullptr && editors.size() >= 2);
+            auto categoryCount = [&screen] { return (int) screen.library().getCategories().size(); };
+            const int start = categoryCount();
+
+            ui::setText(*editors[0], "sal");
+            expect(ui::draws(*sidebar), "filtrado");
+            ui::setText(*editors[0], {});
+            ui::setText(*editors[1], "nueva prueba");
+            editors[1]->onReturnKey();
+            ui::setText(*editors[1], "otra prueba");
+            expect(ui::click(*sidebar, "tip_add_category"));
+            expectEquals(categoryCount(), start + 2, "se crean con Enter o con el botón");
+
+            const int rows = list->getModel()->getNumRows();
+            int userRow = -1;
+            for (int row = 0; row < rows; ++row)
+            {
+                sidebar->getTooltipForRow(row);
+                sidebar->listBoxItemClicked(row, ui::mouseAt(*list, { 5.0f, 5.0f }));
+                if (userRow < 0 && row > 1 && sidebar->getTooltipForRow(row).isEmpty()) userRow = row;
+            }
+            expect(userRow > 1, "hay una categoría del usuario");
+            sidebar->listBoxItemClicked(2, ui::mouseAt(*list, { 5.0f, 5.0f }, ui::rightButton));  // fija: sin menú
+            ui::closeEverything();
+
+            sidebar->listBoxItemClicked(userRow, ui::mouseAt(*list, { 5.0f, 5.0f }, ui::rightButton));
+            expect(ui::chooseMenuItem("rename"));
+            expect(answerWithText("name", "renombrada prueba", 1), "renombrar");
+            sidebar->listBoxItemClicked(userRow, ui::mouseAt(*list, { 5.0f, 5.0f }, ui::rightButton));
+            expect(ui::chooseMenuItem("rename"));
+            expect(answerWithText("name", "no importa", 0), "renombrar se cancela");
+
+            sidebar->listBoxItemDoubleClicked(userRow, ui::mouseAt(*list, { 5.0f, 5.0f }, {}, 2));
+            expect(answerModal(1), "formato de carpeta: artista");
+            sidebar->listBoxItemDoubleClicked(userRow, ui::mouseAt(*list, { 5.0f, 5.0f }, {}, 2));
+            expect(answerModal(-1), "o cancelar");
+            sidebar->listBoxItemDoubleClicked(9999, ui::mouseAt(*list, { 5.0f, 5.0f }, {}, 2));
+
+            sidebar->deleteKeyPressed(userRow);
+            expect(answerModal(0), "quitar pregunta");
+            sidebar->listBoxItemClicked(userRow, ui::mouseAt(*list, { 5.0f, 5.0f }, ui::rightButton));
+            expect(ui::chooseMenuItem("menu_delete_category"));
+            expect(answerModal(1));
+            expectEquals(categoryCount(), start + 1, "se quitó una");
+            sidebar->returnKeyPressed(userRow);
+
+            juce::SparseSet<int> selected;
+            selected.addRange({ userRow, userRow + 1 });
+            const auto drag = sidebar->getDragSourceDescription(selected);
+            expect(drag.toString().startsWith("category_drag_"));
+            expect(sidebar->getDragSourceDescription(juce::SparseSet<int>()).isVoid());
+            using Source = juce::DragAndDropTarget::SourceDetails;
+            expect(sidebar->isInterestedInDragSource(Source(drag, nullptr, {})));
+            for (const int y : { 5, list->getHeight() / 2, list->getHeight() - 5, list->getHeight() + 40 })
+            {
+                sidebar->itemDragMove(Source(drag, nullptr, { 20, list->getY() + y }));
+                expect(ui::draws(*sidebar));
+            }
+            sidebar->itemDragExit(Source(drag, nullptr, {}));
+            sidebar->itemDragMove(Source(drag, nullptr, { 20, list->getY() + list->getHeight() - 5 }));
+            sidebar->itemDropped(Source(drag, nullptr, { 20, list->getY() + list->getHeight() - 5 }));
+            ui::setText(*editors[0], "x");
+            expect(sidebar->getDragSourceDescription(selected).isVoid(), "con el filtro activo no se reordena");
+        }
+
+        beginTest("Importar: la ventana avanzada (archivos y carpeta), las cuñas y la revisión al terminar");
+        {
+            ui::Screen screen("main");
+            auto* libraryComponent = ui::find<LibraryComponent>(screen.main());
+            TempLab outside;
+            const auto song = writeWav(outside.root.getChildFile("NUEVAS/TEMA NUEVO - GRUPO NUEVO.wav"), 2.0,
+                                       [](double t) { return tone(t, 0.3f, 700.0); });
+            const auto spot = writeWav(outside.root.getChildFile("CUNA DEL MES.wav"), 2.0,
+                                       [](double t) { return tone(t, 0.3f, 900.0); });
+
+            answer = {};
+            expect(ui::click(*libraryComponent, "advanced_import_btn"));
+            auto* modal = ui::waitForModal();
+            expect(modal != nullptr && ui::find<AdvancedImportDialog>(*modal) != nullptr);
+            expect(ui::click(*modal, "label_files"), "cancelar el diálogo no importa nada");
+            answer = { song.getParentDirectory() };
+            expect(ui::click(*modal, "label_folder"), "una carpeta");
+            pumpMessagesUntil([] { return juce::Component::getCurrentlyModalComponent() == nullptr; }, 3000);
+            pumpMessagesUntil([&] { return !screen.library().isImporting(); }, 20000);
+
+            expect(ui::click(*libraryComponent, "advanced_import_btn"));
+            modal = ui::waitForModal();
+            answer = { song };
+            expect(modal != nullptr && ui::click(*modal, "label_files"), "o archivos sueltos");
+            pumpMessagesUntil([] { return juce::Component::getCurrentlyModalComponent() == nullptr; }, 3000);
+
+            answer = { spot };
+            expect(ui::click(*libraryComponent, "tip_import_ads"), "las cuñas");
+            pumpMessagesUntil([&] { return !screen.library().isImporting(); }, 20000);
+            dispatchMessagesFor(600);  // el temporizador muestra el resumen y abre la revisión
+            expect(ui::draws(*libraryComponent));
+
+            expect(ui::click(*libraryComponent, "tip_review_button"), "abre (o trae al frente) la revisión");
+            dispatchMessagesFor(50);
+            expect(ui::click(*libraryComponent, "cancel"));
+        }
+
+        ui::cancelFileChoosers();
+    }
+};
+
+class UiAdsTests : public juce::UnitTest
+{
+public:
+    UiAdsTests() : juce::UnitTest("Interfaz: publicidad y botonera", "RAAADIO") {}
+
+    void runTest() override
+    {
+        UiEnvironment environment;
+        using Source = juce::DragAndDropTarget::SourceDetails;
+
+        beginTest("Lista de cuñas: número de cuña, menú de la fila, ficha y arrastrar");
+        {
+            ui::Screen screen("ads");
+            auto* ads = ui::find<AdsListView>(screen.main());
+            auto* table = ads != nullptr ? ui::find<juce::TableListBox>(*ads) : nullptr;
+            expect(table != nullptr && table->getNumRows() > 1);
+            const int rows = table->getNumRows();
+            const auto mouse = ui::mouseAt(*table, { 10.0f, 10.0f });
+
+            // El número de cada cuña (las identificaciones no llevan número: avisa).
+            const juce::String numbers[] = { "7", "", "12", "5" };
+            for (int row = 0; row < rows; ++row)
+            {
+                ads->cellDoubleClicked(row, 1, mouse);
+                auto* alert = dynamic_cast<juce::AlertWindow*>(ui::waitForModal());
+                expect(alert != nullptr);
+                if (alert != nullptr && alert->getTextEditor("number") != nullptr)
+                {
+                    alert->getTextEditor("number")->setText(numbers[row % 4]);
+                    expect(answerModal(row % 5 == 4 ? 0 : 1));
+                }
+                else
+                    expect(answerModal(1));
+            }
+
+            juce::String category;
+            for (const auto& c : screen.library().getCategories())
+                if (!c.isSystem()) { category = MusicLibrary::getDisplayName(c); break; }
+            auto menu = [&](int row) { ads->cellClicked(row, 2, ui::mouseAt(*table, { 10.0f, 10.0f }, ui::rightButton)); };
+            const auto queued = screen.playlist().getQueue().size();
+            menu(0);
+            expect(ui::chooseMenuItem("menu_add_to_start"));
+            menu(0);
+            expect(ui::chooseMenuItem("menu_add_to_end"));
+            expectEquals((int) screen.playlist().getQueue().size(), (int) queued + 2);
+            menu(0);
+            expect(ui::chooseSubmenuItem("menu_add_to_category", [&category](const juce::String& t) { return t == category; }));
+            menu(0);
+            expect(ui::chooseSubmenuItem("menu_remove_from_category", [&category](const juce::String& t) { return t == category; }));
+            menu(0);
+            expect(ui::chooseMenuItem("menu_remove_from_all_categories"));
+            bool edited = false;  // las identificaciones no tienen número: no traen la opción
+            for (int row = 0; row < rows && !edited; ++row)
+            {
+                table->selectRow(row);
+                menu(row);
+                edited = ui::chooseMenuItem("menu_edit_cue", 300);
+                ui::closeEverything();
+            }
+            expect(edited, "asignar el número desde el menú");
+            menu(0);
+            expect(ui::chooseSubmenuItem("menu_assign_cart", [](const juce::String& t) { return t.startsWith("F2"); }), "a la botonera");
+            menu(0);
+            expect(ui::chooseMenuItem("menu_play_now"));
+            ui::closeEverything();
+            ads->cellClicked(0, 2, mouse);
+            ads->cellClicked(rows + 5, 2, ui::mouseAt(*table, { 10.0f, 10.0f }, ui::rightButton));
+            ui::closeEverything();
+
+            juce::SparseSet<int> selected;
+            selected.addRange({ 0, 2 });
+            expect(ads->getDragSourceDescription(selected).toString().startsWith("track_list_"));
+            expect(ads->getDragSourceDescription(juce::SparseSet<int>()).isVoid());
+
+            ads->cellDoubleClicked(0, 3, ui::mouseAt(*table, { 10.0f, 10.0f }, {}, 2));
+            auto* modal = ui::waitForModal();
+            auto* details = modal != nullptr ? ui::find<TrackDetailsDialog>(*modal) : nullptr;
+            expect(details != nullptr, "la ficha de la cuña");
+            if (details != nullptr)
+            {
+                details->onSave();
+                details->onCancel();
+            }
+            pumpMessagesUntil([] { return juce::Component::getCurrentlyModalComponent() == nullptr; }, 3000);
+            expect(ui::click(*ads, "btn_refresh_list"));
+            expect(ui::draws(*ads));
+        }
+
+        beginTest("Pauta: la automática, las franjas de un número y las tandas a mano");
+        {
+            ui::Screen screen("ads");
+            auto* schedule = ui::find<ScheduleView>(screen.main());
+            auto* table = ui::find<juce::TableListBox>(*schedule);
+            auto* number = ui::find<juce::TextEditor>(*schedule);
+            expect(schedule != nullptr && table != nullptr && number != nullptr);
+            const auto mouse = ui::mouseAt(*table, { 10.0f, 10.0f });
+
+            expect(ui::click(*schedule, "schedule_auto"));
+            expect(ui::click(*schedule, "schedule_auto"));
+            ui::setText(*number, {});
+            schedule->cellClicked(0, 3, mouse);  // sin número no se marca nada
+            ui::setText(*number, "7");
+            for (int row = 0; row < 4; ++row)
+            {
+                schedule->cellClicked(row, 3, mouse);
+                schedule->cellClicked(row, 1, mouse);
+            }
+            schedule->cellClicked(1, 3, mouse);  // y se desmarca
+            schedule->cellClicked(9999, 3, mouse);
+            schedule->setSelectedCueNumber(12);
+            schedule->setSelectedCueNumber(-1);
+            table->updateContent();
+            expect(ui::draws(*schedule));
+
+            int pressed = 0;
+            for (auto& b : ui::safe(ui::findAll<juce::Button>(*schedule)))
+                if (b != nullptr && b->getTooltip().startsWith(TRANS("schedule_generate")) && pressed < 6)
+                {
+                    b->triggerClick();
+                    dispatchMessagesFor(20);
+                    ui::closeEverything();  // una franja sin cuñas avisa
+                    ++pressed;
+                }
+            expect(pressed > 0, "insertar tandas a mano");
+        }
+
+        beginTest("Botonera: asignar soltando pistas, tocar y detener, quitar con el menú, y la pestaña llena");
+        {
+            ui::Screen screen("cartwall");
+            auto* cartwall = ui::find<CartwallView>(screen.main());
+            expect(cartwall != nullptr);
+            const juce::var drag("track_list_" + juce::String(screen.engine().getDeck(0).getCurrentTrack().path));
+            expect(cartwall->isInterestedInDragSource(Source(drag, nullptr, {})));
+            expect(!cartwall->isInterestedInDragSource(Source(juce::var("nada"), nullptr, {})));
+
+            std::vector<juce::Point<int>> points;
+            for (int y = 5; y < cartwall->getHeight(); y += 30)
+                for (int x = 5; x < cartwall->getWidth(); x += 45)
+                    points.push_back({ x, y });
+            for (const auto& p : points)
+            {
+                cartwall->itemDragMove(Source(drag, nullptr, p));
+                cartwall->itemDropped(Source(drag, nullptr, p));
+                cartwall->mouseMove(ui::mouseAt(*cartwall, p.toFloat()));
+            }
+            cartwall->itemDragExit(Source(drag, nullptr, {}));
+            expect(ui::draws(*cartwall), "los cartuchos asignados");
+
+            for (const auto& p : points) cartwall->mouseDown(ui::mouseAt(*cartwall, p.toFloat()));
+            dispatchMessagesFor(100);
+            expect(ui::draws(*cartwall), "sonando");
+            for (const auto& p : points) cartwall->mouseDown(ui::mouseAt(*cartwall, p.toFloat()));
+            cartwall->mouseExit(ui::mouseAt(*cartwall, { 0.0f, 0.0f }));
+
+            {
+                // El menú del cartucho se ancla a la botonera: tiene que estar en una ventana.
+                ui::OnScreen onScreen(screen.main());
+                bool removed = false;
+                for (const auto& p : points)
+                {
+                    cartwall->mouseDown(ui::mouseAt(*cartwall, p.toFloat(), ui::rightButton));
+                    if (ui::chooseMenuItem("cartwall_remove", 300)) { removed = true; break; }
+                }
+                expect(removed, "quitar un cartucho");
+
+                // F1 a F12 tocan los cartuchos; con un modificador, no.
+                expect(onScreen.pressKey(juce::KeyPress(juce::KeyPress::F1Key)), "F1");
+                expect(onScreen.pressKey(juce::KeyPress(juce::KeyPress::F1Key)), "otra vez F1 lo detiene");
+                expect(onScreen.pressKey(juce::KeyPress(juce::KeyPress::F12Key)), "F12");
+                onScreen.pressKey(juce::KeyPress(juce::KeyPress::F2Key, juce::ModifierKeys::shiftModifier, 0));
+                onScreen.pressKey(juce::KeyPress('a'));
+            }
+
+            // Soltar sobre la pestaña: el primer cartucho libre; con todos ocupados, avisa.
+            auto* tabs = ui::find<juce::TabbedComponent>(screen.main());
+            auto& bar = tabs->getTabbedButtonBar();
+            auto* cartTab = dynamic_cast<juce::DragAndDropTarget*>(bar.getTabButton(bar.getNumTabs() - 1));
+            expect(cartTab != nullptr && cartTab->isInterestedInDragSource(Source(drag, nullptr, {})));
+            for (int i = 0; i < CartPlayer::numCarts + 1; ++i)
+            {
+                cartTab->itemDragEnter(Source(drag, nullptr, {}));
+                cartTab->itemDropped(Source(drag, nullptr, {}));
+            }
+            expect(answerModal(1), "con la botonera llena avisa");
+            cartTab->itemDragExit(Source(drag, nullptr, {}));
+        }
+    }
+};
+
+class UiConsoleTests : public juce::UnitTest
+{
+public:
+    UiConsoleTests() : juce::UnitTest("Interfaz: decks, mezclador, grabadora y barra de estado", "RAAADIO") {}
+
+    void runTest() override
+    {
+        UiEnvironment environment;
+        using Source = juce::DragAndDropTarget::SourceDetails;
+
+        beginTest("Decks: soltar archivos y pistas, al aire no se reemplaza, sus controles y la forma de onda");
+        {
+            ui::Screen screen("main");
+            auto decks = ui::findAll<DeckComponent>(screen.main());
+            expect(decks.size() == 2);
+            const juce::String audio(screen.engine().getDeck(0).getCurrentTrack().path);
+            const juce::String queued(screen.playlist().getQueue().front().path);
+            TempLab outside;
+            const auto notAudio = outside.touch("NO ES AUDIO.txt");
+
+            // El deck que no está al aire acepta lo que se le suelte.
+            const bool firstOnAir = OnAir::isOnAir(screen.engine().getDeck(0));
+            auto* free = firstOnAir ? decks[1] : decks[0];
+            auto* onAir = firstOnAir ? decks[0] : decks[1];
+            expect(free->isInterestedInFileDrag({}));
+            free->fileDragEnter({}, 0, 0);
+            expect(ui::draws(*free), "resaltado mientras se arrastra");
+            free->fileDragExit({});
+            free->filesDropped({ notAudio.getFullPathName() }, 0, 0);
+            free->filesDropped({}, 0, 0);
+            free->filesDropped({ audio }, 0, 0);
+            for (const auto& description : { "track_path_" + audio, "track_list_" + audio, "playlist_drag_0:" + queued,
+                                              juce::String("otra cosa") })
+            {
+                const Source source(juce::var(description), nullptr, {});
+                free->isInterestedInDragSource(source);
+                free->itemDragEnter(source);
+                free->itemDragExit(source);
+                free->itemDropped(source);
+            }
+            expect(ui::draws(*free));
+
+            onAir->filesDropped({ audio }, 0, 0);
+            expect(answerModal(1), "al aire no se reemplaza la pista: avisa");
+            onAir->itemDropped(Source(juce::var("track_list_" + audio), nullptr, {}));
+            expect(answerModal(1));
+
+            for (auto* deck : decks)
+            {
+                ui::exercise(*deck, {});
+                expect(ui::draws(*deck));
+            }
+
+            for (auto* waveform : ui::findAll<WaveformComponent>(screen.main()))
+            {
+                waveform->setCueRegion(1.0, 20.0);
+                waveform->setEndWarningSeconds(30.0);
+                waveform->setScalingFactor(2.0f);
+                for (const float x : { 0.1f, 0.5f, 0.9f })
+                {
+                    const auto e = ui::mouseAt(*waveform, { (float) waveform->getWidth() * x, (float) waveform->getHeight() / 2.0f });
+                    waveform->mouseMove(e);
+                    waveform->mouseDown(e);
+                    waveform->mouseDrag(e);
+                }
+                waveform->setPosition(0.25);
+                expect(ui::draws(*waveform));
+            }
+        }
+
+        beginTest("Mezclador, grabadora, historial y barra de estado");
+        {
+            ui::Screen screen("main");
+            auto* mixer = ui::find<MixerComponent>(screen.main());
+            expect(mixer != nullptr);
+            ui::exercise(*mixer, {});
+            expect(ui::draws(*mixer));
+
+            auto* recorder = ui::find<RecordingPanel>(screen.main());
+            expect(recorder != nullptr);
+            for (const auto* key : { "tip_record", "rec_btn_pause", "rec_btn_resume", "tip_record_save" })
+            {
+                ui::click(*recorder, key);
+                dispatchMessagesFor(150);
+                ui::closeEverything();
+                expect(ui::draws(*recorder), key);
+            }
+            ui::exercise(*recorder, {});
+
+            if (auto* history = ui::find<HistoryView>(screen.main()))
+            {
+                ui::exercise(*history, {});
+                expect(ui::draws(*history));
+            }
+
+            auto* status = ui::find<StatusBar>(screen.main());
+            expect(status != nullptr);
+            int asked = 0;
+            status->onSettingsRequested = [&asked] { ++asked; };
+            expect(ui::click(*status, "settings") && asked == 1);
+            for (int x = 0; x < status->getWidth(); x += 40)
+                status->mouseUp(ui::mouseAt(*status, { (float) x, (float) status->getHeight() / 2.0f }));
+            status->getTooltip();
+            expect(ui::draws(*status));
+        }
+    }
+};
+
+class UiDialogTests : public juce::UnitTest
+{
+public:
+    UiDialogTests() : juce::UnitTest("Interfaz: generador, ficha, artistas, búsqueda en internet y arranque", "RAAADIO") {}
+
+    void runTest() override
+    {
+        UiEnvironment environment;
+
+        beginTest("Generador: modos, reglas, categorías, plantillas, generar y deshacer");
+        {
+            ui::Screen screen("generator");
+            auto& dialog = dynamic_cast<PlaylistGeneratorDialog&>(screen.view());
+            int generated = 0, cancelled = 0;
+            dialog.onGenerateSuccess = [&generated] { ++generated; };
+            dialog.onCancel = [&cancelled] { ++cancelled; };
+
+            expect(ui::click(dialog, "gen_mode_advanced"));
+            ui::exercise(dialog, { "gen_tpl_save", "gen_tpl_delete" }, "7");
+            expect(generated > 0 && cancelled > 0, "generar y cerrar");
+
+            if (auto* list = ui::find<juce::ListBox>(dialog))
+            {
+                auto* model = list->getListBoxModel();
+                for (int row = 0; row < model->getNumRows(); ++row)
+                {
+                    model->listBoxItemClicked(row, ui::mouseAt(*list, { 30.0f, 5.0f }));
+                    model->listBoxItemClicked(row, ui::mouseAt(*list, { 30.0f, 5.0f }, ui::rightButton));
+                    model->listBoxItemClicked(row, ui::mouseAt(*list, { (float) list->getWidth() - 25.0f, 5.0f }));
+                }
+                model->listBoxItemClicked(9999, ui::mouseAt(*list, { 5.0f, 5.0f }));
+            }
+
+            expect(ui::click(dialog, "gen_tpl_save"));
+            expect(ui::answerWithText("name", "PLANTILLA DE PRUEBA", 1), "guardar una plantilla");
+            expect(ui::click(dialog, "gen_tpl_save"));
+            expect(ui::answerWithText("name", "  ", 1), "sin nombre no se guarda");
+            expect(ui::click(dialog, "gen_tpl_save"));
+            expect(answerModal(0));
+            expect(ui::click(dialog, "gen_tpl_delete"));
+            expect(answerModal(0), "quitar la plantilla pregunta");
+            expect(ui::click(dialog, "gen_tpl_delete"));
+            expect(answerModal(1));
+
+            expect(ui::click(dialog, "gen_btn_generate2") || ui::click(dialog, "gen_btn_replace"));
+            expect(ui::click(dialog, "gen_btn_undo"), "deshacer lo generado");
+            expect(ui::click(dialog, "gen_mode_simple"));
+            ui::exercise(dialog, { "gen_tpl_save", "gen_tpl_delete" }, "2");
+            expect(ui::draws(dialog));
+        }
+
+        beginTest("Ficha de la pista: categorías, guardar, abrir el archivo, actualizar y borrar");
+        {
+            ui::Screen screen("track");
+            auto& details = dynamic_cast<TrackDetailsDialog&>(screen.view());
+            int saved = 0;
+            details.onSave = [&saved] { ++saved; };
+            ui::externalActions().clear();
+            ui::exercise(details, { "btn_delete" }, "Nuevo Valor", 1);
+            expect(ui::externalActions().size() == 1 && ui::externalActions()[0].startsWith(juce::String((int) External::Action::OpenFile)),
+                   "abrir la pista con el reproductor del sistema (anotado, no se abre)");
+            expect(saved > 0, "guardar");
+            expect(ui::click(details, "btn_delete"));
+            expect(answerModal(0), "borrar pregunta");
+            expect(ui::click(details, "btn_delete"));
+            ui::closeEverything(1);
+            expect(ui::draws(details));
+        }
+
+        beginTest("Artistas: buscar, filtros, renombrar, fusionar los parecidos y \"no es el mismo\"");
+        {
+            ui::Screen screen("artists");
+            auto& artists = dynamic_cast<ArtistsView&>(screen.view());
+            int review = 0, closed = 0, changed = 0;
+            artists.onShowReview = [&review](ImportReview::Scope) { ++review; };
+            artists.onCloseRequested = [&closed] { ++closed; };
+            artists.onLibraryChanged = [&changed] { ++changed; };
+            ui::exercise(artists, {}, "Armando", 0);
+            ui::exercise(artists, {}, "Armando Manzanero", 1);
+            expect(review > 0 && closed > 0, "cambiar de pestaña y cerrar");
+
+            // Renombrar: el artista elegido, un nombre nuevo y Enter (el recorrido de arriba
+            // escribe antes en el buscador, que vuelve a filtrar y deja sin artista elegido).
+            artists.reload();
+            expect(ui::click(artists, "review_filter_all"), "todos (el recorrido dejó el último filtro)");
+            auto* list = ui::find<juce::TableListBox>(artists);
+            expect(list != nullptr && list->getNumRows() > 0);
+            list->selectRow(0);
+            dispatchMessagesFor(20);
+            auto* name = ui::find<juce::TextEditor>(artists, [](juce::TextEditor& e) {
+                return ui::shown(e) && e.getText().isNotEmpty(); });
+            expect(name != nullptr, "el nombre del artista elegido");
+            if (name != nullptr)
+            {
+                const int before = changed;
+                ui::setText(*name, name->getText() + " Renombrado");
+                name->onReturnKey();
+                ui::closeEverything(1);
+                expect(changed > before, "renombrar cambió la biblioteca");
+            }
+            expect(ui::draws(artists));
+        }
+
+        beginTest("Búsqueda en internet (sin conexión): resultados, videos, enlaces, copiar y descargar");
+        {
+            ui::Screen screen("online-search");
+            auto& search = dynamic_cast<OnlineSearchView&>(screen.view());
+            int closed = 0, review = 0;
+            search.onCloseRequested = [&closed] { ++closed; };
+            search.onOpenReview = [&review] { ++review; };
+            pumpMessagesUntil([&] { return ui::draws(search) && ui::find<juce::ListBox>(search) != nullptr; }, 5000);
+            dispatchMessagesFor(300);
+            ui::externalActions().clear();
+            ui::exercise(search, {}, "Juan Luis Guerra", 1);
+            dispatchMessagesFor(300);
+            ui::exercise(search, {}, "Juan Luis Guerra", 0);
+            expect(ui::externalActions().size() > 2, "abrir YouTube, Deezer y Spotify y copiar el enlace (anotado)");
+            expect(closed > 0);
+            search.keyPressed(juce::KeyPress('c', juce::ModifierKeys::commandModifier, 0));
+            search.keyPressed(juce::KeyPress(juce::KeyPress::returnKey));
+            search.keyPressed(juce::KeyPress(juce::KeyPress::escapeKey));
+            search.search("Burbujas de amor");
+            dispatchMessagesFor(500);
+            expect(ui::draws(search));
+        }
+
+        beginTest("Al abrir: una restauración pendiente se aplica y avisa; una base dañada se recupera del respaldo");
+        {
+            juce::File backup;
+            {
+                ui::Screen first("empty");
+                expect(PersistenceManager::createBackup([&first](const juce::File& target) {
+                    return first.library().backupDatabaseTo(target); }, &backup).wasOk());
+                expect(PersistenceManager::stageRestore(backup).wasOk());
+                // La misma emisora, abierta otra vez.
+                PersistenceManager::setLabRootOverride(first.station);
+                UiSnapshotRunner::Options options;
+                options.output = first.lab.root.getChildFile("x.png");
+                options.view = "empty";
+                {
+                    UiSnapshotRunner reopened(options);
+                    expect(answerModal(1, 5000), "avisa que se restauró");
+                }
+                // Una base dañada, con su respaldo verificado al lado.
+                first.station.getChildFile("Database/raaadio.db").replaceWithText("esto no es una base de datos");
+                {
+                    UiSnapshotRunner damaged(options);
+                    expect(answerModal(1, 5000), "avisa que la base se recuperó del respaldo");
+                }
+            }
+        }
+
+        beginTest("La ventana principal: configuración desde la barra de estado y las teclas de la ventana");
+        {
+            ui::Screen screen("main");
+            auto* status = ui::find<StatusBar>(screen.main());
+            expect(ui::click(*status, "settings"));
+            auto* modal = ui::waitForModal();
+            auto* settings = modal != nullptr ? ui::find<SettingsDialog>(*modal) : nullptr;
+            expect(settings != nullptr, "se abre la configuración");
+            if (settings != nullptr && settings->onLibraryReset) settings->onLibraryReset();
+            ui::closeEverything();
+            expect(screen.playlist().getQueue().empty(), "borrar la biblioteca vacía la cola");
+
+            ui::OnScreen onScreen(screen.main());
+            onScreen.pressKey(juce::KeyPress(juce::KeyPress::F5Key));
+            expect(ui::draws(screen.main()));
+        }
+    }
+};
+
+class UiViewTests : public juce::UnitTest
+{
+public:
+    UiViewTests() : juce::UnitTest("Interfaz: cada vista se construye y se dibuja", "RAAADIO") {}
+
+    // Una captura como la de --ui-snapshot, en un laboratorio propio.
+    bool render(const juce::String& view, const juce::String& theme, const juce::String& language, juce::int64& pngSize)
+    {
+        TempLab lab;
+        PersistenceManager::setLabRootOverride(lab.root);
+        UiSnapshotRunner::Options options;
+        options.output = lab.root.getChildFile(view + ".png");
+        options.width = 1366;
+        options.height = 768;
+        options.view = view;
+        options.theme = theme;
+        options.language = language;
+
+        bool finished = false, ok = false;
+        {
+            UiSnapshotRunner runner(options);
+            runner.onFinished = [&](bool success) { finished = true; ok = success; };
+            if (!pumpMessagesUntil([&] { return finished; }, 40000)) return false;
+        }
+        pngSize = options.output.getSize();
+        return ok;
+    }
+
+    void runTest() override
+    {
+        UiEnvironment ui;
+        beginTest("Todas las vistas de --ui-snapshot se construyen y se dibujan");
+        for (const auto* view : { "main", "empty", "history", "ads", "cartwall", "settings", "settings-library",
+                                  "settings-library-2", "settings-broadcast", "settings-broadcast-2", "settings-language",
+                                  "settings-about", "generator", "generator-advanced", "generator-done",
+                                  "generator-replace", "track", "import", "review", "review-library", "artists",
+                                  "library-online", "online-search" })
+        {
+            juce::int64 size = 0;
+            expect(render(view, "dark", "es", size), view);
+            expect(size > 5000, juce::String(view) + ": la imagen no está vacía");
+        }
+
+        beginTest("El tema claro y el inglés también se dibujan");
+        for (const auto* view : { "main", "settings", "review", "generator" })
+        {
+            juce::int64 size = 0;
+            ThemeManager::getInstance().setTheme(ThemeManager::Theme::Light, false);
+            LanguageManager::getInstance().setLanguage("en", false);
+            expect(render(view, "light", "en", size), view);
+            expect(size > 5000, view);
+        }
+    }
+};
+
+//==============================================================================
 
 static PortablePathTests portablePathTests;
 static PlayLogTests playLogTests;
@@ -5486,11 +8197,13 @@ static CatalogToolsTests catalogToolsTests;
 static OnlineIdentityTests onlineIdentityTests;
 static SongSearchTests songSearchTests;
 static SongDownloadTests songDownloadTests;
+static ConversionTests conversionTests;
 static DeckCueTests deckCueTests;
 static GeneratorTests generatorTests;
 static CategoryTests categoryTests;
 static QueueTimingTests queueTimingTests;
 static OnAirTests onAirTests;
+static AutoMixTests autoMixTests;
 static DeadAirTests deadAirTests;
 static AirLogTests airLogTests;
 static CartwallTests cartwallTests;
@@ -5499,6 +8212,18 @@ static StationSettingsTests stationSettingsTests;
 static NowPlayingTests nowPlayingTests;
 static StationDataTests stationDataTests;
 static StationSafetyTests stationSafetyTests;
+static PreviewTests previewTests;
+static HttpTransportTests httpTransportTests;
+static DeadAirGuardTests deadAirGuardTests;
+// Al final: dejan el idioma y el aspecto como estaban.
+static UiReviewTests uiReviewTests;
+static UiSettingsTests uiSettingsTests;
+static UiQueueTests uiQueueTests;
+static UiLibraryTests uiLibraryTests;
+static UiAdsTests uiAdsTests;
+static UiConsoleTests uiConsoleTests;
+static UiDialogTests uiDialogTests;
+static UiViewTests uiViewTests;
 
 #if JUCE_WINDOWS
 extern "C" __declspec(dllimport) int __stdcall SetConsoleOutputCP(unsigned int codePage);
@@ -5508,13 +8233,27 @@ class ConsoleRunner : public juce::UnitTestRunner
 {
     void logMessage(const juce::String& message) override
     {
-        std::cout << message << std::endl;
+        std::cout << message << '\n' << std::flush;  // a la vista aunque una prueba se cuelgue
     }
 };
 
 int main()
 {
+    installCrashReport();
     juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // Ninguna prueba toca las preferencias del usuario (idioma, tema, dispositivos de audio y
+    // carpeta de la emisora): todas van a una carpeta temporal.
+    TempLab preferences;
+    AppSettings::setFolderOverride(preferences.root);
+
+    // Nada se abre ni se copia en el equipo: el navegador, el Explorador, el reproductor y el
+    // portapapeles quedan anotados (ui::externalActions), y los diálogos de archivos
+    // contestan "Cancelar" salvo en las pruebas que eligen algo.
+    External::setHandler([](External::Action action, const juce::String& target) {
+        ui::externalActions().add(juce::String((int) action) + ":" + target);
+    });
+    ui::cancelFileChoosers();
 
    #if JUCE_WINDOWS
     SetConsoleOutputCP(65001);  // UTF-8, para que las tildes se vean bien en la consola
@@ -5530,7 +8269,7 @@ int main()
         passes += runner.getResult(i)->passes;
     }
 
-    std::cout << "\n" << passes << " comprobaciones correctas, " << failures << " fallidas" << std::endl;
-    std::cout << (failures == 0 ? "TODAS LAS PRUEBAS PASARON" : "HAY PRUEBAS FALLIDAS") << std::endl;
+    std::cout << "\n" << passes << " comprobaciones correctas, " << failures << " fallidas\n";
+    std::cout << (failures == 0 ? "TODAS LAS PRUEBAS PASARON" : "HAY PRUEBAS FALLIDAS") << '\n';
     return failures == 0 ? 0 : 1;
 }

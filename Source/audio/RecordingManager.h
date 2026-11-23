@@ -5,7 +5,7 @@
 class RecordingManager : public juce::Thread, public juce::ChangeBroadcaster, public OutputTap {
 public:
     RecordingManager();
-    ~RecordingManager();
+    ~RecordingManager() override;
 
     enum State {
         Idle,

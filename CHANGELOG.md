@@ -62,6 +62,13 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
   canción espera en vez de fallar. Cancelar cierra todo el árbol de procesos (job object).
   Cada intento queda en la tabla `downloads`. Aviso de derechos y términos de uso la primera
   vez. Las descargas siguen aunque se cierre la ventana de búsqueda.
+- **Importar audios de WhatsApp, M4A y AAC** (`AudioConverter`): las notas de voz (Opus, en
+  `.opus` o `.ogg`), `.m4a`, `.aac`, `.amr` y `.mpeg` se convierten a FLAC de 16 bits con el
+  FFmpeg de la descarga de canciones, con sus etiquetas y siempre al mismo archivo (así se
+  reconocen si se importan otra vez). Un `.mpeg` que es MP3 (los de WhatsApp Web) se guarda
+  como `.mp3`, tal cual y sin FFmpeg. Un archivo de un formato conocido que JUCE no lee (un
+  WAV con MP2 adentro) se intenta con FFmpeg. Si falta FFmpeg, al terminar la importación se
+  ofrece instalar solo FFmpeg y esos archivos se importan solos después.
 - **Búsqueda FTS5** sin mayúsculas ni tildes, por partes de palabras, créditos y nombre
   original. **Separación de artistas por intérprete** en el generador (con invitados).
 - **Mostrar en MAYÚSCULAS** (*Configuración → Biblioteca y datos*): los nombres se guardan
@@ -114,6 +121,15 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
 - Pruebas automáticas (`RAAADIO_Tests`, `ctest`): más de 600 comprobaciones.
 - Organización del repositorio: licencia, guía de contribución, política de seguridad,
   plantillas de GitHub, integración continua en Windows, `.gitattributes` y `.editorconfig`.
+- **Análisis de calidad con SonarQube** (`tools/sonar-scan.ps1`, `sonar-project.properties`,
+  `.clang-tidy`): métricas y duplicados con el plugin sonar-cxx, los hallazgos de clang-tidy
+  como issues externos y la cobertura de las pruebas con OpenCppCoverage. El token queda fuera
+  del repositorio.
+- **Pruebas de la interfaz**: cada pantalla se construye, se dibuja y se opera sin ventana
+  (botones, menús, diálogos, tablas, arrastrar y soltar). Las preferencias del equipo, los
+  diálogos de archivos y lo que se abre fuera de RAAADIO (navegador, Explorador, reproductor,
+  portapapeles) pasan por `AppSettings`, `FileChoosers` y `External`, que las pruebas
+  reemplazan para no tocar nada del equipo.
 
 ### Cambiado
 
@@ -171,6 +187,8 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
 
 ### Corregido
 
+- Mover filas de la cola con las flechas podía cerrar la aplicación: al deseleccionar, la
+  tabla borraba el control de la fila mientras su botón todavía se estaba pulsando.
 - "Reproducir ahora" cortaba el aire: detenía el deck B y reemplazaba el A sin preguntar.
 - El título que ven los oyentes cambiaba al preescuchar una pista en CUE.
 - La versión nueva de una cuña con el mismo nombre y duración se descartaba como duplicada.
@@ -178,6 +196,8 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
 - Restaurar un respaldo no recuperaba la pauta (se sobrescribía al cerrar la app).
 - Los botones de subir y bajar de la cola podían mover otra canción si AutoDJ avanzaba.
 - El selector de importación ofrecía `.m4a` (ilegible) y ocultaba `.ogg`, `.aiff` y `.wma`.
+- Un WMA importado guardaba la huella SHA-256 del original y no la del FLAC que quedaba en la
+  biblioteca, así que su copia en el destino externo de respaldo fallaba la verificación.
 - La última reproducción se leía como UTC y corría la hora.
 - El generador se quedaba atascado cuando una regla de separación era imposible de cumplir.
 - El generador, con una categoría chica junto a una grande, repetía las canciones de la chica

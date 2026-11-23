@@ -6,7 +6,7 @@ AutoDJ::AutoDJ(AudioEngine& engine, Playlist& pl)
 {
     juce::Logger::writeToLog("AutoDJ::AutoDJ ctor");
     state = AutoPlaying;
-    startTimer(200); 
+    startTimer(50);  // la siguiente entra a lo sumo 50 ms después del punto de mezcla
 }
 
 AutoDJ::~AutoDJ() {
@@ -79,11 +79,13 @@ void AutoDJ::checkDeckFinish(Deck& activeDeck, Deck& otherDeck) {
         return;
     }
 
-    if (activeDeck.isLoaded() && activeDeck.isPlaying() && activeDeck.isReadyToMix()) {
-        if (!otherDeck.isPlaying()) {
-             juce::Logger::writeToLog("AutoDJ: Mix Triggered by Deck " + juce::String(activeDeck.getId()));
-             triggerNextDeck(otherDeck);
-        }
+    // Llegó al punto de mezcla: entra la siguiente y lo que queda de esta (el final que ya
+    // se desvanece) baja con un fundido. Un deck que terminó y aún no se descargó no se
+    // vuelve a poner al aire.
+    if (activeDeck.isLoaded() && activeDeck.isPlaying() && activeDeck.isReadyToMix()
+        && !otherDeck.isPlaying() && !otherDeck.hasFinished()) {
+        juce::Logger::writeToLog("AutoDJ: Mix Triggered by Deck " + juce::String(activeDeck.getId()));
+        if (triggerNextDeck(otherDeck)) activeDeck.startMixFade();
     }
 
     if (activeDeck.isLoaded() && activeDeck.hasFinished()) {
@@ -94,6 +96,10 @@ void AutoDJ::checkDeckFinish(Deck& activeDeck, Deck& otherDeck) {
              if (!triggerNextDeck(otherDeck)) {
                  recoveryPending = true;
              }
+        } else if (otherDeck.isFadingOut()) {
+            // Una pista corta terminó antes que el fundido de la anterior: la programación
+            // sigue en este deck, sin esperar a que el otro se apague.
+            if (!triggerNextDeck(activeDeck)) recoveryPending = true;
         }
     }
 }

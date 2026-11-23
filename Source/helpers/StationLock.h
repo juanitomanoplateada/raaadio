@@ -9,7 +9,7 @@
 // candado se toma sin preguntar.
 class StationLock : private juce::Timer {
 public:
-    explicit StationLock(juce::File labRoot);
+    explicit StationLock(const juce::File& labRoot);
     ~StationLock() override;
 
     struct Owner {

@@ -3,6 +3,7 @@
 #include <deque>
 #include "../database/Database.h"
 #include "TrackNaming.h"
+#include "AudioConverter.h"
 
 class MusicLibrary {
 public:
@@ -13,11 +14,13 @@ public:
 
     // Importa un archivo: lo copia tal cual a la biblioteca (sin recodificar) y lo analiza
     // (sonoridad y puntos de entrada y salida). Si ya estaba (mismo archivo o misma canción),
-    // no lo copia otra vez.
+    // no lo copia otra vez. Lo que JUCE no decodifica por su cuenta (WMA, y con FFmpeg las
+    // notas de voz de WhatsApp, M4A, AAC...: AudioConverter) se guarda como FLAC.
     // La música entra por revisar, en Library/_Entrada, con artista y título propuestos: la
     // revisión los confirma y la ordena en Library/Musica. Las cuñas, identificaciones y
     // separadores entran directo a la carpeta de su categoría.
-    enum class ImportResult { Added, Duplicate, Failed };
+    // NeedsFfmpeg: el archivo se puede importar convirtiéndolo, pero FFmpeg no está instalado.
+    enum class ImportResult { Added, Duplicate, Failed, NeedsFfmpeg };
     ImportResult processAndAddTrack(const juce::File& sourceFile, const juce::String& targetCategory = "", int batch = 0);
     void importFiles(const juce::Array<juce::File>& files, const juce::String& targetCategory = "");
     // Una canción descargada (búsqueda en internet): entra por revisar como la música importada,
@@ -26,8 +29,11 @@ public:
     struct DownloadImport { ImportResult result = ImportResult::Failed; int trackId = -1; };
     DownloadImport importDownloaded(const juce::File& file, const juce::String& batchSource, const juce::String& isrc);
     void cancelImport();
-    // "*.mp3;*.wav;..." con los formatos que la biblioteca sabe leer (para elegir archivos).
+    // "*.mp3;*.wav;..." con los formatos que la biblioteca sabe leer o convertir (para elegir archivos).
     juce::String getSupportedFileWildcard() const;
+    bool isImportable(const juce::File& file) const;  // por la extensión
+    bool isConverterAvailable() const { return converter.isAvailable(); }
+    void setConverter(AudioConverter::Services services) { converter = AudioConverter(std::move(services)); }
     bool isImporting() const;
     double getProgress() const;
     juce::String getImportStatus() const;
@@ -37,9 +43,13 @@ public:
     bool backupDatabaseTo(const juce::File& target);
 
     // Resultado de la última importación, para mostrarlo al terminar (toReview: las que
-    // entraron por revisar).
-    struct ImportSummary { int added = 0; int duplicates = 0; int failed = 0; int toReview = 0; };
+    // entraron por revisar; needFfmpeg: las que esperan a que se instale FFmpeg).
+    struct ImportSummary { int added = 0; int duplicates = 0; int failed = 0; int toReview = 0; int needFfmpeg = 0; };
     ImportSummary getLastImportSummary() const;
+    // Los archivos de la última importación que necesitan FFmpeg, y su categoría: se vuelven
+    // a importar después de instalarlo.
+    struct WaitingFiles { juce::Array<juce::File> files; juce::String category; };
+    WaitingFiles getFilesWaitingForFfmpeg() const;
     int getImportCount() const { return importCount.load(); }  // importaciones iniciadas
 
     // Dos pistas con el mismo artista y título cuya duración difiere menos que esto se
@@ -182,6 +192,7 @@ private:
     juce::CriticalSection importLock;
     juce::File libraryFolder;
     juce::AudioFormatManager formatManager;
+    AudioConverter converter;
 
 
     class ImportThread : public juce::Thread {
@@ -197,7 +208,9 @@ private:
 
     std::unique_ptr<ImportThread> currentImportThread;
     std::atomic<double> importProgress{0.0};
-    std::atomic<int> importAdded{0}, importDuplicates{0}, importFailed{0}, importToReview{0}, importCount{0};
+    std::atomic<int> importAdded{0}, importDuplicates{0}, importFailed{0}, importToReview{0}, importNeedFfmpeg{0}, importCount{0};
+    mutable juce::CriticalSection waitingLock;
+    WaitingFiles waitingForFfmpeg;
     std::atomic<int> catalogVersion{0};
     std::unique_ptr<TrackNaming::Context> importContext;  // solo mientras corre ImportThread
 

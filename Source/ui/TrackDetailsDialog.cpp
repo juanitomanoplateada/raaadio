@@ -1,4 +1,5 @@
 #include "TrackDetailsDialog.h"
+#include "../helpers/External.h"
 #include "../helpers/ThemeManager.h"
 #include "../helpers/UiStyle.h"
 
@@ -175,7 +176,6 @@ TrackDetailsDialog::~TrackDetailsDialog() {
 
 void TrackDetailsDialog::paint(juce::Graphics& g) {
     auto baseBg = ThemeManager::getInstance().getBaseBackgroundColour();
-    auto primaryText = ThemeManager::getInstance().getPrimaryTextColour();
     auto highlightCol = ThemeManager::getInstance().getHighlightColour();
 
     g.fillAll(baseBg);
@@ -258,7 +258,7 @@ void TrackDetailsDialog::loadData() {
 void TrackDetailsDialog::playLocal() {
     juce::File file(trackInfo.path);
     if (file.existsAsFile()) {
-        file.startAsProcess();
+        External::openFile(file);
     } else {
         juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, TRANS("error_title"), TRANS("error_file_not_found") + " " + trackInfo.path);
     }

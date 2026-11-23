@@ -113,7 +113,7 @@ private:
 
     void startConfirm(std::vector<int> rows);
     void finishConfirm();
-    void discardRows(std::vector<int> rows);
+    void discardRows(const std::vector<int>& rows);
     void showCategoryMenu();
     void showCaseMenu();
     void showRowMenu(int reviewRow);

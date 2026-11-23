@@ -20,6 +20,6 @@ bool playNow(Deck& a, Deck& b, const juce::File& file);
 
 // Lo mismo desde la interfaz: si hay algo al aire, pregunta antes. beforeStart corre al
 // confirmar (por ejemplo, para sacar la pista de la cola); si devuelve false, no se hace nada.
-void requestPlayNow(Deck& a, Deck& b, const TrackInfo& track, std::function<bool()> beforeStart = {});
+void requestPlayNow(Deck& a, Deck& b, const TrackInfo& track, const std::function<bool()>& beforeStart = {});
 
 }

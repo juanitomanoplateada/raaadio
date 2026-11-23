@@ -13,7 +13,7 @@ class AdvertisingManager : public juce::ChangeBroadcaster
 {
 public:
     AdvertisingManager();
-    ~AdvertisingManager();
+    ~AdvertisingManager() override;
 
     void initialise(MusicLibrary& library);
     void saveData();

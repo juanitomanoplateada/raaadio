@@ -88,19 +88,17 @@ void Deck::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) {
         resamplerSource->setResamplingRatio(currentRatio);
         resamplerSource->getNextAudioBlock(bufferToFill);
         
-        if (skipRequested) {
-            if (currentFadeLevel > 0.0f) {
-                float numSamples = (float)bufferToFill.numSamples;
-                float rate = (float)currentSampleRate; 
-                if (rate <= 0) rate = 44100.0f; 
-                
-                float decrement = (numSamples / rate) * 0.5f; 
-                
-                currentFadeLevel -= decrement;
-                if (currentFadeLevel < 0.0f) currentFadeLevel = 0.0f;
-                
-                bufferToFill.buffer->applyGainRamp(bufferToFill.startSample, bufferToFill.numSamples, 
-                                                   currentFadeLevel + decrement, currentFadeLevel);
+        if (fadingOut) {
+            // Curva (1 - t)²: baja pareja al oído y llega a cero sin escalón. Una recta en
+            // amplitud se oye casi entera y se corta al final.
+            auto gainAt = [](float t) { return (1.0f - t) * (1.0f - t); };
+            const float progress = fadeProgress.load();
+            if (progress < 1.0f) {
+                const float rate = currentSampleRate > 0.0 ? (float) currentSampleRate : 44100.0f;
+                const float next = juce::jmin(1.0f, progress + (float) bufferToFill.numSamples / (rate * fadeSeconds.load()));
+                fadeProgress = next;
+                bufferToFill.buffer->applyGainRamp(bufferToFill.startSample, bufferToFill.numSamples,
+                                                   gainAt(progress), gainAt(next));
             } else {
                 bufferToFill.clearActiveBufferRegion();
             }
@@ -146,11 +144,13 @@ bool Deck::loadTrack(const juce::File& file) {
         const double length = transportSource->getLengthInSeconds();
         cueIn = juce::jlimit(0.0, length, info.cueIn);
         cueOut = (info.cueOut > cueIn && info.cueOut < length) ? info.cueOut : 0.0;
+        mixPoint = mixPointFor(info, cueIn, getEndPosition());
         transportSource->setPosition(cueIn);
 
         juce::Logger::writeToLog("Deck " + juce::String(deckId) + ": gain " + juce::String(normalizationGain, 3)
                                  + " (" + juce::String(info.loudnessLufs, 1) + " LUFS), cue "
-                                 + juce::String(cueIn, 2) + "s - " + juce::String(getEndPosition(), 2) + "s");
+                                 + juce::String(cueIn, 2) + "s - " + juce::String(getEndPosition(), 2)
+                                 + "s, mix " + juce::String(mixPoint, 2) + "s");
 
         resamplerSource->setResamplingRatio(1.0);
 
@@ -219,9 +219,11 @@ bool Deck::applyPendingAnalysis() {
     }
 
     currentTrack = result;
+    mixPoint = mixPointFor(currentTrack, cueIn, getEndPosition());
 
     juce::Logger::writeToLog("Deck " + juce::String(deckId) + ": analysis applied, cue "
-                             + juce::String(cueIn, 2) + "s - " + juce::String(getEndPosition(), 2) + "s");
+                             + juce::String(cueIn, 2) + "s - " + juce::String(getEndPosition(), 2)
+                             + "s, mix " + juce::String(mixPoint, 2) + "s");
     sendChangeMessage();
     return true;
 }
@@ -235,21 +237,41 @@ void Deck::unload() {
     currentTrack = TrackInfo();
     thumbnail.clear();
     
-    skipRequested = false;
-    currentFadeLevel = 1.0f;
+    fadingOut = false;
+    fadeProgress = 0.0f;
     cueIn = 0.0;
     cueOut = 0.0;
+    mixPoint = 0.0;
 
     sendChangeMessage();
     if (onStateChange) onStateChange();
 }
 
+double Deck::mixPointFor(const TrackInfo& track, double cueIn, double endPosition) {
+    if (track.systemRole != CategoryRole::None || endPosition - cueIn <= minMixSeconds) return endPosition;
+    if (track.mixPoint > cueIn) return juce::jmin(track.mixPoint, endPosition);
+    return endPosition;
+}
+
+void Deck::startFadeOut(double seconds) {
+    if (!isLoaded() || !isPlaying() || fadingOut) return;
+    fadeSeconds = (float) juce::jmax(0.05, seconds);
+    fadeProgress = 0.0f;
+    fadingOut = true;
+}
+
 void Deck::startSkip() {
-    if (isLoaded() && isPlaying() && !skipRequested) {
+    if (isLoaded() && isPlaying() && !fadingOut) {
         juce::Logger::writeToLog("Deck " + juce::String(deckId) + ": Skip Requested (Fade Out)");
-        skipRequested = true;
-        currentFadeLevel = 1.0f;
+        startFadeOut(skipFadeSeconds);
     }
+}
+
+void Deck::startMixFade() {
+    // Lo que queda ya es el final que se desvanece; si es casi nada, termina solo.
+    const double remaining = getRemainingSeconds();
+    if (remaining < 0.1) return;
+    startFadeOut(juce::jmin(mixFadeSeconds, remaining));
 }
 
 void Deck::play() {
@@ -302,8 +324,8 @@ void Deck::setLooping(bool shouldLoop) {
 }
 
 bool Deck::hasFinished() const {
-    if (skipRequested && currentFadeLevel <= 0.001f) {
-        return true; 
+    if (fadingOut && fadeProgress >= 1.0f) {
+        return true;
     }
 
     if (loopingState) return false;
@@ -322,7 +344,8 @@ bool Deck::hasFinished() const {
         return true;
     }
 
-    if (len > 0.5 && pos >= (len - 0.2)) {
+    // Sin silencio final que recortar: hasta el último instante (AutoDJ revisa cada 50 ms).
+    if (len > 0.5 && pos >= (len - 0.05)) {
         return true;
     }
 
@@ -332,16 +355,9 @@ bool Deck::hasFinished() const {
 bool Deck::isReadyToMix() const {
     if (loopingState) return false;
 
-    if (skipRequested) return true;
+    if (fadingOut) return true;
 
-    // La siguiente pista entra mixLeadSeconds antes del punto de salida.
-    if (transportSource && getEndPosition() - cueIn > minMixSeconds) {
-        if (getRemainingSeconds() <= mixLeadSeconds) {
-            return true;
-        }
-    }
-
-    return false;
+    return isLoaded() && transportSource->getCurrentPosition() >= mixPoint;
 }
 
 double Deck::getEndPosition() const {

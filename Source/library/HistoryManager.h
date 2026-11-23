@@ -18,7 +18,7 @@ struct HistoryEntry {
 class HistoryManager : public juce::ChangeBroadcaster {
 public:
     HistoryManager();
-    ~HistoryManager();
+    ~HistoryManager() override;
 
     // Conecta el historial a la base de datos y carga las entradas más recientes.
     void initialise(MusicLibrary& library);

@@ -7,7 +7,7 @@ class WaveformComponent : public juce::Component,
 {
 public:
     WaveformComponent(juce::AudioThumbnail& thumbnail);
-    ~WaveformComponent();
+    ~WaveformComponent() override;
 
     void paint(juce::Graphics& g) override;
     void lookAndFeelChanged() override;

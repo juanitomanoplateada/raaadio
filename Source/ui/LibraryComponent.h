@@ -87,6 +87,12 @@ private:
 
     void setStatusText(const juce::String& text, const juce::String& shortText = {});
 
+    // Lo importado que necesita FFmpeg (notas de voz de WhatsApp, M4A...): se ofrece
+    // instalarlo y, al terminar, esos archivos se importan solos. then: lo que sigue después
+    // de responder (abrir la revisión, sin taparle el aviso).
+    void offerFfmpeg(const std::function<void()>& then);
+    MusicLibrary::WaitingFiles ffmpegImport;  // esperan a que termine la instalación
+
     std::unique_ptr<juce::FileChooser> fileChooser;
 
     void importAnuncios();

@@ -11,7 +11,7 @@ Database::~Database() {
 bool Database::open(const std::string& dbPath) {
     int rc = sqlite3_open(dbPath.c_str(), &db);
     if (rc) {
-        std::cerr << "Can't open database: " << sqlite3_errmsg(db) << std::endl;
+        std::cerr << "Can't open database: " << sqlite3_errmsg(db) << "\n";
         return false;
     }
     // Resistente a cortes de luz: diario clásico (no WAL, que falla en discos de red y en
@@ -29,10 +29,10 @@ void Database::close() {
 }
 
 bool Database::execute(const std::string& sql) {
-    char* zErrMsg = 0;
-    int rc = sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
+    char* zErrMsg = nullptr;
+    int rc = sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &zErrMsg);
     if (rc != SQLITE_OK) {
-        std::cerr << "SQL error: " << zErrMsg << " in SQL: " << sql << std::endl;
+        std::cerr << "SQL error: " << zErrMsg << " in SQL: " << sql << "\n";
         sqlite3_free(zErrMsg);
         return false;
     }
@@ -56,6 +56,7 @@ bool Database::initSchema() {
         "true_peak_db REAL DEFAULT -70.0,"
         "cue_in REAL DEFAULT 0.0,"
         "cue_out REAL DEFAULT 0.0,"
+        "mix_point REAL DEFAULT 0.0,"
         "analysis_version INTEGER DEFAULT 0,"
         "file_hash TEXT DEFAULT '',"
         "status INTEGER DEFAULT 0,"
@@ -105,7 +106,8 @@ bool Database::initSchema() {
                                 "fingerprint BLOB",
                                 "fingerprint_version INTEGER DEFAULT 0",
                                 "mb_recording_id TEXT DEFAULT ''",
-                                "isrc TEXT DEFAULT ''" }) {
+                                "isrc TEXT DEFAULT ''",
+                                "mix_point REAL DEFAULT 0.0" }) {
         const std::string sql = std::string("ALTER TABLE tracks ADD COLUMN ") + column + ";";
         sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr);
     }
@@ -317,7 +319,9 @@ std::vector<PlayLogEntry> Database::getRecentPlayLog(int limit) {
 static const char* const trackColumns =
     "t.id, t.path, t.artist, t.title, t.play_count, t.duration, t.last_played, t.normalization_gain, "
     "t.created_at, t.updated_at, t.loudness_lufs, t.true_peak_db, t.cue_in, t.cue_out, "
-    "t.analysis_version, t.file_hash, t.status, t.version, t.year, t.confirmed_at";
+    "t.analysis_version, t.file_hash, t.status, t.version, t.year, t.confirmed_at, t.mix_point, "
+    "(SELECT MAX(c.system_role) FROM track_categories tc JOIN categories c ON c.id = tc.category_id "
+    "WHERE tc.track_id = t.id)";
 
 TrackInfo Database::readTrackRow(sqlite3_stmt* stmt) const {
     auto text = [stmt](int col) {
@@ -347,6 +351,8 @@ TrackInfo Database::readTrackRow(sqlite3_stmt* stmt) const {
     t.version = text(17);
     t.year = sqlite3_column_int(stmt, 18);
     t.confirmedAt = text(19);
+    t.mixPoint = sqlite3_column_double(stmt, 20);
+    t.systemRole = (CategoryRole) sqlite3_column_int(stmt, 21);  // NULL (sin categoría) = 0
     return t;
 }
 
@@ -365,7 +371,7 @@ std::vector<TrackInfo> Database::queryTracks(const std::string& whereClause,
     const std::string sql = std::string("SELECT ") + trackColumns + " FROM tracks t " + whereClause + ";";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "SQL error: " << sqlite3_errmsg(db) << " in SQL: " << sql << std::endl;
+        std::cerr << "SQL error: " << sqlite3_errmsg(db) << " in SQL: " << sql << "\n";
         return results;
     }
     if (bind) bind(stmt);
@@ -387,9 +393,9 @@ bool Database::addTrack(const TrackInfo& track) {
     const char* sql =
         "INSERT OR IGNORE INTO tracks (path, artist, title, duration, last_played, normalization_gain, "
         "created_at, updated_at, loudness_lufs, true_peak_db, cue_in, cue_out, analysis_version, file_hash, "
-        "status, version, year, confirmed_at, match_key) "
+        "status, version, year, confirmed_at, match_key, mix_point) "
         "VALUES (?, ?, ?, ?, '', ?, datetime('now', 'localtime'), datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?, "
-        "?, ?, ?, ?, ?);";
+        "?, ?, ?, ?, ?, ?);";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
 
@@ -411,6 +417,7 @@ bool Database::addTrack(const TrackInfo& track) {
     sqlite3_bind_text(stmt, 15, track.confirmedAt.c_str(), -1, SQLITE_TRANSIENT);
     const auto matchKey = storedMatchKey(track.artist, track.title, track.version);
     sqlite3_bind_text(stmt, 16, matchKey.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 17, track.mixPoint);
 
     const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
     const bool inserted = ok && sqlite3_changes(db) > 0;
@@ -495,7 +502,7 @@ bool Database::updateTrackAnalysis(const TrackInfo& track) {
     const char* sql =
         "UPDATE tracks SET normalization_gain = ?1, loudness_lufs = ?2, true_peak_db = ?3, cue_in = ?4, "
         "cue_out = ?5, duration = ?6, analysis_version = ?7, "
-        "file_hash = CASE WHEN ?8 = '' THEN file_hash ELSE ?8 END WHERE id = ?9;";
+        "file_hash = CASE WHEN ?8 = '' THEN file_hash ELSE ?8 END, mix_point = ?10 WHERE id = ?9;";
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
 
@@ -508,6 +515,7 @@ bool Database::updateTrackAnalysis(const TrackInfo& track) {
     sqlite3_bind_int(stmt, 7, track.analysisVersion);
     sqlite3_bind_text(stmt, 8, track.fileHash.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, 9, track.id);
+    sqlite3_bind_double(stmt, 10, track.mixPoint);
 
     const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
     sqlite3_finalize(stmt);
@@ -530,12 +538,12 @@ std::vector<int> Database::getTrackIdsNeedingAnalysis(int currentVersion) {
 bool Database::run(const char* sql, const std::function<void(sqlite3_stmt*)>& bind) {
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "SQL error: " << sqlite3_errmsg(db) << " in SQL: " << sql << std::endl;
+        std::cerr << "SQL error: " << sqlite3_errmsg(db) << " in SQL: " << sql << "\n";
         return false;
     }
     if (bind) bind(stmt);
     const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
-    if (!ok) std::cerr << "SQL error: " << sqlite3_errmsg(db) << " in SQL: " << sql << std::endl;
+    if (!ok) std::cerr << "SQL error: " << sqlite3_errmsg(db) << " in SQL: " << sql << "\n";
     sqlite3_finalize(stmt);
     return ok;
 }

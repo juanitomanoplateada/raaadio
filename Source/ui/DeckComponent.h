@@ -13,7 +13,7 @@ class DeckComponent : public juce::Component,
 {
 public:
     DeckComponent(Deck& deck);
-    ~DeckComponent();
+    ~DeckComponent() override;
 
     void setPlaylist(Playlist* p);
 

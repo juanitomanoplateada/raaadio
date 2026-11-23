@@ -15,6 +15,8 @@ namespace {
     }
 }
 
+SongDownloader::SongDownloader(MusicLibrary& lib) : SongDownloader(lib, Services{}) {}
+
 SongDownloader::SongDownloader(MusicLibrary& lib, Services s)
     : juce::Thread("Song Downloader"), library(lib), services(std::move(s))
 {
@@ -75,7 +77,7 @@ std::vector<DownloadTools::Asset> SongDownloader::getMissingTools() const {
     return DownloadTools::missing(getTools(), services.toolsFolder);
 }
 
-void SongDownloader::installTools() {
+void SongDownloader::installTools(const juce::StringArray& only) {
     {
         const juce::ScopedLock sl(lock);
         if (status.installing) return;
@@ -83,6 +85,7 @@ void SongDownloader::installTools() {
         status.installError = {};
         status.installErrorStep = {};
         status.installProgress = 0.0;
+        installOnly = only;
     }
     installRequested = true;
     notify();
@@ -100,8 +103,13 @@ void SongDownloader::runInstall() {
         sendChangeMessage();
     };
 
+    juce::StringArray only;
+    { const juce::ScopedLock sl(lock); only = installOnly; }
+    auto wanted = [&only](const DownloadTools::Asset& asset) { return only.isEmpty() || only.contains(asset.name); };
+
     services.toolsFolder.createDirectory();
     for (const auto& asset : DownloadTools::missing(getTools(), services.toolsFolder)) {
+        if (!wanted(asset)) continue;
         {
             const juce::ScopedLock sl(lock);
             status.installStep = asset.name;
@@ -146,11 +154,14 @@ void SongDownloader::runInstall() {
     }
 
     findTools();
+    bool stillMissing = false;
+    for (const auto& asset : DownloadTools::missing(getTools(), services.toolsFolder))
+        stillMissing = stillMissing || (!only.isEmpty() && wanted(asset));
     {
         const juce::ScopedLock sl(lock);
         status.installing = false;
         status.installStep = {};
-        if (!status.toolsReady) status.installError = "extract";
+        if (only.isEmpty() ? !status.toolsReady : stillMissing) status.installError = "extract";
     }
     sendChangeMessage();
     notify();  // si había canciones esperando las herramientas
@@ -444,6 +455,7 @@ void SongDownloader::runJob(int jobId) {
             finishJob(jobId, recordId, State::Duplicate, SongDownload::Problem::None, {}, -1);
             break;
         case MusicLibrary::ImportResult::Failed:
+        case MusicLibrary::ImportResult::NeedsFfmpeg:  // un MP3: no pasa
             finishJob(jobId, recordId, State::Failed, SongDownload::Problem::Other, "import", -1);
             break;
     }

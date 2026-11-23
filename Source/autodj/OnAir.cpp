@@ -15,17 +15,20 @@ const Deck* nowPlaying(const Deck& a, const Deck& b) {
     return nullptr;
 }
 
+// El deck libre. Si suenan los dos, el que está en preescucha; y en plena mezcla (los dos al
+// aire), el que arrancó antes, que es el que ya se está yendo.
+static Deck& deckForPlayNow(Deck& a, Deck& b) {
+    if (!a.isPlaying()) return a;
+    if (!b.isPlaying()) return b;
+    if (!isOnAir(a)) return a;
+    if (!isOnAir(b)) return b;
+    return b.getLastPlayTime() < a.getLastPlayTime() ? b : a;
+}
+
 bool playNow(Deck& a, Deck& b, const juce::File& file) {
     if (!file.existsAsFile()) return false;
 
-    // El deck libre. Si suenan los dos, el que está en preescucha; y en plena mezcla (los
-    // dos al aire), el que arrancó antes, que es el que ya se está yendo.
-    Deck* target;
-    if (!a.isPlaying()) target = &a;
-    else if (!b.isPlaying()) target = &b;
-    else if (!isOnAir(a)) target = &a;
-    else if (!isOnAir(b)) target = &b;
-    else target = b.getLastPlayTime() < a.getLastPlayTime() ? &b : &a;
+    Deck* target = &deckForPlayNow(a, b);
     Deck& other = target == &a ? b : a;
 
     if (target->isPlaying()) target->stop();  // una preescucha, o el final de la saliente
@@ -39,7 +42,7 @@ bool playNow(Deck& a, Deck& b, const juce::File& file) {
     return target->isPlaying();
 }
 
-void requestPlayNow(Deck& a, Deck& b, const TrackInfo& track, std::function<bool()> beforeStart) {
+void requestPlayNow(Deck& a, Deck& b, const TrackInfo& track, const std::function<bool()>& beforeStart) {
     const juce::File file(juce::String(track.path));
     auto start = [&a, &b, file, beforeStart] {
         if (beforeStart && !beforeStart()) return;

@@ -1,21 +1,26 @@
-# ── Compilación (CMake, FetchContent) ─────────────────────────────────────────
+# Archivos que RAAADIO no versiona. Formato: https://git-scm.com/docs/gitignore
+
+# Compilación
+# CMake trabaja fuera del árbol de fuentes: build/ para la aplicación y build-sonar/ para el
+# análisis de calidad. Las demás entradas son restos de configurar por error en la raíz.
 /build/
 /build-*/
 /out/
 /cmake-build-*/
+CMakeUserPresets.json
 CMakeCache.txt
 CMakeFiles/
-CMakeUserPresets.json
 cmake_install.cmake
 CTestTestfile.cmake
 Testing/
 compile_commands.json
 JuceLibraryCode/
 
-# Binarios y objetos sueltos
+# Binarios y objetos
 *.exe
 *.dll
 *.lib
+*.exp
 *.pdb
 *.ilk
 *.obj
@@ -24,15 +29,15 @@ JuceLibraryCode/
 *.so
 *.dylib
 
-# ── Editores e IDE ───────────────────────────────────────────────────────────
+# Editores e IDE
 .vs/
 .vscode/
 .idea/
 .cache/
-*.vcxproj
-*.vcxproj.user
-*.vcxproj.filters
 *.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
 *.suo
 *.sdf
 *.opensdf
@@ -41,24 +46,30 @@ JuceLibraryCode/
 *.swp
 *~
 
-# ── Datos de una emisora (nunca van al repositorio) ──────────────────────────
-# Laboratorio: base de datos, música, grabaciones, respaldos y ajustes con claves.
+# Datos de una emisora
+# La base, la música, las grabaciones, los respaldos y los ajustes (que incluyen claves)
+# pertenecen a cada emisora y nunca entran al repositorio.
 raaadio_lab/
 raaadio.db
 raaadio.db-journal
+raaadio.lock
 *.settings
 
-# ── Registros y salidas temporales ───────────────────────────────────────────
+# Registros
 *.log
 build_output_*.txt
 debug_log.txt
 dj_log.txt
 
-# Capturas de la interfaz (--ui-snapshot) generadas en la raíz; las del README
-# viven en docs/screenshots/.
+# Capturas de --ui-snapshot hechas en la raíz; las del README están en docs/screenshots/.
 /*.png
 
-# ── Sistema operativo ────────────────────────────────────────────────────────
+# Análisis de calidad (tools/sonar-scan.ps1)
+# .sonar-token guarda el token personal de SonarQube; el script también lo toma de SONAR_TOKEN.
+.sonar-token
+.scannerwork/
+
+# Sistema operativo
 .DS_Store
 Thumbs.db
 Desktop.ini
