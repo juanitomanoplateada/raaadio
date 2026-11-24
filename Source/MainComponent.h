@@ -12,6 +12,7 @@
 #include "ui/DeckComponent.h"
 #include "ui/MixerComponent.h"
 #include "ui/StatusBar.h"
+#include "ui/DragScroll.h"
 #include "audio/RecordingManager.h"
 #include "audio/AirLogRecorder.h"
 #include "audio/CartPlayer.h"
@@ -49,6 +50,11 @@ public:
 
     // true si algún deck suena en la salida principal o hay una grabación en curso.
     bool isOnAir();
+
+    // Mientras se arrastra una pista, la rueda del mouse desplaza la lista que está bajo el
+    // puntero (la cola, por ejemplo), no la lista de donde salió (WheelRouter).
+    void dragOperationStarted(const juce::DragAndDropTarget::SourceDetails& details) override;
+    void dragOperationEnded(const juce::DragAndDropTarget::SourceDetails& details) override;
 
 private:
     friend class UiSnapshotRunner;
@@ -88,6 +94,8 @@ private:
 
     // Sin esta ventana JUCE no muestra las ayudas emergentes (setTooltip) de ningún control.
     juce::TooltipWindow tooltipWindow { this, 700 };
+
+    WheelRouter wheelRouter;  // la rueda durante un arrastre
 
     void openSettings();
     void changeListenerCallback(juce::ChangeBroadcaster*) override { applyStationSettings(); }

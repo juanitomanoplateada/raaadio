@@ -10,7 +10,7 @@ PreviewPlayer::~PreviewPlayer() {
     readAhead.stopThread(2000);
 }
 
-bool PreviewPlayer::play(const TrackInfo& track) {
+bool PreviewPlayer::play(const TrackInfo& track, bool fromCueIn) {
     stop();
 
     auto* formatReader = formats.createReaderFor(juce::File(juce::String::fromUTF8(track.path.c_str())));
@@ -21,11 +21,11 @@ bool PreviewPlayer::play(const TrackInfo& track) {
     transport.setSource(newReader.get(), 32768, &readAhead, sourceRate, 2);
     reader = std::move(newReader);
 
-    // Desde el primer tercio de lo que suena al aire.
+    // Desde el primer tercio de lo que suena al aire (o desde el punto de entrada).
     const double length = transport.getLengthInSeconds();
     const double cueIn = juce::jlimit(0.0, length, track.cueIn);
     const double end = track.cueOut > cueIn && track.cueOut < length ? track.cueOut : length;
-    transport.setPosition(cueIn + (end - cueIn) / 3.0);
+    transport.setPosition(fromCueIn ? cueIn : cueIn + (end - cueIn) / 3.0);
     transport.setGain(track.normalizationGain > 0.0 ? (float) track.normalizationGain : 1.0f);
     transport.start();
     trackId = track.id;

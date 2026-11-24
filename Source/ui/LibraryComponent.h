@@ -10,6 +10,7 @@
 #include "CartwallView.h"
 #include "ImportReviewView.h"
 #include "OnlineSearchView.h"
+#include "TemporariesView.h"
 
 class Deck;
 class Playlist;
@@ -22,13 +23,16 @@ class DropSwitchingTabs : public juce::TabbedComponent {
 public:
     DropSwitchingTabs() : juce::TabbedComponent(juce::TabbedButtonBar::TabsAtTop) {}
     std::function<void(int tabIndex, const juce::String& dragDescription)> onDropOnTab;
+    std::function<void(int tabIndex)> onTabChanged;
 
 protected:
     juce::TabBarButton* createTabButton(const juce::String& tabName, int tabIndex) override;
+    void currentTabChanged(int newIndex, const juce::String&) override { if (onTabChanged) onTabChanged(newIndex); }
 };
 
-// Panel derecho: biblioteca, historial, pauta publicitaria y botonera en pestañas, con las
-// acciones de importación en la misma fila de las pestañas.
+// Panel derecho: biblioteca, historial, pauta publicitaria, botonera y audios temporales en
+// pestañas, con las acciones de importación en la misma fila de las pestañas. Si no cabe todo,
+// los botones y luego las pestañas que no están abiertas quedan solo con su icono.
 class LibraryComponent : public juce::Component, public juce::Timer {
 public:
     LibraryComponent(MusicLibrary& library, HistoryManager& historyManager, AdvertisingManager& adsManager,
@@ -43,9 +47,9 @@ public:
     void setDecks(Deck* dA, Deck* dB);
     void setPlaylist(Playlist* p);
     void refreshLibrary();  // tras cambios hechos fuera del panel (p. ej., borrar la biblioteca)
-    void setPreviewPlayer(PreviewPlayer* player) { previewPlayer = player; }
+    void setPreviewPlayer(PreviewPlayer* player) { previewPlayer = player; temporariesView.setPreviewPlayer(player); }
     void setOnlineIdentifier(OnlineIdentifier* identifier) { onlineIdentifier = identifier; }
-    void setSongDownloader(SongDownloader* downloader) { songDownloader = downloader; }
+    void setSongDownloader(SongDownloader* downloader) { songDownloader = downloader; temporariesView.setSongDownloader(downloader); }
     // Abre la revisión de canciones (o la trae al frente si ya estaba abierta).
     void openReview(ImportReview::Scope scope);
     // Abre la búsqueda en internet (o la trae al frente) y busca query, si no está vacía.
@@ -61,9 +65,12 @@ private:
     HistoryView historyView;
     AdvertisingComponent adsView;
     CartwallView cartwallView;
+    TemporariesView temporariesView;
+    static constexpr int cartwallTab = 3, temporariesTab = 4;
 
     juce::TextButton advancedImportButton;
     juce::TextButton importAnunciosButton;
+    juce::TextButton importTemporalButton;
     // "Por revisar (N)": lo importado que espera, o la biblioteca que nadie ha confirmado.
     juce::TextButton reviewButton;
     int pendingCount = 0, unreviewedCount = 0, catalogVersionSeen = -1;
@@ -96,6 +103,7 @@ private:
     std::unique_ptr<juce::FileChooser> fileChooser;
 
     void importAnuncios();
+    void importTemporaries();  // elige archivos y abre la pestaña Temporales
     void openAdvancedImportDialog();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LibraryComponent)

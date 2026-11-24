@@ -22,7 +22,9 @@ namespace TrackAnalyzer {
     // Normalización: todas las pistas a la misma sonoridad percibida. Una pista suave solo
     // se sube hasta que su pico real llega al techo (el limitador maestro recorta en seco,
     // no conviene empujarlo), y nunca más de maxBoostDb.
-    constexpr double targetLufs = -16.0;
+    // Cambiar targetLufs no obliga a reanalizar: al abrir, MusicLibrary recalcula las
+    // ganancias guardadas con la sonoridad y el pico ya medidos.
+    constexpr double targetLufs = -14.0;
     constexpr double peakCeilingDb = -1.0;
     constexpr double maxBoostDb = 12.0;
 

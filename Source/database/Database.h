@@ -15,7 +15,11 @@ enum class CategoryRole {
     None = 0,        // categoría normal (música), creada por el usuario
     StationIds = 1,  // IDENTIFICACIONES: abren cada tanda comercial
     Spots = 2,       // CUÑAS: la publicidad paga, con número y horario en la pauta
-    Sweepers = 3     // SEPARADORES: cortinillas, jingles y promos entre canciones
+    Sweepers = 3,    // SEPARADORES: cortinillas, jingles y promos entre canciones
+    // TEMPORALES: audios de una sola ocasión (un saludo, un mensaje, una nota de voz, un audio
+    // de redes). Tienen su propia pestaña: no se ven entre las categorías ni en la biblioteca,
+    // AutoDJ y el generador no los usan, y al quitarlos se borran de verdad.
+    Temporaries = 4
 };
 
 struct TrackInfo {
@@ -127,10 +131,19 @@ public:
     // versión y hash (si no está vacío) de la pista track.id.
     bool updateTrackAnalysis(const TrackInfo& track);
     std::vector<int> getTrackIdsNeedingAnalysis(int currentVersion);  // las más recientes al aire primero
+    // Vuelve a calcular la ganancia de las pistas ya analizadas (versión 1 o más) con su
+    // sonoridad y pico guardados, sin decodificar nada: para cuando cambia el objetivo de
+    // sonoridad. Las que no tienen análisis no se tocan. Devuelve cuántas cambiaron, o -1
+    // si algo falló (y entonces no cambia ninguna).
+    int recomputeNormalizationGains(const std::function<double(double loudnessLufs, double truePeakDb)>& gainFor);
 
     // Duplicados: el mismo archivo (hash) o la misma canción (artista, título y duración
     // parecida). Devuelven id -1 si no hay.
-    TrackInfo findTrackByHash(const std::string& fileHash);
+    // excludingCategory: las pistas de esa categoría no cuentan (un temporal no es una copia
+    // de la biblioteca).
+    TrackInfo findTrackByHash(const std::string& fileHash, int excludingCategory = -1);
+    // La pista con esa huella dentro de una categoría (los temporales solo se comparan entre sí).
+    TrackInfo findTrackByHashInCategory(const std::string& fileHash, int categoryId);
     TrackInfo findTrackByMetadata(const std::string& artist, const std::string& title,
                                   double duration, double toleranceSeconds);
 
@@ -280,8 +293,9 @@ public:
     bool setOnlineIds(int trackId, const std::string& recordingId, const std::string& isrc);
     std::pair<std::string, std::string> getOnlineIds(int trackId);
 
-    // Descargas de la búsqueda en internet: cada intento queda anotado (el límite por hora se
-    // respeta aunque se cierre el programa, y queda de dónde vino cada canción).
+    // Descargas de la búsqueda en internet y de los enlaces de audios temporales: cada intento
+    // queda anotado (el límite por hora se respeta aunque se cierre el programa, y queda de
+    // dónde vino cada audio). videoId: el id de YouTube de una canción, o el enlace pegado.
     enum class DownloadStatus { Running = 0, Done = 1, Failed = 2, Duplicate = 3, Cancelled = 4 };
     struct DownloadRecord {
         int id = -1;
@@ -294,8 +308,10 @@ public:
     int startDownload(const std::string& videoId, long long deezerId, const std::string& artist, const std::string& title);  // -1 si falla
     bool finishDownload(int id, DownloadStatus status, int trackId, const std::string& error);
     std::vector<DownloadRecord> getRecentDownloads(int limit);
-    // Cuándo empezaron las descargas de los últimos minutes minutos.
-    std::vector<std::string> getDownloadStartsSince(int minutes);
+    // Cuándo empezaron las descargas de los últimos minutes minutos, y de qué (el ritmo de
+    // YouTube no es el de las demás redes).
+    struct DownloadStart { std::string startedAt, videoId; };
+    std::vector<DownloadStart> getDownloadStartsSince(int minutes);
 
     // Huella acústica: una por pista de música (ver AcousticFingerprint).
     bool setFingerprint(int trackId, const std::vector<uint32_t>& fingerprint, int version);

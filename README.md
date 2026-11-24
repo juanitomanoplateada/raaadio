@@ -57,7 +57,7 @@ identificaciones, preescucha.
 - Mezclador con crossfader, volumen por canal, medidores RMS y de pico, y locución con
   atenuación automática de la música. Un limitador de pico protege la salida maestra.
 - Sonoridad uniforme. Cada pista se mide una vez al importarla (EBU R 128, con
-  [libebur128](https://github.com/jiixyj/libebur128)) y suena a −16 LUFS; una pista suave solo
+  [libebur128](https://github.com/jiixyj/libebur128)) y suena a −14 LUFS; una pista suave solo
   se sube hasta que su pico real llega a −1 dBTP.
 - Puntos de entrada, salida y mezcla calculados al importar. La pista arranca donde empieza el
   sonido y deja el aire donde termina; las pausas intencionales no la cortan, pero una pista
@@ -86,7 +86,9 @@ identificaciones, preescucha.
   que se puede programar por bloques (una hora de salsa, otra de vallenato) sin repetir. La
   separación de artistas cuenta al intérprete: no pone seguidas "Eddy Herrera" y "Eddy Herrera
   feat. Liz".
-- La cola se guarda en la base y sobrevive a un cierre inesperado.
+- La cola se guarda en la base y sobrevive a un cierre inesperado. Al arrastrar pistas hacia ella
+  (desde la biblioteca, las cuñas o los temporales), se desplaza sola cerca de sus bordes y la
+  rueda del mouse mueve la lista que está bajo el puntero.
 
 <details>
 <summary>Cómo decide el generador y sus valores por defecto</summary>
@@ -119,7 +121,8 @@ lista no pasa de 3000 pistas.
 ### Publicidad
 
 La biblioteca empieza sin géneros: cada emisora crea los suyos. Tres categorías son fijas, van
-siempre primero y no se renombran, mueven ni eliminan.
+siempre primero y no se renombran, mueven ni eliminan. (Hay una cuarta, la de los
+[audios temporales](#audios-temporales), que no aparece entre las categorías: tiene su pestaña.)
 
 | Categoría | Contenido |
 |---|---|
@@ -136,6 +139,34 @@ cuñas) se inserta sola 20 minutos antes, en el punto de la cola que empieza má
 y sin cortar canciones. No se duplica al reiniciar, y si la cola se vacía o se reemplaza antes de
 que suene, se vuelve a insertar. La cuña del mes se importa aunque se llame y dure igual que la
 anterior: en las categorías fijas solo cuenta como duplicado el mismo archivo.
+
+### Audios temporales
+
+La pestaña *Temporales* guarda lo que se pasa una o varias veces y después sobra: un saludo de
+cumpleaños, un mensaje de la junta comunal, una nota de voz, el audio de una publicación. No se
+mezcla con la música ni con las cuñas: no aparece en la biblioteca ni entre las categorías, no pasa
+por la revisión de importados, y ni AutoDJ, ni el generador, ni la protección contra silencio lo
+usan por su cuenta.
+
+- *Importar temporal* (junto a *Importar cuñas* e *Importar*), o soltar los archivos sobre la
+  lista. Entran a `Library/_Temporales/<fecha>`, se analizan y se normalizan como todo lo demás, y
+  las notas de voz de WhatsApp, M4A o AAC se convierten con FFmpeg, igual que en la biblioteca.
+- Desde la lista: preescuchar por Cue (también con doble clic), *Al aire* (reproducir ahora),
+  cargar en el deck A o B, mandar a la cola (siguiente o al final) o a la botonera, o arrastrar a
+  cualquiera de ellos. Cada fila dice de quién es, cuántas veces salió al aire, cuándo llegó y si
+  está en un deck, en la cola o en la botonera.
+- Pegar el enlace de una publicación de Facebook, Instagram, X, TikTok o YouTube (o de cualquier
+  sitio que entienda yt-dlp): se baja solo el audio, FFmpeg lo pasa a MP3 y entra como temporal
+  con el título y el autor de la publicación. Va en la misma fila que las descargas de canciones:
+  de a una, con pausa entre descargas y cancelación completa (*job object*); el tope por hora y
+  las pausas que pide YouTube solo frenan lo que es de YouTube. RAAADIO no usa cookies ni la sesión
+  del navegador: un video privado o que pide iniciar sesión (Instagram y Facebook lo piden seguido)
+  da un error que lo explica, y ese audio se puede guardar desde el teléfono e importar.
+- *Quitar* (o la tecla Supr) y *Vaciar* borran de verdad el archivo y su registro, siempre después
+  de preguntar: a diferencia de la música, no van a `_Descartadas`. Lo que está cargado en un deck,
+  sonando en la botonera o en la cola no se borra; si estaba asignado a un cartucho, el cartucho se
+  libera. El registro de emisión conserva lo que salió al aire. La copia de la música al destino
+  externo de respaldo no incluye los temporales.
 
 ### Biblioteca
 
@@ -297,6 +328,16 @@ MP3 y `chromaprint.dll` para identificar canciones en línea.
     <td width="50%" align="center">
       <img src="docs/screenshots/buscar-en-internet.png" alt="Buscar canciones en internet"><br>
       <sub>Búsqueda en internet: datos de Deezer y el video de YouTube que coincide.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="docs/screenshots/temporales.png" alt="Audios temporales"><br>
+      <sub>Audios temporales: veces al aire y si están en la cola o en la botonera.</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="docs/screenshots/temporales-enlace.png" alt="Audio de un enlace de Instagram bajándose"><br>
+      <sub>El audio de una publicación de Instagram, pegando el enlace.</sub>
     </td>
   </tr>
 </table>
@@ -541,7 +582,7 @@ flowchart TD
         DK["DeckComponent ×2"]
         MX[MixerComponent]
         PL[PlaylistComponent]
-        LB["LibraryComponent<br/>biblioteca · historial · publicidad · botonera"]
+        LB["LibraryComponent<br/>biblioteca · historial · publicidad · botonera · temporales"]
     end
 
     subgraph AUTO["Automatización"]
@@ -625,7 +666,8 @@ Source/
 ├── generator/                generador de listas por reglas y plantillas
 ├── library/
 │   ├── MusicLibrary.*        importación, análisis, confirmación y orden de los archivos
-│   ├── AudioConverter.*      WhatsApp, M4A y AAC a FLAC con FFmpeg
+│   ├── AudioConverter.*      WhatsApp, M4A y AAC a FLAC (y el audio de un enlace a MP3) con FFmpeg
+│   ├── TemporaryAudio.*      audios temporales: qué está en uso y Vaciar
 │   ├── TrackNaming.*         formato por carpeta, créditos, claves y mayúsculas
 │   ├── ImportReview.*        revisión: propuestas, dudas, duplicados y borradores
 │   ├── TagWriter.*           etiquetas ID3v2.3 de lo descargado
@@ -649,6 +691,7 @@ Source/
 │   ├── DownloadTools.*       yt-dlp, FFmpeg y Deno: ubicación, instalación y verificación
 │   ├── SongDownload.*        argumentos, progreso, errores y ritmo de yt-dlp
 │   ├── SongDownloader.*      fila de descargas en su hilo: pausas, etiquetas e importación
+│   ├── LinkDownload.*        enlaces de redes para los temporales: validar, yt-dlp y errores
 │   └── NowPlayingPublisher.* título del stream, API y envío a la página web
 ├── helpers/
 │   ├── PersistenceManager.*  carpeta de la emisora, respaldos verificados, restauración
@@ -673,12 +716,13 @@ docs/screenshots/             capturas del README, generadas con --ui-snapshot
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Son más de 1800 comprobaciones. Cubren la base de datos y sus migraciones, el análisis de audio,
+Son más de 2200 comprobaciones. Cubren la base de datos y sus migraciones, el análisis de audio,
 las etiquetas, la importación y su revisión (con nombres reales de una emisora), los decks, la
 cola, la pauta, la protección contra silencio, la botonera, la grabación, el streaming (Ogg, MP3 y
 títulos), lo que suena, los respaldos (verificación, retención, exportación, destino externo y
-recuperación de una base dañada), el candado, *reproducir ahora*, la búsqueda en internet y las
-descargas. Corren en laboratorios temporales, sin tocar la emisora real ni conectarse a internet:
+recuperación de una base dañada), el candado, *reproducir ahora*, la búsqueda en internet, las
+descargas y los audios temporales (importar, vaciar, que AutoDJ y el generador no los usen y los
+enlaces de redes). Corren en laboratorios temporales, sin tocar la emisora real ni conectarse a internet:
 los servicios en línea y yt-dlp se simulan.
 
 La interfaz también se prueba: cada pantalla se arma con los datos de demostración de
@@ -690,6 +734,8 @@ equipo cambia. Algunos avisos y ventanas aparecen un instante en pantalla mientr
 Todas juntas tardan unos 15 minutos: muchas esperan temporizadores reales (los fundidos, la
 protección contra silencio, el dibujo de cada pantalla). Si una prueba hace caer el programa,
 `Tests/CrashReport.cpp` escribe en la salida de errores la pila de llamadas con funciones y líneas.
+Para correr solo algunas, `RAAADIO_TESTS` con parte del nombre de la clase (por ejemplo
+`RAAADIO_TESTS=temporales`).
 
 Dos variables activan pruebas contra servicios reales: `RAAADIO_ONLINE_TESTS=1` prueba la
 búsqueda en Deezer y YouTube (para detectar si cambiaron sus respuestas), y
@@ -710,7 +756,9 @@ RAAADIO.exe --ui-snapshot captura.png --size 1366x768 --theme dark --lang es --v
 `settings-broadcast`, `settings-broadcast-2` (la parte inferior de Emisión), `settings-language`,
 `settings-about`, `generator`, `generator-advanced`, `generator-done`, `generator-replace`,
 `track`, `import`, `review`, `review-library`, `artists`, `library-online` (una búsqueda sin
-resultados en la biblioteca) y `online-search` (la búsqueda en internet con respuestas de ejemplo).
+resultados en la biblioteca), `online-search` (la búsqueda en internet con respuestas de ejemplo),
+`temporaries` (la pestaña de audios temporales), `temporaries-link` (con un enlace de Instagram
+bajándose) y `temporaries-empty` (la pestaña vacía).
 
 ### Calidad del código
 

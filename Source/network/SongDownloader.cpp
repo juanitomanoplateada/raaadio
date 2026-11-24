@@ -1,11 +1,14 @@
 #include "SongDownloader.h"
+#include "LinkDownload.h"
 #include "OnlineMetadata.h"
+#include "../library/AudioConverter.h"
 
 namespace {
     const std::string pausedUntilKey = "downloads.pausedUntil";
     const std::string pauseReasonKey = "downloads.pauseReason";
     const std::string lastUpdateKey = "downloads.lastUpdate";
     const std::string acknowledgedKey = "downloads.acknowledged";
+    const std::string linksAcknowledgedKey = "downloads.linksAcknowledged";
 
     // Lo último que yt-dlp dijo de un error, sin el prefijo.
     juce::String lastError(const juce::StringArray& lines) {
@@ -58,8 +61,8 @@ void SongDownloader::setSetting(const std::string& key, const juce::String& valu
     library.withDatabase([&](Database& db) { return db.setSetting(key, v); });
 }
 
-bool SongDownloader::isAcknowledged() { return getSetting(acknowledgedKey) == "1"; }
-void SongDownloader::acknowledge() { setSetting(acknowledgedKey, "1"); }
+bool SongDownloader::isAcknowledged(bool links) { return getSetting(links ? linksAcknowledgedKey : acknowledgedKey) == "1"; }
+void SongDownloader::acknowledge(bool links) { setSetting(links ? linksAcknowledgedKey : acknowledgedKey, "1"); }
 
 void SongDownloader::findTools() {
     const auto found = DownloadTools::find(services.toolsFolder, *services.pathVariable);
@@ -194,11 +197,31 @@ int SongDownloader::enqueue(const SongSearch::Track& track, const SongSearch::Vi
     {
         const juce::ScopedLock sl(lock);
         for (const auto& j : jobs)
-            if (!j.isFinished() && (j.track.id == track.id || j.video.id == video.id)) return 0;
+            if (j.kind == Kind::Song && !j.isFinished() && (j.track.id == track.id || j.video.id == video.id)) return 0;
         Job j;
         j.id = id = nextJobId++;
         j.track = track;
         j.video = video;
+        jobs.push_back(j);
+    }
+    notify();
+    sendChangeMessage();
+    return id;
+}
+
+int SongDownloader::enqueueLink(const juce::String& pasted) {
+    const auto url = LinkDownload::normalise(pasted);
+    if (url.isEmpty()) return 0;
+    int id = 0;
+    {
+        const juce::ScopedLock sl(lock);
+        for (const auto& j : jobs)
+            if (j.kind == Kind::Temporary && !j.isFinished() && j.url == url) return 0;
+        Job j;
+        j.id = id = nextJobId++;
+        j.kind = Kind::Temporary;
+        j.url = url;
+        j.site = LinkDownload::siteName(url);
         jobs.push_back(j);
     }
     notify();
@@ -245,10 +268,18 @@ std::vector<SongDownloader::Job> SongDownloader::getJobs() const {
     return jobs;
 }
 
+std::vector<SongDownloader::Job> SongDownloader::getJobs(Kind kind) const {
+    const juce::ScopedLock sl(lock);
+    std::vector<Job> result;
+    for (const auto& j : jobs)
+        if (j.kind == kind) result.push_back(j);
+    return result;
+}
+
 std::optional<SongDownloader::Job> SongDownloader::jobForTrack(juce::int64 deezerId) const {
     const juce::ScopedLock sl(lock);
     for (auto it = jobs.rbegin(); it != jobs.rend(); ++it)
-        if (it->track.id == deezerId) return *it;
+        if (it->kind == Kind::Song && it->track.id == deezerId) return *it;
     return std::nullopt;
 }
 
@@ -257,6 +288,7 @@ SongDownloader::Status SongDownloader::getStatus() const {
     auto s = status;
     s.queued = s.finished = 0;
     for (const auto& j : jobs) {
+        if (j.kind != Kind::Song) continue;
         if (j.state == State::Queued) ++s.queued;
         if (j.isFinished()) ++s.finished;
     }
@@ -289,11 +321,55 @@ void SongDownloader::pauseFor(SongDownload::Problem problem) {
     status.pauseReason = problem;
 }
 
-juce::Array<juce::Time> SongDownloader::recentStarts() {
+void SongDownloader::recentStarts(juce::Array<juce::Time>& youtube, juce::Time& latestAny) {
     const auto rows = library.withDatabase([](Database& db) { return db.getDownloadStartsSince(60); });
-    juce::Array<juce::Time> starts;
-    for (const auto& r : rows) starts.add(parseLocalTimestamp(r));
-    return starts;
+    youtube.clear();
+    latestAny = juce::Time();
+    for (const auto& r : rows) {
+        const auto started = parseLocalTimestamp(r.startedAt);
+        if (LinkDownload::isYouTube(juce::String::fromUTF8(r.videoId.c_str()))) youtube.add(started);
+        if (started > latestAny) latestAny = started;
+    }
+}
+
+int SongDownloader::pickNextJob(int& waitSeconds) {
+    struct Candidate { int id; bool youtube; };
+    std::vector<Candidate> queued;
+    juce::Time pausedUntil;
+    {
+        const juce::ScopedLock sl(lock);
+        for (const auto& j : jobs)
+            if (j.state == State::Queued)
+                queued.push_back({ j.id, j.kind == Kind::Song || LinkDownload::isYouTube(j.url) });
+        pausedUntil = status.pausedUntil;
+    }
+    waitSeconds = 0;
+    if (queued.empty()) return 0;
+
+    // YouTube: pausa pedida, pausa desde su última descarga y tope por hora. Los demás sitios:
+    // solo la pausa desde la última descarga, de donde sea (un saludo no espera a que YouTube
+    // vuelva a dejar bajar canciones).
+    const auto now = juce::Time::getCurrentTime();
+    juce::Array<juce::Time> youtubeStarts;
+    juce::Time latestAny;
+    recentStarts(youtubeStarts, latestAny);
+    const int gap = services.minGapSeconds + jitterSeconds;
+    juce::Array<juce::Time> latestOnly;
+    if (latestAny.toMilliseconds() > 0) latestOnly.add(latestAny);
+
+    int soonest = std::numeric_limits<int>::max();
+    for (const auto& c : queued) {
+        int wait;
+        if (c.youtube)
+            wait = now < pausedUntil ? (int) std::ceil((pausedUntil - now).inSeconds())
+                                     : SongDownload::secondsToWait(youtubeStarts, now, gap);
+        else
+            wait = SongDownload::secondsToWait(latestOnly, now, gap);
+        if (wait <= 0) return c.id;
+        soonest = juce::jmin(soonest, wait);
+    }
+    waitSeconds = soonest;
+    return 0;
 }
 
 void SongDownloader::run() {
@@ -305,34 +381,30 @@ void SongDownloader::run() {
             continue;
         }
 
-        int next = 0;
         {
             const juce::ScopedLock sl(lock);
-            for (const auto& j : jobs)
-                if (j.state == State::Queued) { next = j.id; break; }
             status.nextStart = juce::Time();
         }
+
+        // El ritmo: si YouTube pidió esperar, lo de YouTube espera (sin fallar); y entre una
+        // descarga y otra, una pausa (con algo de azar) y el tope por hora.
+        int waitSeconds = 0;
+        const int next = pickNextJob(waitSeconds);
         if (next == 0) {
-            wait(-1);
-            continue;
-        }
-
-        // YouTube pidió esperar: se espera (sin fallar la canción).
-        const auto now = juce::Time::getCurrentTime();
-        juce::Time pausedUntil;
-        { const juce::ScopedLock sl(lock); pausedUntil = status.pausedUntil; }
-        if (now < pausedUntil) {
+            if (waitSeconds <= 0) {
+                wait(-1);  // nada en la fila
+                continue;
+            }
+            const auto now = juce::Time::getCurrentTime();
+            juce::Time pausedUntil;
+            {
+                const juce::ScopedLock sl(lock);
+                pausedUntil = status.pausedUntil;
+                if (now >= pausedUntil) status.nextStart = now + juce::RelativeTime::seconds(waitSeconds);
+            }
             sendChangeMessage();
-            wait((int) juce::jmin<juce::int64>(60000, (pausedUntil - now).inMilliseconds() + 100));
-            continue;
-        }
-
-        // El ritmo: pausa desde la anterior (con algo de azar) y tope por hora.
-        const int waitSeconds = SongDownload::secondsToWait(recentStarts(), now, services.minGapSeconds + jitterSeconds);
-        if (waitSeconds > 0) {
-            { const juce::ScopedLock sl(lock); status.nextStart = now + juce::RelativeTime::seconds(waitSeconds); }
-            sendChangeMessage();
-            wait(waitSeconds * 1000);
+            // De a un minuto como mucho: un enlace nuevo, o el fin de la pausa, se atienden pronto.
+            wait(juce::jmin(60000, waitSeconds * 1000 + 100));
             continue;
         }
 
@@ -343,7 +415,14 @@ void SongDownloader::run() {
         maybeUpdateYtDlp();
         if (threadShouldExit()) break;
         jitterSeconds = services.maxJitterSeconds > 0 ? random.nextInt(services.maxJitterSeconds + 1) : 0;
-        runJob(next);
+        bool link;
+        {
+            const juce::ScopedLock sl(lock);
+            const auto* j = job(next);
+            link = j != nullptr && j->kind == Kind::Temporary;
+        }
+        if (link) runLinkJob(next);
+        else runJob(next);
     }
 }
 
@@ -453,6 +532,143 @@ void SongDownloader::runJob(int jobId) {
             break;
         case MusicLibrary::ImportResult::Duplicate:
             finishJob(jobId, recordId, State::Duplicate, SongDownload::Problem::None, {}, -1);
+            break;
+        case MusicLibrary::ImportResult::Failed:
+        case MusicLibrary::ImportResult::NeedsFfmpeg:  // un MP3: no pasa
+            finishJob(jobId, recordId, State::Failed, SongDownload::Problem::Other, "import", -1);
+            break;
+    }
+}
+
+void SongDownloader::runLinkJob(int jobId) {
+    Job current;
+    {
+        const juce::ScopedLock sl(lock);
+        auto* j = job(jobId);
+        if (j == nullptr) return;
+        j->state = State::Downloading;
+        j->progress = 0.0;
+        current = *j;
+        status.activeJob = jobId;
+    }
+    sendChangeMessage();
+
+    const auto url = current.url;
+    const bool youtube = LinkDownload::isYouTube(url);
+    const int recordId = library.withDatabase([&](Database& db) {
+        return db.startDownload(url.toStdString(), 0, current.site.toStdString(), {});
+    });
+
+    const auto folder = services.workFolder.getChildFile(juce::String(jobId));
+    folder.deleteRecursively();
+    folder.createDirectory();
+    auto cleanUp = [&folder] { folder.deleteRecursively(); };
+    auto stopRequested = [this, jobId] { return threadShouldExit() || isCancelRequested(jobId); };
+
+    juce::String finalPath, title, author;
+    juce::StringArray output;  // las últimas líneas, para saber qué falló
+    double shown = 0.0;
+    const auto tools = getTools();
+    const int code = services.run(LinkDownload::arguments(tools, url, folder), [&](const juce::String& line) {
+        const auto progress = SongDownload::parseProgress(line);
+        if (progress >= 0.0) {
+            // En 1 se está convirtiendo: eso se avisa al empezar FFmpeg.
+            if (progress - shown >= 0.01 && progress < 1.0) {
+                shown = progress;
+                setState(jobId, State::Downloading, progress);
+            }
+            return;
+        }
+        if (const auto t = LinkDownload::parseTitle(line); t.isNotEmpty()) {
+            title = t;
+            {
+                const juce::ScopedLock sl(lock);
+                if (auto* j = job(jobId)) j->title = LinkDownload::cleanTitle(title, {}, current.site);
+            }
+            sendChangeMessage();
+            return;
+        }
+        if (const auto a = LinkDownload::parseAuthor(line); a.isNotEmpty()) { author = a; return; }
+        if (const auto path = LinkDownload::parseFinalPath(line); path.isNotEmpty()) { finalPath = path; return; }
+        output.add(line);
+        if (output.size() > 40) output.remove(0);
+    }, stopRequested);
+
+    if (code == ProcessRunner::stopped) {
+        cleanUp();
+        finishJob(jobId, recordId, State::Cancelled, SongDownload::Problem::None, {}, -1);
+        return;
+    }
+
+    // Lo bajado: la ruta que imprimió yt-dlp o, si no la dijo, el único archivo de la carpeta.
+    juce::File downloaded(finalPath);
+    if (finalPath.isEmpty() || !downloaded.existsAsFile()) {
+        downloaded = juce::File();
+        for (const auto& f : folder.findChildFiles(juce::File::findFiles, false))
+            if (!f.hasFileExtension("part;ytdl;tmp")) downloaded = f;
+    }
+    if (code != 0 || !downloaded.existsAsFile()) {
+        cleanUp();
+        const auto text = output.joinIntoString("\n");
+        auto problem = code == ProcessRunner::couldNotStart ? SongDownload::Problem::Tools
+                     : code == ProcessRunner::timedOut ? SongDownload::Problem::Network
+                     : LinkDownload::classify(text);
+        // Código 0 sin archivo: yt-dlp lo saltó (el filtro de lo que está en vivo).
+        if (problem == SongDownload::Problem::None) problem = code == 0 ? SongDownload::Problem::NoAudio : SongDownload::Problem::Other;
+
+        if (youtube && SongDownload::pauseMinutes(problem) > 0) {
+            // YouTube pidió esperar: como con las canciones, la fila de YouTube se detiene y el
+            // enlace vuelve a esperar su turno. Otro sitio que pide esperar falla: se reintenta a mano.
+            pauseFor(problem);
+            finishJob(jobId, recordId, State::Queued, problem, lastError(output), -1);
+            return;
+        }
+        finishJob(jobId, recordId, State::Failed, problem, lastError(output), -1);
+        return;
+    }
+
+    // A MP3 con FFmpeg (AudioConverter: el mismo de la importación), salvo que ya lo sea.
+    setState(jobId, State::Downloading, 1.0);
+    const auto name = LinkDownload::cleanTitle(title, author, current.site);
+    auto mp3 = folder.getChildFile(MusicLibrary::makeSafeFileName(name) + ".mp3");
+    if (downloaded.hasFileExtension("mp3")) {
+        if (downloaded != mp3 && !downloaded.moveFileTo(mp3)) mp3 = downloaded;
+    } else {
+        AudioConverter::Services convert;
+        convert.findFfmpeg = [tools] {
+            const auto ffmpeg = tools.ffmpegFolder.getChildFile(DownloadTools::Paths::exe("ffmpeg"));
+            return ffmpeg.existsAsFile() ? ffmpeg : juce::File();
+        };
+        convert.run = services.run;
+        const auto result = AudioConverter(convert).toMp3(downloaded, mp3, stopRequested);
+        if (result != AudioConverter::Result::Converted) {
+            cleanUp();
+            if (result == AudioConverter::Result::Cancelled)
+                finishJob(jobId, recordId, State::Cancelled, SongDownload::Problem::None, {}, -1);
+            else if (result == AudioConverter::Result::Unavailable)
+                finishJob(jobId, recordId, State::Failed, SongDownload::Problem::Tools, {}, -1);
+            else  // FFmpeg no encontró un audio que sacar
+                finishJob(jobId, recordId, State::Failed, SongDownload::Problem::NoAudio, "convert", -1);
+            return;
+        }
+    }
+
+    // Etiquetas (título, autor y el enlace de origen) y a los audios temporales.
+    setState(jobId, State::Importing, 1.0);
+    TagWriter::Tags tags;
+    tags.title = name;
+    tags.artist = author;
+    tags.source = url;
+    TagWriter::writeMp3(mp3, tags);
+    const auto imported = library.importTemporaryDownload(mp3, name, author);
+    cleanUp();
+
+    switch (imported.result) {
+        case MusicLibrary::ImportResult::Added:
+            finishJob(jobId, recordId, State::Done, SongDownload::Problem::None, {}, imported.trackId);
+            break;
+        case MusicLibrary::ImportResult::Duplicate:
+            finishJob(jobId, recordId, State::Duplicate, SongDownload::Problem::None, {}, imported.trackId);
             break;
         case MusicLibrary::ImportResult::Failed:
         case MusicLibrary::ImportResult::NeedsFfmpeg:  // un MP3: no pasa

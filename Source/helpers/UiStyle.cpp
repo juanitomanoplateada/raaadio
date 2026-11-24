@@ -317,6 +317,53 @@ static juce::Path unitIcon(const juce::String& name)
         p.addPath(stroke(line(0.24f, 0.32f, 0.76f, 0.32f), 0.06f));
         p.addPath(stroke(line(0.24f, 0.68f, 0.76f, 0.68f), 0.06f));
     }
+    else if (name == "hourglass")
+    {
+        // Reloj de arena: los audios temporales.
+        p.addPath(stroke(line(0.22f, 0.12f, 0.78f, 0.12f), 0.08f));
+        p.addPath(stroke(line(0.22f, 0.88f, 0.78f, 0.88f), 0.08f));
+        juce::Path glass;
+        glass.startNewSubPath(0.3f, 0.14f);
+        glass.lineTo(0.3f, 0.26f);
+        glass.lineTo(0.5f, 0.5f);
+        glass.lineTo(0.3f, 0.74f);
+        glass.lineTo(0.3f, 0.86f);
+        glass.startNewSubPath(0.7f, 0.14f);
+        glass.lineTo(0.7f, 0.26f);
+        glass.lineTo(0.5f, 0.5f);
+        glass.lineTo(0.7f, 0.74f);
+        glass.lineTo(0.7f, 0.86f);
+        p.addPath(stroke(glass, 0.07f));
+        juce::Path sand;
+        sand.addTriangle(0.5f, 0.62f, 0.66f, 0.84f, 0.34f, 0.84f);
+        p.addPath(sand);
+    }
+    else if (name == "edit")
+    {
+        // Lápiz inclinado: goma, cuerpo y punta.
+        p.addRoundedRectangle(0.42f, 0.08f, 0.16f, 0.13f, 0.03f);
+        p.addRectangle(0.42f, 0.25f, 0.16f, 0.43f);
+        p.addTriangle(0.42f, 0.72f, 0.58f, 0.72f, 0.5f, 0.9f);
+        p.applyTransform(juce::AffineTransform::rotation(MathConstants<float>::pi / 4.0f, 0.5f, 0.5f));
+    }
+    else if (name == "trash")
+    {
+        p.addPath(stroke(line(0.16f, 0.26f, 0.84f, 0.26f), 0.08f));
+        juce::Path handle;
+        handle.startNewSubPath(0.38f, 0.25f);
+        handle.lineTo(0.4f, 0.14f);
+        handle.lineTo(0.6f, 0.14f);
+        handle.lineTo(0.62f, 0.25f);
+        p.addPath(stroke(handle, 0.07f));
+        juce::Path bin;
+        bin.startNewSubPath(0.25f, 0.32f);
+        bin.lineTo(0.3f, 0.86f);
+        bin.lineTo(0.7f, 0.86f);
+        bin.lineTo(0.75f, 0.32f);
+        p.addPath(stroke(bin, 0.08f));
+        p.addPath(stroke(line(0.42f, 0.42f, 0.43f, 0.74f), 0.06f));
+        p.addPath(stroke(line(0.58f, 0.42f, 0.57f, 0.74f), 0.06f));
+    }
     else if (name == "link")
     {
         // Dos eslabones que se cruzan, inclinados.

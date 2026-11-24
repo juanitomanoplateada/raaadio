@@ -2,15 +2,17 @@
 #include <JuceHeader.h>
 #include "../database/Database.h"
 
-// Preescucha de la revisión: suena solo por la salida de cue (PFL), nunca al aire, para
-// confirmar que una canción es la que dice su nombre. Empieza en el primer tercio (donde ya
-// se oye la voz) con la ganancia del análisis, como sonaría en el deck.
+// Preescucha de la revisión y de los audios temporales: suena solo por la salida de cue (PFL),
+// nunca al aire. Una canción empieza en el primer tercio (donde ya se oye la voz, para confirmar
+// que es la que dice su nombre); un mensaje, desde su punto de entrada. Con la ganancia del
+// análisis, como sonaría en el deck.
 class PreviewPlayer : public juce::AudioSource {
 public:
     explicit PreviewPlayer(juce::AudioFormatManager& formats);
     ~PreviewPlayer() override;
 
-    bool play(const TrackInfo& track);  // false si el archivo no se puede leer
+    // false si el archivo no se puede leer.
+    bool play(const TrackInfo& track, bool fromCueIn = false);
     void stop();
     bool isPlaying() const;
     int getTrackId() const { return trackId.load(); }

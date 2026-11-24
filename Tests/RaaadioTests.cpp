@@ -23,6 +23,8 @@
 #include "../Source/network/DownloadTools.h"
 #include "../Source/network/SongDownload.h"
 #include "../Source/network/SongDownloader.h"
+#include "../Source/network/LinkDownload.h"
+#include "../Source/library/TemporaryAudio.h"
 #include "../Source/helpers/ProcessRunner.h"
 #include "../Source/library/TagWriter.h"
 #include "../Source/library/AudioConverter.h"
@@ -76,6 +78,7 @@
 #include "../Source/ui/HistoryView.h"
 #include "../Source/ui/ArtistsView.h"
 #include "../Source/ui/OnlineSearchView.h"
+#include "../Source/ui/TemporariesView.h"
 #include "../Source/helpers/AppSettings.h"
 #include "../Source/helpers/External.h"
 #include <thread>
@@ -795,8 +798,8 @@ public:
             auto gainDb = [](double lufs, double peak) {
                 return juce::Decibels::gainToDecibels(TrackAnalyzer::gainFor(lufs, peak));
             };
-            expectWithinAbsoluteError(gainDb(-8.0, -0.1), -8.0, 0.01, "una pista fuerte se baja a -16 LUFS");
-            expectWithinAbsoluteError(gainDb(-22.0, -10.0), 6.0, 0.01, "una suave se sube");
+            expectWithinAbsoluteError(gainDb(-8.0, -0.1), -6.0, 0.01, "una pista fuerte se baja a -14 LUFS");
+            expectWithinAbsoluteError(gainDb(-22.0, -10.0), 8.0, 0.01, "una suave se sube");
             expectWithinAbsoluteError(gainDb(-20.0, -2.0), 1.0, 0.01, "hasta que su pico llega a -1 dBTP");
             expectWithinAbsoluteError(gainDb(-20.0, 0.5), 0.0, 0.01, "con picos ya altos se deja igual");
             expectWithinAbsoluteError(gainDb(-45.0, -30.0), 12.0, 0.01, "tope de +12 dB");
@@ -1639,6 +1642,31 @@ public:
             expectEquals(reopened.getDatabase().getSchemaVersion(), 3);
             expect(reopened.search(utf8("rubby pérez"), "").size() == 1, "la clave permite buscar sin mayúsculas");
             reopened.setDisplayUppercase(false);
+        }
+
+        beginTest("Si cambia el objetivo de sonoridad, las ganancias se recalculan sin reanalizar");
+        {
+            LibraryFixture older;
+            auto& db = older.library.getDatabase();
+            auto loud = makeTrack(older.lab.touch("Library/GENERAL/fuerte.mp3").getFullPathName(), "ARTISTA", "FUERTE");
+            loud.loudnessLufs = -8.0;
+            loud.truePeakDb = -0.1;
+            loud.analysisVersion = TrackAnalyzer::version;
+            loud.normalizationGain = juce::Decibels::decibelsToGain(-8.0);  // calculada para -16 LUFS
+            db.addTrack(loud);
+            auto legacy = makeTrack(older.lab.touch("Library/GENERAL/vieja.mp3").getFullPathName(), "ARTISTA", "VIEJA");
+            legacy.normalizationGain = 1.5;  // sin analizar: queda hasta que el análisis la reemplace
+            db.addTrack(legacy);
+            db.setSetting("library.normalizationTarget", "-16.0");
+
+            MusicLibrary reopened;
+            reopened.initialise(PersistenceManager::getDatabaseFolder().getChildFile("raaadio.db"));
+            expectWithinAbsoluteError(reopened.getTrackByPath(juce::String(loud.path)).normalizationGain,
+                                      TrackAnalyzer::gainFor(-8.0, -0.1), 1.0e-9, "la analizada toma el objetivo nuevo");
+            expectWithinAbsoluteError(reopened.getTrackByPath(juce::String(legacy.path)).normalizationGain, 1.5, 1.0e-9,
+                                      "la que no tiene sonoridad medida no se toca");
+            expectEquals(juce::String(reopened.getDatabase().getSetting("library.normalizationTarget")),
+                         juce::String(TrackAnalyzer::targetLufs, 1), "se anota el objetivo aplicado");
         }
     }
 };
@@ -3994,9 +4022,12 @@ public:
             Database db;
             db.open(dbFile.getFullPathName().toStdString());
             expect(db.initSchema());
+            // _Temporales: la categoría fija de los audios temporales (la aplicación no la muestra
+            // entre las demás: MusicLibrary::getCategories).
             expectEquals(names(db.getCategories()),
-                         juce::String::fromUTF8("IDENTIFICACIONES,CUÑAS,SEPARADORES,VALLENATO,MIS ÉXITOS"),
+                         juce::String::fromUTF8("IDENTIFICACIONES,CUÑAS,SEPARADORES,_Temporales,VALLENATO,MIS ÉXITOS"),
                          "se borran los géneros y EMERGENCIA vacíos; los que tienen pistas y los del usuario se quedan");
+            expectEquals(db.getSystemCategory(CategoryRole::Temporaries).folderFormat, 0, "los temporales, en carpetas por fecha");
 
             const auto spots = db.getSystemCategory(CategoryRole::Spots);
             expectEquals(spots.id, 2, "ANUNCIOS se renombra: conserva su id y su formato de carpetas");
@@ -4015,7 +4046,7 @@ public:
             reopened.open(dbFile.getFullPathName().toStdString());
             expect(reopened.initSchema());
             expectEquals(names(reopened.getCategories()),
-                         juce::String::fromUTF8("IDENTIFICACIONES,CUÑAS,SEPARADORES,VALLENATO,MIS ÉXITOS,SALSA"),
+                         juce::String::fromUTF8("IDENTIFICACIONES,CUÑAS,SEPARADORES,_Temporales,VALLENATO,MIS ÉXITOS,SALSA"),
                          "al reiniciar no se vuelve a limpiar ni se repite la migración");
         }
 
@@ -6475,6 +6506,476 @@ public:
 };
 
 //==============================================================================
+class TemporaryAudioTests : public juce::UnitTest
+{
+public:
+    TemporaryAudioTests() : juce::UnitTest("Audios temporales", "RAAADIO") {}
+
+    static juce::String temporariesName(MusicLibrary& library)
+    {
+        return juce::String::fromUTF8(library.getSystemCategory(CategoryRole::Temporaries).name.c_str());
+    }
+
+    static void importAndWait(MusicLibrary& library, const juce::Array<juce::File>& files)
+    {
+        library.importTemporaries(files);
+        for (int i = 0; i < 600 && library.isImporting(); ++i) juce::Thread::sleep(20);
+    }
+
+    // Un mensaje de voz: tono a -6 dBFS entre 0.5 s y el final.
+    static juce::File writeMessage(const juce::File& file, double seconds, const juce::StringPairArray& tags = {})
+    {
+        return writeWav(file, seconds, toneBetween({ { 0.5, seconds } }), tags);
+    }
+
+    // yt-dlp y FFmpeg de mentira para los enlaces: yt-dlp deja un .m4a donde lo pide "-o" (o
+    // responde con el error de errorFor(url)), FFmpeg escribe un MP3 de verdad en su destino.
+    struct FakeTools
+    {
+        juce::MemoryBlock mp3;
+        std::function<juce::String(const juce::String& url)> errorFor;
+        juce::StringArray lastYtDlp, lastFfmpeg;
+        std::atomic<int> downloads { 0 }, conversions { 0 };
+        juce::CriticalSection lock;
+
+        SongDownloader::Runner runner()
+        {
+            return [this](const juce::StringArray& command, const ProcessRunner::LineCallback& onLine, const ProcessRunner::StopCheck&) {
+                if (command.contains("-U")) return 0;
+                if (command[0].endsWithIgnoreCase("ffmpeg.exe")) {
+                    ++conversions;
+                    { const juce::ScopedLock sl(lock); lastFfmpeg = command; }
+                    const juce::File target(command[command.size() - 1].fromFirstOccurrenceOf("file:", false, false));
+                    target.replaceWithData(mp3.getData(), mp3.getSize());
+                    return 0;
+                }
+                ++downloads;
+                { const juce::ScopedLock sl(lock); lastYtDlp = command; }
+                const auto url = command[command.size() - 1];
+                if (errorFor) {
+                    const auto error = errorFor(url);
+                    if (error.isNotEmpty()) {
+                        onLine("[info] Extracting URL: " + url);
+                        onLine(error);
+                        return 1;
+                    }
+                }
+                // Lo que imprime yt-dlp con los argumentos de LinkDownload.
+                if (!url.contains("youtube")) {
+                    onLine(juce::String::fromUTF8("[raaadio-title] \"Saludo de la Banda Municipal\\ndesde el parque https://t.co/abc\""));
+                    onLine("[raaadio-author] \"bandamunicipal\"");
+                }
+                const auto folder = juce::File(command[command.indexOf("-o") + 1]).getParentDirectory();
+                const auto file = folder.getChildFile(url.contains("youtube") ? "JQwqpsuENeQ.mp3" : "C0aBcDeFgHi.m4a");
+                file.replaceWithText("audio de mentira");
+                if (url.contains("youtube")) file.replaceWithData(mp3.getData(), mp3.getSize());
+                onLine("[raaadio]  40.0%");
+                onLine("[raaadio] 100.0%");
+                onLine(file.getFullPathName());
+                return 0;
+            };
+        }
+    };
+
+    void runTest() override
+    {
+        beginTest("Importar temporal: entra directo a su carpeta, analizado y normalizado, sin pasar por la revisión");
+        {
+            LibraryFixture fx;
+            TempLab outside;
+            const auto greeting = writeMessage(outside.root.getChildFile(utf8("Saludo para doña Rosa.wav")), 6.0);
+            juce::StringPairArray tags;
+            tags.set(juce::WavAudioFormat::riffInfoTitle, utf8("Mensaje de la Junta de Acción Comunal"));
+            tags.set(juce::WavAudioFormat::riffInfoArtist, "JAC El Prado");
+            const auto message = writeMessage(outside.root.getChildFile("PTT-20261124-WA0003.wav"), 5.0, tags);
+            importAndWait(fx.library, { greeting, message });
+
+            const auto summary = fx.library.getLastImportSummary();
+            expectEquals(summary.added, 2);
+            expectEquals(summary.toReview, 0, "no entran a la revisión de importados");
+            const auto temporaries = fx.library.getTemporaries();
+            expectEquals((int) temporaries.size(), 2);
+            for (const auto& t : temporaries) {
+                const juce::File file(juce::String::fromUTF8(t.path.c_str()));
+                expect(t.systemRole == CategoryRole::Temporaries);
+                expect(!t.isPending(), "no esperan revisión");
+                expect(file.isAChildOf(fx.lab.root.getChildFile("Library/_Temporales")), file.getFullPathName());
+                expectEquals(t.analysisVersion, TrackAnalyzer::version, "se analizan al importarlos");
+                expectWithinAbsoluteError(t.normalizationGain, TrackAnalyzer::gainFor(t.loudnessLufs, t.truePeakDb), 1.0e-6,
+                                          "suenan al mismo volumen que todo lo demás");
+                expect(fx.library.isTemporary(t.id));
+            }
+            juce::StringArray titles, authors;
+            for (const auto& t : temporaries) {
+                titles.add(juce::String::fromUTF8(t.title.c_str()));
+                authors.add(juce::String::fromUTF8(t.artist.c_str()));
+            }
+            expect(titles.contains(utf8("Saludo para doña Rosa")), "el nombre del archivo tal cual: " + titles.joinIntoString(" | "));
+            expect(titles.contains(utf8("Mensaje de la Junta de Acción Comunal")) && authors.contains("JAC El Prado"), "o sus etiquetas");
+
+            expectEquals(fx.library.getPendingCount(), 0);
+            expectEquals(fx.library.getUnreviewedCount(), 0, "tampoco cuentan como biblioteca sin revisar");
+            expect(fx.library.search("", "").empty(), "la biblioteca no los muestra");
+            expect(fx.library.search("Rosa", "").empty());
+            for (const auto& c : fx.library.getCategories())
+                expect(c.role != CategoryRole::Temporaries, "no aparecen entre las categorías");
+            expect(fx.library.getSystemCategory(CategoryRole::Temporaries).id != -1);
+
+            // El mismo archivo otra vez: no se copia dos veces.
+            const auto temporariesCategory = temporariesName(fx.library);
+            int existing = -1;
+            expect(fx.library.processAndAddTrack(greeting, temporariesCategory, 0, &existing) == MusicLibrary::ImportResult::Duplicate);
+            expectEquals((int) fx.library.getTemporaries().size(), 2);
+            expect(existing != -1 && fx.library.isTemporary(existing));
+
+            // Como cuña es otra pista: borrar el temporal no se la lleva.
+            const auto spots = juce::String::fromUTF8(fx.library.getSystemCategory(CategoryRole::Spots).name.c_str());
+            expect(fx.library.processAndAddTrack(greeting, spots) == MusicLibrary::ImportResult::Added, "la cuña tiene su propio archivo");
+            const auto spotTracks = fx.library.getTracksWithRole(CategoryRole::Spots);
+            expectEquals((int) spotTracks.size(), 1);
+            expectEquals((int) fx.library.getTrackCategories(existing).size(), 1, "el temporal sigue solo en su categoría");
+            expect(fx.library.deleteTemporary(existing));
+            if (!spotTracks.empty()) {
+                expect(juce::File(juce::String::fromUTF8(spotTracks[0].path.c_str())).existsAsFile());
+                expect(!fx.library.isTemporary(spotTracks[0].id));
+            }
+
+            // Y al revés: un temporal igual a una cuña que ya estaba también es otra pista.
+            expect(fx.library.processAndAddTrack(greeting, temporariesCategory) == MusicLibrary::ImportResult::Added);
+            expectEquals((int) fx.library.getTracksWithRole(CategoryRole::Spots).size(), 1);
+        }
+
+        beginTest("Quitar uno y Vaciar: se borran de verdad, salvo lo que está en un deck, sonando o en la cola");
+        {
+            LibraryFixture fx;
+            TempLab outside;
+            juce::Array<juce::File> files;
+            for (int i = 0; i < 4; ++i) files.add(writeMessage(outside.root.getChildFile("mensaje " + juce::String(i) + ".wav"), 3.0 + i));
+            importAndWait(fx.library, files);
+            auto temporaries = fx.library.getTemporaries();
+            expectEquals((int) temporaries.size(), 4);
+            if (temporaries.size() != 4) return;
+
+            // Nunca una canción, una cuña ni un separador.
+            const auto song = fx.add("Library/Musica/A/cancion.wav", "CANCION");
+            expect(!fx.library.deleteTemporary(song.id));
+            expect(juce::File(juce::String::fromUTF8(song.path.c_str())).existsAsFile() && fx.library.getTrackById(song.id).id == song.id);
+
+            // Uno: el archivo se borra de verdad (no va a _Descartadas) y el registro también.
+            const juce::File first(juce::String::fromUTF8(temporaries[0].path.c_str()));
+            expect(fx.library.deleteTemporary(temporaries[0].id));
+            expect(!first.exists(), "el archivo se borra");
+            expectEquals(fx.library.getTrackById(temporaries[0].id).id, -1);
+            expect(!fx.lab.root.getChildFile("Library/_Descartadas").exists(), "no se guarda en _Descartadas");
+
+            // Lo que está en uso no se borra al vaciar.
+            TemporaryAudio::Usage usage;
+            usage.queued.insert(temporaries[1].id);
+            usage.onDecks.insert(temporaries[2].id);
+            expect(TemporaryAudio::whyBusy(temporaries[1].id, usage) == TemporaryAudio::Busy::Queued);
+            expect(TemporaryAudio::whyBusy(temporaries[2].id, usage) == TemporaryAudio::Busy::OnDeck);
+            expect(TemporaryAudio::whyBusy(temporaries[3].id, usage) == TemporaryAudio::Busy::No);
+            usage.playingCarts.insert(99);
+            expect(TemporaryAudio::whyBusy(99, usage) == TemporaryAudio::Busy::InCart);
+
+            auto result = TemporaryAudio::emptyAll(fx.library, usage);
+            expectEquals(result.deleted, 1);
+            expectEquals(result.busy, 2);
+            expectEquals(result.failed, 0);
+            temporaries = fx.library.getTemporaries();
+            expectEquals((int) temporaries.size(), 2, "quedan el de la cola y el del deck");
+            for (const auto& t : temporaries)
+                expect(juce::File(juce::String::fromUTF8(t.path.c_str())).existsAsFile());
+
+            // Un archivo que otro programa tiene abierto no se borra, y su registro se queda.
+            if (temporaries.size() == 2) {
+                const juce::File locked(juce::String::fromUTF8(temporaries[0].path.c_str()));
+                {
+                    juce::FileOutputStream holder(locked);
+                    expect(holder.openedOk());
+                    result = TemporaryAudio::emptyAll(fx.library, {});
+                    expectEquals(result.deleted, 1);
+                    expectEquals(result.failed, 1);
+                    expectEquals((int) fx.library.getTemporaries().size(), 1, "el registro se queda con su archivo");
+                }
+                result = TemporaryAudio::emptyAll(fx.library, {});
+                expectEquals(result.deleted, 1);
+            }
+            expect(fx.library.getTemporaries().empty());
+            expect(!fx.lab.root.getChildFile("Library/_Temporales").exists(), "no quedan carpetas vacías");
+            expect(fx.library.getTrackById(song.id).id == song.id, "la música sigue ahí");
+        }
+
+        beginTest("El generador no los usa, aunque se elija su categoría a propósito");
+        {
+            LibraryFixture fx;
+            TempLab outside;
+            auto& lib = fx.library;
+            lib.addCategory("SALSA");
+            int salsa = -1;
+            for (const auto& c : lib.getCategories())
+                if (juce::String(c.name) == "SALSA") salsa = c.id;
+            const auto song = fx.add("Library/SALSA/cancion.wav", "CANCION");
+            lib.setTrackCategories(song.id, { salsa });
+            const auto loose = fx.add("Library/GENERAL/suelta.wav", "SIN CATEGORIA");
+            juce::Array<juce::File> files;
+            for (int i = 0; i < 3; ++i) files.add(writeMessage(outside.root.getChildFile("saludo " + juce::String(i) + ".wav"), 30.0 + i));  // audios distintos: no son duplicados
+            importAndWait(lib, files);
+            expectEquals((int) lib.getTemporaries().size(), 3);
+            const int temporariesId = lib.getSystemCategory(CategoryRole::Temporaries).id;
+
+            auto noTemporaries = [&lib](const Playlist& playlist) {
+                for (const auto& t : playlist.getQueue())
+                    if (lib.isTemporary(t.id)) return false;
+                return true;
+            };
+            GeneratorSettings settings;
+            settings.lastPlayedSeparation = 0;
+            settings.targetDurationVal = 20;
+            PlaylistGenerator generator(lib);
+            Playlist playlist;
+            expect(generator.generate(settings, playlist).success);
+            expect(!playlist.getQueue().empty() && noTemporaries(playlist), "toda la música, sin los temporales");
+            bool looseUsed = false;
+            for (const auto& t : playlist.getQueue()) looseUsed |= t.id == loose.id;
+            expect(looseUsed, "la música sin categoría sí");
+
+            settings.includedCategories = { temporariesId };
+            Playlist only;
+            expect(!generator.generate(settings, only).success, "ni eligiendo la categoría de los temporales");
+            expect(only.getQueue().empty());
+
+            settings.includedCategories = { salsa };
+            settings.separatorCategoryId = temporariesId;
+            settings.separatorInterval = 1;
+            Playlist withSeparators;
+            generator.generate(settings, withSeparators);
+            expect(noTemporaries(withSeparators), "ni como separadores");
+
+            // La lógica pura también los deja fuera.
+            auto temporary = lib.getTemporaries().front();
+            const std::unordered_map<int, std::vector<int>> categoriesOf { { temporary.id, { temporariesId } } };
+            GeneratorSettings all;
+            all.includedCategories = { temporariesId };
+            all.lastPlayedSeparation = 0;
+            expect(PlaylistGenerator::selectCandidates({ temporary }, categoriesOf, { temporariesId }, all, juce::Time::getCurrentTime()).empty());
+        }
+
+        beginTest("AutoDJ no los usa: con la cola vacía, la protección contra silencio pone música, no un saludo");
+        {
+            LibraryFixture fx;
+            TempLab outside;
+            const auto songFile = writeWav(fx.lab.root.getChildFile("Library/M/CANCION.wav"), 20.0,
+                                           [](double t) { return tone(t, 0.3f, 523.0); });
+            fx.library.getDatabase().addTrack(makeTrack(songFile.getFullPathName(), "ARTISTA", "CANCION"));
+            juce::Array<juce::File> files;
+            for (int i = 0; i < 3; ++i) files.add(writeMessage(outside.root.getChildFile("saludo " + juce::String(i) + ".wav"), 20.0 + i));
+            importAndWait(fx.library, files);
+            expectEquals((int) fx.library.getTemporaries().size(), 3);
+
+            AudioEngine engine(fx.library, false);
+            auto& mixer = engine.getMixer();
+            mixer.prepareToPlay(512, 44100.0);
+            auto& a = engine.getDeck(0);
+            auto& b = engine.getDeck(1);
+            Playlist playlist;
+            AutoDJ autoDJ(engine, playlist);
+            autoDJ.setEnabled(true);
+            DeadAirGuard guard(engine, autoDJ, playlist, fx.library);
+            guard.setThresholdSeconds(0.3);
+            guard.setEmergencyCategory(temporariesName(fx.library));  // ni si alguien la escribe como emergencia
+
+            const auto silence = writeWav(fx.lab.root.getChildFile("SILENCIO.wav"), 30.0, [](double) { return 0.0f; });
+            auto music = [&](Deck& d) { return d.isPlaying() && juce::File(juce::String(d.getCurrentTrack().path)) != silence; };
+            a.loadTrack(silence);
+            a.setRouting(true, false);
+            a.play();
+            expect(pumpMessagesUntil([&] { pump(mixer, 0.05, { &a, &b }); return music(a) || music(b); }, 8000),
+                   "con la cola vacía entra música");
+            const auto& playing = music(a) ? a : b;
+            expectEquals(juce::String(playing.getCurrentTrack().title), juce::String("CANCION"));
+            expect(!fx.library.isTemporary(playing.getCurrentTrack().id));
+            for (const auto& t : playlist.getQueue())
+                expect(!fx.library.isTemporary(t.id), "la cola de rescate no lleva temporales");
+            a.stop();
+            b.stop();
+        }
+
+        beginTest("Enlaces de redes: se reconocen y se arman los argumentos de yt-dlp (sin conexión, sin cookies)");
+        {
+            expectEquals(LinkDownload::normalise("https://www.instagram.com/reel/C0aBcDeFgHi/?igsh=abc"),
+                         juce::String("https://www.instagram.com/reel/C0aBcDeFgHi/?igsh=abc"));
+            expectEquals(LinkDownload::normalise(utf8("Mira este saludo: https://fb.watch/abC12/ \xf0\x9f\x91\x8f gracias")),
+                         juce::String("https://fb.watch/abC12/"), "el enlace dentro de un mensaje");
+            expectEquals(LinkDownload::normalise("instagram.com/p/XYZ"), juce::String("https://instagram.com/p/XYZ"));
+            expectEquals(LinkDownload::normalise("<https://x.com/radio/status/1234>."), juce::String("https://x.com/radio/status/1234"));
+            for (auto* bad : { "", "hola", "file:///C:/Windows/notepad.exe", "javascript:alert(1)", "--exec calc", "https://",
+                               "ftp://x.com/a", "https://localhost/a", "https://ex\"ample.com/a" })
+                expect(LinkDownload::normalise(bad).isEmpty(), bad);
+
+            expectEquals(LinkDownload::siteName("https://www.facebook.com/watch/?v=1"), juce::String("Facebook"));
+            expectEquals(LinkDownload::siteName("https://fb.watch/abc/"), juce::String("Facebook"));
+            expectEquals(LinkDownload::siteName("https://www.instagram.com/reel/a/"), juce::String("Instagram"));
+            expectEquals(LinkDownload::siteName("https://twitter.com/a/status/1"), juce::String("X"));
+            expectEquals(LinkDownload::siteName("https://x.com/a/status/1"), juce::String("X"));
+            expectEquals(LinkDownload::siteName("https://vm.tiktok.com/ZM123/"), juce::String("TikTok"));
+            expectEquals(LinkDownload::siteName("https://youtu.be/JQwqpsuENeQ"), juce::String("YouTube"));
+            expectEquals(LinkDownload::siteName("https://radio.example.org/audio/1"), juce::String("radio.example.org"));
+            expect(LinkDownload::isYouTube("JQwqpsuENeQ") && LinkDownload::isYouTube("https://m.youtube.com/watch?v=JQwqpsuENeQ"));
+            expect(!LinkDownload::isYouTube("https://www.instagram.com/reel/a/"));
+
+            TempLab lab;
+            DownloadTools::Paths tools;
+            tools.ytDlp = lab.root.getChildFile("yt-dlp.exe");
+            tools.ffmpegFolder = lab.root.getChildFile("ffmpeg");
+            const auto url = LinkDownload::normalise("https://www.instagram.com/reel/C0aBcDeFgHi/");
+            const auto folder = lab.root.getChildFile("Trabajo").getChildFile("7");
+            const auto args = LinkDownload::arguments(tools, url, folder);
+            expectEquals(args[0], tools.ytDlp.getFullPathName());
+            expect(args.contains("--no-config"), "sin la configuración del usuario de yt-dlp");
+            expectEquals(args[args.size() - 1], url);
+            expectEquals(args[args.size() - 2], juce::String("--"), "el enlace nunca se toma por una opción");
+            expectEquals(args[args.indexOf("-f") + 1], juce::String("bestaudio/best"), "solo el audio si el sitio lo da aparte");
+            expect(!args.contains("-x") && !args.contains("--extract-audio"), "a MP3 lo pasa FFmpeg (AudioConverter) después");
+            expectEquals(args[args.indexOf("--match-filter") + 1], juce::String("!is_live"));
+            expectEquals(args[args.indexOf("--playlist-items") + 1], juce::String("1"));
+            expectEquals(args[args.indexOf("--ffmpeg-location") + 1], tools.ffmpegFolder.getFullPathName());
+            expect(args[args.indexOf("-o") + 1].startsWith(folder.getFullPathName()));
+            for (const auto& a : args)
+                for (auto* forbidden : { "--cookies", "--cookies-from-browser", "--username", "--password", "--netrc" })
+                    expect(!a.startsWith(forbidden), "sin cookies ni cuentas del usuario: " + a);
+            expect(args.joinIntoString(" ").contains("[raaadio-title]") && args.contains("after_move:filepath"));
+
+            expectEquals(LinkDownload::parseTitle(utf8("[raaadio-title] \"Saludo \\u00e9xito\\nl\xc3\xadnea 2\"")), utf8("Saludo éxito\nlínea 2"));
+            expectEquals(LinkDownload::parseTitle("[raaadio-title] NA"), juce::String());
+            expectEquals(LinkDownload::parseAuthor("[raaadio-author] \"radio_el_prado\""), juce::String("radio_el_prado"));
+            expect(LinkDownload::parseTitle("[raaadio-author] \"x\"").isEmpty());
+            expectEquals(LinkDownload::parseFinalPath("C:\\Temp\\RAAADIO\\3\\C0aBcDeFgHi.mp4"), juce::String("C:\\Temp\\RAAADIO\\3\\C0aBcDeFgHi.mp4"));
+            expect(LinkDownload::parseFinalPath("[download] 100% of 2.1MiB").isEmpty());
+
+            expectEquals(LinkDownload::cleanTitle(utf8("Radio Prado - Saludo a  las madres\ndel barrio https://t.co/xyz"), "radio", "X"),
+                         utf8("Radio Prado - Saludo a las madres del barrio"));
+            const auto longTitle = LinkDownload::cleanTitle(juce::String::repeatedString("palabra ", 40), {}, "X");
+            expect(longTitle.length() <= 91 && longTitle.endsWith(juce::String::charToString((juce::juce_wchar) 0x2026)));
+            expectEquals(LinkDownload::cleanTitle("https://t.co/abc", "bandamunicipal", "Instagram"), juce::String("bandamunicipal"));
+            expectEquals(LinkDownload::cleanTitle({}, {}, "Instagram"), juce::String("Instagram"));
+
+            using P = SongDownload::Problem;
+            expect(LinkDownload::classify("ERROR: [Instagram] C0aBcDeFgHi: Requested content is not available, rate-limit reached or login "
+                                          "required. Use --cookies, --cookies-from-browser, --username and --password, --netrc-cmd, or "
+                                          "--netrc (instagram) to provide account credentials") == P::LoginRequired);
+            expect(LinkDownload::classify("ERROR: [facebook] 1234567890: Cannot parse data; please report this issue on "
+                                          "https://github.com/yt-dlp/yt-dlp/issues?q= , filling out the appropriate issue template")
+                   == P::LoginRequired);
+            expect(LinkDownload::classify("ERROR: [twitter] 1234: NSFW tweet requires authentication. Use --cookies") == P::LoginRequired);
+            expect(LinkDownload::classify("ERROR: [twitter] 1234: No video could be found in this tweet") == P::NoAudio);
+            expect(LinkDownload::classify("ERROR: Unsupported URL: https://example.com/foo") == P::Unsupported);
+            expect(LinkDownload::classify("[info] abc: does not pass filter (!is_live), skipping ..") == P::Live);
+            expect(LinkDownload::classify(utf8("ERROR: [youtube] abc: Sign in to confirm you\xe2\x80\x99re not a bot. Use --cookies"))
+                   == P::BotCheck, "lo de YouTube sigue siendo lo de YouTube");
+            expect(LinkDownload::classify("ERROR: [generic] Unable to download webpage: HTTP Error 404: Not Found") == P::Unavailable);
+            expect(LinkDownload::classify("ERROR: [Instagram] abc: Unable to download webpage: <urlopen error [Errno 11001] getaddrinfo failed>")
+                   == P::Network);
+            expect(LinkDownload::classify("ERROR: Postprocessing: ffprobe and ffmpeg not found. Please install or provide the path")
+                   == P::Tools);
+            expect(SongDownload::problemFromKey(SongDownload::problemKey(P::LoginRequired)) == P::LoginRequired);
+
+            // FFmpeg a MP3: el primer audio (de un video no queda la imagen), con LAME, sin versión.
+            const auto mp3Args = AudioConverter::arguments(lab.root.getChildFile("ffmpeg.exe"), lab.root.getChildFile("C0a.m4a"),
+                                                           lab.root.getChildFile("salida.mp3"), AudioConverter::Format::Mp3);
+            expectEquals(mp3Args[mp3Args.indexOf("-map") + 1], juce::String("0:a:0"));
+            expectEquals(mp3Args[mp3Args.indexOf("-c:a") + 1], juce::String("libmp3lame"));
+            expectEquals(mp3Args[mp3Args.indexOf("-f") + 1], juce::String("mp3"));
+            expect(mp3Args.contains("+bitexact") && mp3Args[mp3Args.size() - 1].endsWith("salida.mp3"));
+        }
+
+        beginTest("En su hilo: un enlace de Instagram baja, FFmpeg lo pasa a MP3 y entra a Temporales");
+        {
+            LibraryFixture fx;
+            SongDownloadTests::FakeYtDlp unused;
+            FakeTools tools;
+            tools.mp3 = SongDownloadTests::encodeMp3(6.0);
+            expect(tools.mp3.getSize() > 1000, "LAME está junto a las pruebas");
+            auto services = SongDownloadTests::fakeServices(fx.lab.root, unused);
+            services.run = tools.runner();
+            SongDownloader downloader(fx.library, services);
+
+            const auto url = juce::String("https://www.instagram.com/reel/C0aBcDeFgHi/?igsh=x");
+            const int id = downloader.enqueueLink("Escucha esto: " + url);
+            expect(id > 0);
+            expectEquals(downloader.enqueueLink(url), 0, "ya está en la fila");
+            expectEquals(downloader.enqueueLink("no es un enlace"), 0);
+
+            const auto job = SongDownloadTests::finished(downloader, id);
+            expect(job.has_value() && job->state == SongDownloader::State::Done, job.has_value() ? job->detail : juce::String("timeout"));
+            if (!job.has_value() || job->trackId < 0) return;
+            expect(job->kind == SongDownloader::Kind::Temporary && job->site == "Instagram");
+
+            const auto track = fx.library.getTrackById(job->trackId);
+            expect(fx.library.isTemporary(track.id));
+            expectEquals(juce::String::fromUTF8(track.title.c_str()), juce::String("Saludo de la Banda Municipal desde el parque"));
+            expectEquals(juce::String::fromUTF8(track.artist.c_str()), juce::String("bandamunicipal"));
+            const juce::File file(juce::String::fromUTF8(track.path.c_str()));
+            expect(file.hasFileExtension("mp3") && file.isAChildOf(fx.lab.root.getChildFile("Library/_Temporales")), file.getFullPathName());
+            expectEquals(track.analysisVersion, TrackAnalyzer::version, "también se analiza y normaliza");
+            expectEquals(tools.conversions.load(), 1, "a MP3 con FFmpeg");
+            {
+                const juce::ScopedLock sl(tools.lock);
+                expect(tools.lastFfmpeg.contains("libmp3lame"));
+                expect(tools.lastFfmpeg[tools.lastFfmpeg.indexOf("-i") + 1].endsWith(".m4a"));
+                expectEquals(tools.lastYtDlp[tools.lastYtDlp.size() - 1], url, "lo pegado, limpio");
+            }
+            expect(!services.workFolder.getChildFile(juce::String(id)).exists(), "la carpeta de trabajo se borra");
+            const auto records = fx.library.getDatabase().getRecentDownloads(1);
+            expect(!records.empty() && records[0].videoId == url.toStdString() && records[0].status == Database::DownloadStatus::Done);
+            expect(!downloader.jobForTrack(0).has_value(), "la búsqueda de canciones no lo ve");
+            expectEquals(downloader.getStatus().finished, 0, "ni lo cuenta entre sus canciones");
+            expectEquals((int) downloader.getJobs(SongDownloader::Kind::Temporary).size(), 1);
+
+            // Privado o con sesión: un error claro, sin detener nada.
+            tools.errorFor = [](const juce::String&) {
+                return juce::String("ERROR: [Instagram] DdDdDdDdDdD: Requested content is not available, rate-limit reached or login "
+                                    "required. Use --cookies, --cookies-from-browser, --username and --password");
+            };
+            const auto failed = SongDownloadTests::finished(downloader, downloader.enqueueLink("https://www.instagram.com/p/DdDdDdDdDdD/"));
+            expect(failed.has_value() && failed->state == SongDownloader::State::Failed
+                   && failed->problem == SongDownload::Problem::LoginRequired);
+            expect(downloader.getStatus().pausedUntil == juce::Time(), "no es YouTube pidiendo esperar: nada se detiene");
+            expectEquals((int) fx.library.getTemporaries().size(), 1);
+        }
+
+        beginTest("En su hilo: si YouTube pidió esperar, los enlaces de otras redes siguen bajando");
+        {
+            LibraryFixture fx;
+            SongDownloadTests::FakeYtDlp unused;
+            FakeTools tools;
+            tools.mp3 = SongDownloadTests::encodeMp3(5.0);
+            tools.errorFor = [](const juce::String& url) {
+                return url.contains("youtube") ? juce::String("ERROR: [youtube] JQwqpsuENeQ: Video unavailable. This content isn't "
+                                                              "available, try again later. The current session has been rate-limited")
+                                               : juce::String();
+            };
+            auto services = SongDownloadTests::fakeServices(fx.lab.root, unused);
+            services.run = tools.runner();
+            SongDownloader downloader(fx.library, services);
+
+            const auto before = juce::Time::getCurrentTime();
+            const int song = downloader.enqueue(SongDownloadTests::frioFrio(), SongDownloadTests::video("JQwqpsuENeQ"));
+            expect(SongDownloadTests::waitFor([&] { return downloader.getStatus().pausedUntil > before; }));
+            const int youtubeLink = downloader.enqueueLink("https://www.youtube.com/watch?v=JQwqpsuENeQ");
+            const int link = downloader.enqueueLink("https://www.facebook.com/watch/?v=1234567890");
+            const auto done = SongDownloadTests::finished(downloader, link);
+            expect(done.has_value() && done->state == SongDownloader::State::Done, "Facebook no espera a YouTube");
+            juce::Thread::sleep(200);
+            for (const auto& j : downloader.getJobs())
+                if (j.id == song || j.id == youtubeLink)
+                    expect(j.state == SongDownloader::State::Queued, "lo de YouTube espera su turno");
+            expectEquals(tools.downloads.load(), 2, "a YouTube no se le insiste");
+        }
+    }
+};
+
+//==============================================================================
 // Interfaz. Se construye y se dibuja sin ventana, igual que el modo --ui-snapshot, con el
 // aspecto de la aplicación (RaaadioLookAndFeel). Nunca guarda el idioma ni el tema del
 // usuario: setLanguage y setTheme se llaman sin persistir y el estado global se restaura.
@@ -7278,7 +7779,17 @@ public:
             expect(answerModal(0), "copiar pregunta; se cancela");
             expect(ui::click(library, "btn_change_lab_root"));
             expect(answerModal(1), "se acepta: copia con avance");
-            expect(answerModal(0, 60000), "al terminar ofrece reiniciar");
+            // La ventana de avance también es modal: contestarla sería cancelar la copia (JUCE
+            // detiene el hilo si deja de serlo). Se espera el aviso del final, o el de un error.
+            juce::String finalDialog;
+            expect(pumpMessagesUntil([&finalDialog] {
+                auto* modal = juce::Component::getCurrentlyModalComponent();
+                if (modal == nullptr || modal->getName() == TRANS("lab_copying")) return false;
+                finalDialog = modal->getName();
+                return true;
+            }, 60000), "la copia termina");
+            expectEquals(finalDialog, TRANS("restart_title"), "sin errores");
+            expect(answerModal(0), "al terminar ofrece reiniciar");
             expect(PersistenceManager::containsStation(empty.root.getChildFile("raaadio_lab")), "la copia está completa");
         }
 
@@ -7425,6 +7936,67 @@ public:
             queue->itemDragMove(Source(reorder, nullptr, { 20, table->getY() + table->getHeight() / 2 }));
             queue->itemDropped(Source(reorder, nullptr, {}));
             expectEquals(size(), before + 2, "reordenar no cambia cuántas hay");
+        }
+
+        beginTest("Arrastrando hacia la cola: cerca del borde se desplaza sola, y la rueda mueve la lista que está debajo");
+        {
+            ui::Screen screen("main");
+            auto* queue = ui::find<PlaylistComponent>(screen.main());
+            auto* table = ui::find<juce::TableListBox>(*queue);
+            auto* viewport = table->getViewport();
+            expect(viewport->canScrollVertically(), "la cola de demostración no cabe en la pantalla");
+            const auto tracks = screen.library().search("", "");
+            const juce::var fromLibrary("track_list_" + juce::String(tracks[0].path));
+            using Source = juce::DragAndDropTarget::SourceDetails;
+            auto at = [&](int y) { return Source(fromLibrary, nullptr, { table->getX() + 40, table->getY() + y }); };
+
+            viewport->setViewPosition(0, 0);
+            queue->itemDragEnter(at(table->getHeight() - 8));
+            queue->itemDragMove(at(table->getHeight() - 8));
+            expect(pumpMessagesUntil([&] { return viewport->getViewPositionY() > 3 * table->getRowHeight(); }, 5000),
+                   "cerca del borde de abajo baja sola");
+
+            queue->itemDragMove(at(table->getHeight() / 2));
+            const int middle = viewport->getViewPositionY();
+            dispatchMessagesFor(300);
+            expectEquals(viewport->getViewPositionY(), middle, "en el medio se queda quieta");
+
+            queue->itemDragMove(at(5));  // sobre la cabecera
+            expect(pumpMessagesUntil([&] { return viewport->getViewPositionY() == 0; }, 8000), "sobre la cabecera sube sola");
+            queue->itemDragMove(at(table->getHeight() - 8));
+            queue->itemDragExit(at(table->getHeight() + 100));
+            const int afterExit = viewport->getViewPositionY();
+            dispatchMessagesFor(300);
+            expectEquals(viewport->getViewPositionY(), afterExit, "al salir de la cola deja de desplazarla");
+
+            // La rueda durante el arrastre: JUCE se la manda a la lista de origen (la biblioteca)
+            // y WheelRouter la pasa a la que está bajo el puntero.
+            ui::OnScreen onScreen(screen.main());
+            auto* libraryTable = ui::find<juce::TableListBox>(*ui::find<LibraryView>(screen.main()));
+            auto* libraryViewport = libraryTable->getViewport();
+            expect(libraryViewport->canScrollVertically());
+            viewport->setViewPosition(0, 0);
+            libraryViewport->setViewPosition(0, 0);
+
+            WheelRouter router;
+            router.begin(libraryTable);
+            const juce::MouseWheelDetails down { 0.0f, -0.6f, false, false, false };
+            auto wheelAt = [&](juce::Component& over) {
+                const auto e = ui::mouseAt(*libraryTable, libraryTable->getLocalPoint(nullptr, over.getScreenBounds().getCentre()).toFloat());
+                libraryViewport->useMouseWheelMoveIfNeeded(e.getEventRelativeTo(libraryViewport), down);  // lo que hace JUCE
+                router.mouseWheelMove(e, down);
+                dispatchMessagesFor(20);
+            };
+            wheelAt(*table);
+            expectEquals(libraryViewport->getViewPositionY(), 0, "la biblioteca no se mueve");
+            expect(viewport->getViewPositionY() > 0, "se mueve la cola, que está bajo el puntero");
+
+            const int queueY = viewport->getViewPositionY();
+            wheelAt(*libraryTable);
+            expect(libraryViewport->getViewPositionY() > 0, "sobre la biblioteca se mueve ella");
+            expectEquals(viewport->getViewPositionY(), queueY);
+            router.end();
+            expect(!router.isActive());
         }
 
         beginTest("Doble clic abre la ficha de la pista; el botón abre el generador");
@@ -7832,7 +8404,8 @@ public:
             // Soltar sobre la pestaña: el primer cartucho libre; con todos ocupados, avisa.
             auto* tabs = ui::find<juce::TabbedComponent>(screen.main());
             auto& bar = tabs->getTabbedButtonBar();
-            auto* cartTab = dynamic_cast<juce::DragAndDropTarget*>(bar.getTabButton(bar.getNumTabs() - 1));
+            // La pestaña de la botonera por su nombre (después vienen los temporales).
+            auto* cartTab = dynamic_cast<juce::DragAndDropTarget*>(bar.getTabButton(tabs->getTabNames().indexOf(TRANS("tab_cartwall"))));
             expect(cartTab != nullptr && cartTab->isInterestedInDragSource(Source(drag, nullptr, {})));
             for (int i = 0; i < CartPlayer::numCarts + 1; ++i)
             {
@@ -8124,6 +8697,96 @@ public:
     }
 };
 
+class UiTemporariesTests : public juce::UnitTest
+{
+public:
+    UiTemporariesTests() : juce::UnitTest("Interfaz: audios temporales", "RAAADIO") {}
+
+    juce::Array<juce::File> answer;  // lo que "elige" el usuario en el diálogo de archivos
+
+    void runTest() override
+    {
+        UiEnvironment environment;
+        FileChoosers::setHandler([this](FileChoosers::Kind, const juce::String&,
+                                        const std::function<void(const juce::Array<juce::File>&)>& onChosen) { onChosen(answer); });
+
+        beginTest("Importar temporal: el botón junto a Importar cuñas los agrega y abre la pestaña");
+        {
+            ui::Screen screen("main");
+            auto& lib = screen.library();
+            const int before = (int) lib.getTemporaries().size();
+            TempLab outside;
+            answer = { TemporaryAudioTests::writeMessage(outside.root.getChildFile("Saludo nuevo.wav"), 4.0) };
+            expect(ui::click(screen.main(), "tip_import_temporal"), "el botón está en la fila de las pestañas");
+            expect(pumpMessagesUntil([&] { return !lib.isImporting() && (int) lib.getTemporaries().size() == before + 1; }, 10000));
+            auto* tabs = ui::find<DropSwitchingTabs>(screen.main());
+            expect(tabs != nullptr && tabs->getCurrentTabIndex() == 4, "se abre la pestaña Temporales");
+            auto* view = ui::find<TemporariesView>(screen.main());
+            auto* table = view != nullptr ? ui::find<juce::TableListBox>(*view) : nullptr;
+            expect(pumpMessagesUntil([&] { return table != nullptr && table->getNumRows() == before + 1; }, 3000), "y aparece en la lista");
+            expect(ui::draws(screen.main()));
+            answer = {};
+        }
+
+        beginTest("Desde la lista: a la cola; lo que está en la cola no se borra; Vaciar borra lo demás");
+        {
+            ui::Screen screen("temporaries");
+            auto& lib = screen.library();
+            auto* view = ui::find<TemporariesView>(screen.main());
+            auto* table = view != nullptr ? ui::find<juce::TableListBox>(*view) : nullptr;
+            expect(table != nullptr && table->getNumRows() == 4);
+            if (view == nullptr || table == nullptr) return;
+            for (int column = 0; column < 7; ++column) view->getCellTooltip(0, column);
+
+            // La demostración: el mensaje de la JAC ya está en la cola; el saludo (fila 0), no.
+            const auto rows = lib.getTemporaries();
+            table->selectRow(0);
+            const auto queued = screen.playlist().getQueue().size();
+            expect(ui::click(*view, "tip_temp_queue"));
+            expect(ui::chooseMenuItem("temp_queue_end"));
+            expectEquals((int) screen.playlist().getQueue().size(), (int) queued + 1);
+
+            expect(ui::click(*view, "tip_temp_remove"));
+            ui::closeEverything();  // el aviso de por qué no se puede
+            expectEquals((int) lib.getTemporaries().size(), 4, "lo que está en la cola se queda");
+
+            expect(ui::click(*view, "tip_temp_empty"));
+            expect(answerModal(1), "Vaciar pregunta antes");
+            const auto left = lib.getTemporaries();
+            expectEquals((int) left.size(), 2, "quedan los dos que están en la cola");
+            for (const auto& t : rows) {
+                const bool kept = std::any_of(left.begin(), left.end(), [&t](const TrackInfo& k) { return k.id == t.id; });
+                expect(kept == juce::File(juce::String::fromUTF8(t.path.c_str())).existsAsFile(), "lo borrado se borra del disco");
+            }
+            expect(pumpMessagesUntil([&] { return table->getNumRows() == 2; }, 3000));
+            expect(ui::draws(*view));
+        }
+
+        beginTest("Pegar un enlace: se ve lo que baja y se puede cancelar; lo que no es un enlace solo avisa");
+        {
+            ui::Screen screen("temporaries-link");
+            auto* view = ui::find<TemporariesView>(screen.main());
+            expect(view != nullptr);
+            if (view == nullptr) return;
+            auto cancelVisible = [&] {
+                auto* b = ui::button(*view, "online_download_cancel_short");
+                return b != nullptr && b->isVisible();
+            };
+            expect(pumpMessagesUntil(cancelVisible, 5000), "la descarga en curso se puede cancelar");
+            expect(ui::draws(*view));
+
+            auto* editor = ui::find<juce::TextEditor>(*view);
+            expect(editor != nullptr && editor->isEnabled());
+            if (editor != nullptr) ui::setText(*editor, "esto no es un enlace");
+            expect(ui::click(*view, "temp_link_download"));
+            expect(editor != nullptr && editor->getText() == "esto no es un enlace", "se queda para corregirlo");
+
+            expect(ui::click(*view, "online_download_cancel_short"));
+            expect(pumpMessagesUntil([&] { return !cancelVisible(); }, 5000), "cancelada");
+        }
+    }
+};
+
 class UiViewTests : public juce::UnitTest
 {
 public:
@@ -8160,7 +8823,7 @@ public:
                                   "settings-library-2", "settings-broadcast", "settings-broadcast-2", "settings-language",
                                   "settings-about", "generator", "generator-advanced", "generator-done",
                                   "generator-replace", "track", "import", "review", "review-library", "artists",
-                                  "library-online", "online-search" })
+                                  "library-online", "online-search", "temporaries", "temporaries-link" })
         {
             juce::int64 size = 0;
             expect(render(view, "dark", "es", size), view);
@@ -8215,12 +8878,14 @@ static StationSafetyTests stationSafetyTests;
 static PreviewTests previewTests;
 static HttpTransportTests httpTransportTests;
 static DeadAirGuardTests deadAirGuardTests;
+static TemporaryAudioTests temporaryAudioTests;
 // Al final: dejan el idioma y el aspecto como estaban.
 static UiReviewTests uiReviewTests;
 static UiSettingsTests uiSettingsTests;
 static UiQueueTests uiQueueTests;
 static UiLibraryTests uiLibraryTests;
 static UiAdsTests uiAdsTests;
+static UiTemporariesTests uiTemporariesTests;
 static UiConsoleTests uiConsoleTests;
 static UiDialogTests uiDialogTests;
 static UiViewTests uiViewTests;
@@ -8261,7 +8926,21 @@ int main()
 
     ConsoleRunner runner;
     runner.setAssertOnFailure(false);
-    runner.runTestsInCategory("RAAADIO");
+    // RAAADIO_TESTS=texto: solo las pruebas cuyo nombre lo contiene (para repetir una sin
+    // esperar la suite completa).
+    const auto only = juce::SystemStats::getEnvironmentVariable("RAAADIO_TESTS", {});
+    if (only.isNotEmpty())
+    {
+        juce::Array<juce::UnitTest*> chosen;
+        for (auto* test : juce::UnitTest::getTestsInCategory("RAAADIO"))
+            if (test->getName().containsIgnoreCase(only)) chosen.add(test);
+        std::cout << "Solo " << chosen.size() << " clase(s) de pruebas con \"" << only << "\"\n";
+        runner.runTests(chosen);
+    }
+    else
+    {
+        runner.runTestsInCategory("RAAADIO");
+    }
 
     int failures = 0, passes = 0;
     for (int i = 0; i < runner.getNumResults(); ++i) {

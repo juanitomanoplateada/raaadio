@@ -137,8 +137,9 @@ std::vector<TrackInfo> PlaylistGenerator::selectCandidates(const std::vector<Tra
 
     std::vector<TrackInfo> result;
     for (const auto& t : allTracks) {
-        // Lo importado que nadie ha revisado no sale al aire solo (sí a mano).
-        if (t.isPending()) continue;
+        // Lo importado que nadie ha revisado no sale al aire solo (sí a mano), y un audio
+        // temporal (un saludo, un mensaje) solo cuando el operador lo pone.
+        if (t.isPending() || t.systemRole == CategoryRole::Temporaries) continue;
         // Sin duración no se puede programar (y el bloque nunca llegaría a su duración).
         if (t.getAirDuration() <= 0.0) continue;
         if (!inAny(t.id, included) && !(allMusic && uncategorized(t.id))) continue;

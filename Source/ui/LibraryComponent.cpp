@@ -39,6 +39,7 @@ LibraryComponent::LibraryComponent(MusicLibrary& lib, HistoryManager& hm, Advert
       historyView(hm),
       adsView(lib, ads),
       cartwallView(carts, lib),
+      temporariesView(lib),
       progressBar(progress)
 {
     addAndMakeVisible(tabs);
@@ -49,21 +50,26 @@ LibraryComponent::LibraryComponent(MusicLibrary& lib, HistoryManager& hm, Advert
     tabs.addTab(TRANS("tab_history"), juce::Colours::transparentBlack, &historyView, false);
     tabs.addTab(TRANS("tab_ads"), juce::Colours::transparentBlack, &adsView, false);
     tabs.addTab(TRANS("tab_cartwall"), juce::Colours::transparentBlack, &cartwallView, false);
+    tabs.addTab(TRANS("tab_temporaries"), juce::Colours::transparentBlack, &temporariesView, false);
+    jassert(tabs.getNumTabs() == temporariesTab + 1);
 
-    const char* tabIcons[] = { "list", "history", "megaphone", "grid" };
-    for (int i = 0; i < 4; ++i)
+    const char* tabIcons[] = { "list", "history", "megaphone", "grid", "hourglass" };
+    for (int i = 0; i < tabs.getNumTabs(); ++i)
         if (auto* tab = tabs.getTabbedButtonBar().getTabButton(i))
             tab->getProperties().set("icon", tabIcons[i]);
 
     // Botonera: se asigna arrastrando una pista hasta un cartucho (la pestaña se abre sola
     // al pasar por encima), soltándola sobre la pestaña (primer cartucho libre) o con el
-    // clic derecho de la biblioteca y de la lista de cuñas.
-    const int cartwallTab = tabs.getNumTabs() - 1;
-    tabs.onDropOnTab = [this, cartwallTab](int index, const juce::String& description) {
+    // clic derecho de la biblioteca, de la lista de cuñas y de los temporales.
+    tabs.onDropOnTab = [this](int index, const juce::String& description) {
         if (index == cartwallTab) cartwallView.assignToFirstFree(description);
     };
+    // La pestaña abierta siempre muestra su nombre: al cambiar, se reparte de nuevo la fila.
+    tabs.onTabChanged = [this](int) { resized(); };
     libraryView.setCartPlayer(&carts);
     adsView.setCartPlayer(&carts);
+    temporariesView.setCartPlayer(&carts);
+    temporariesView.onImportRequested = [this] { importTemporaries(); };
     libraryView.onSearchOnline = [this](const juce::String& query) { openOnlineSearch(query); };
 
     // Se agregan después de las pestañas para quedar por encima de su barra.
@@ -75,6 +81,10 @@ LibraryComponent::LibraryComponent(MusicLibrary& lib, HistoryManager& hm, Advert
     addAndMakeVisible(importAnunciosButton);
     UiStyle::setIcon(importAnunciosButton, "megaphone");
     importAnunciosButton.onClick = [this] { importAnuncios(); };
+
+    addAndMakeVisible(importTemporalButton);
+    UiStyle::setIcon(importTemporalButton, "hourglass");
+    importTemporalButton.onClick = [this] { importTemporaries(); };
 
     addChildComponent(reviewButton);
     UiStyle::setVariant(reviewButton, "warning");
@@ -118,39 +128,49 @@ void LibraryComponent::resized() {
     // Acciones alineadas a la derecha, sobre la barra de pestañas.
     auto actions = area.removeFromTop(tabs.getTabBarDepth()).withTrimmedBottom(4);
     const int h = 32;
+    const int available = actions.getWidth();
+    auto& bar = tabs.getTabbedButtonBar();
+    const int reviewCount = pendingCount > 0 ? pendingCount : unreviewedCount;
+    auto widthOf = [h](juce::TextButton& b) {
+        return b.getButtonText().isEmpty() ? h + 8 : b.getBestWidthForHeight(h) + 26;
+    };
+
+    // Si no cabe todo, por niveles (la ayuda emergente dice qué es cada cosa):
+    // 1. "Importar cuñas" e "Importar temporal" solo con su icono, "Por revisar (N)" solo con N;
+    // 2. las pestañas que no están abiertas, solo con su icono;
+    // 3. todas las pestañas con su icono.
+    int tabsRight = 0;
+    for (int level = 0; level <= 3; ++level) {
+        importAnunciosButton.setButtonText(level >= 1 ? juce::String() : TRANS("import_anuncios_btn"));
+        importTemporalButton.setButtonText(level >= 1 ? juce::String() : TRANS("import_temporal_btn"));
+        reviewButton.setButtonText(level >= 1 ? juce::String(reviewCount)
+                                              : TRANS(pendingCount > 0 ? "review_button_pending" : "review_button_library")
+                                                    .replace("%1", juce::String(reviewCount)));
+        const auto names = tabs.getTabNames();
+        for (int i = 0; i < tabs.getNumTabs(); ++i) {
+            if (auto* tab = bar.getTabButton(i)) {
+                const bool compact = level >= 3 || (level >= 2 && i != tabs.getCurrentTabIndex());
+                tab->getProperties().set("compact", compact);
+                tab->setTooltip(compact ? names[i] : juce::String());
+            }
+        }
+        bar.resized();
+
+        auto* lastTab = bar.getTabButton(tabs.getNumTabs() - 1);
+        tabsRight = lastTab != nullptr ? lastTab->getRight() + 16 : 360;
+        int used = tabsRight + widthOf(advancedImportButton) + 6 + widthOf(importAnunciosButton) + 6 + widthOf(importTemporalButton);
+        if (reviewButton.isVisible()) used += 6 + reviewButton.getBestWidthForHeight(h) + 30;
+        if (used <= available) break;
+    }
+
     auto place = [&](juce::TextButton& b, int width) {
         b.setBounds(actions.removeFromRight(width).withSizeKeepingCentre(width, h));
         actions.removeFromRight(6);
     };
-
-    // Si las pestañas y los botones no caben, "Importar anuncios" queda solo con su icono
-    // (la ayuda emergente dice qué hace).
-    auto* lastTab = tabs.getTabbedButtonBar().getTabButton(tabs.getNumTabs() - 1);
-    const int tabsRight = lastTab != nullptr ? lastTab->getRight() + 16 : 360;
-    importAnunciosButton.setButtonText(TRANS("import_anuncios_btn"));
-    const int importWidth = advancedImportButton.getBestWidthForHeight(h) + 26;
-    const int adsWidth = importAnunciosButton.getBestWidthForHeight(h) + 26;
-    const int available = actions.getRight() - actions.getX();
-    const bool compact = tabsRight + importWidth + adsWidth + 12 > available;
-    if (compact) importAnunciosButton.setButtonText({});
-
-    // "Por revisar (N)": si no cabe, solo el número (la ayuda emergente dice qué es).
-    int reviewWidth = 0;
-    if (reviewButton.isVisible()) {
-        const int count = pendingCount > 0 ? pendingCount : unreviewedCount;
-        reviewButton.setButtonText(TRANS(pendingCount > 0 ? "review_button_pending" : "review_button_library")
-                                       .replace("%1", juce::String(count)));
-        reviewWidth = reviewButton.getBestWidthForHeight(h) + 30;
-        const int used = tabsRight + importWidth + (compact ? h + 8 : adsWidth) + 18;
-        if (used + reviewWidth > available) {
-            reviewButton.setButtonText(juce::String(count));
-            reviewWidth = reviewButton.getBestWidthForHeight(h) + 34;
-        }
-    }
-
-    place(advancedImportButton, importWidth);
-    place(importAnunciosButton, compact ? h + 8 : adsWidth);
-    if (reviewButton.isVisible()) place(reviewButton, reviewWidth);
+    place(advancedImportButton, widthOf(advancedImportButton));
+    place(importAnunciosButton, widthOf(importAnunciosButton));
+    place(importTemporalButton, widthOf(importTemporalButton));
+    if (reviewButton.isVisible()) place(reviewButton, reviewButton.getBestWidthForHeight(h) + 30);
 
     // Progreso de importación y estado, a la izquierda de las acciones.
     actions.removeFromLeft(tabsRight);
@@ -168,15 +188,19 @@ void LibraryComponent::lookAndFeelChanged() {
     advancedImportButton.setTooltip(TRANS("tip_import"));
     importAnunciosButton.setButtonText(TRANS("import_anuncios_btn"));
     importAnunciosButton.setTooltip(TRANS("tip_import_ads"));
+    importTemporalButton.setButtonText(TRANS("import_temporal_btn"));
+    importTemporalButton.setTooltip(TRANS("tip_import_temporal"));
     reviewButton.setTooltip(TRANS("tip_review_button"));
     cancelButton.setButtonText(TRANS("cancel"));
 
     tabs.setTabName(0, TRANS("tab_library"));
     tabs.setTabName(1, TRANS("tab_history"));
     tabs.setTabName(2, TRANS("tab_ads"));
-    tabs.setTabName(3, TRANS("tab_cartwall"));
+    tabs.setTabName(cartwallTab, TRANS("tab_cartwall"));
+    tabs.setTabName(temporariesTab, TRANS("tab_temporaries"));
 
     libraryView.lookAndFeelChanged();
+    temporariesView.sendLookAndFeelChange();
     resized();
     repaint();
 }
@@ -302,6 +326,7 @@ void LibraryComponent::setStatusText(const juce::String& text, const juce::Strin
 void LibraryComponent::setDecks(Deck* dA, Deck* dB) {
     libraryView.setDecks(dA, dB);
     adsView.setDecks(dA, dB);
+    temporariesView.setDecks(dA, dB);
 }
 
 void LibraryComponent::updateReviewButton() {
@@ -364,6 +389,7 @@ void LibraryComponent::refreshLibrary() {
 void LibraryComponent::setPlaylist(Playlist* p) {
     libraryView.setPlaylist(p);
     adsView.setPlaylist(p);
+    temporariesView.setPlaylist(p);
 }
 
 void LibraryComponent::importAnuncios() {
@@ -373,6 +399,16 @@ void LibraryComponent::importAnuncios() {
             if (!files.isEmpty()) {
                 library.importFiles(files, library.getSystemCategory(CategoryRole::Spots).name);
             }
+        });
+}
+
+void LibraryComponent::importTemporaries() {
+    FileChoosers::chooseFiles(fileChooser, TRANS("select_files"), juce::File::getSpecialLocation(juce::File::userHomeDirectory),
+                              library.getSupportedFileWildcard(),
+        [this](const juce::Array<juce::File>& files) {
+            if (files.isEmpty()) return;
+            library.importTemporaries(files);
+            tabs.setCurrentTabIndex(temporariesTab);  // ahí aparecen al terminar
         });
 }
 

@@ -756,10 +756,10 @@ std::vector<Database::DownloadRecord> Database::getRecentDownloads(int limit) {
     return rows;
 }
 
-std::vector<std::string> Database::getDownloadStartsSince(int minutes) {
-    std::vector<std::string> starts;
-    each("SELECT started_at FROM downloads WHERE started_at >= datetime('now', 'localtime', ?1) ORDER BY started_at;",
+std::vector<Database::DownloadStart> Database::getDownloadStartsSince(int minutes) {
+    std::vector<DownloadStart> starts;
+    each("SELECT started_at, video_id FROM downloads WHERE started_at >= datetime('now', 'localtime', ?1) ORDER BY started_at;",
          [minutes](sqlite3_stmt* s) { bindText(s, 1, "-" + std::to_string(minutes) + " minutes"); },
-         [&starts](sqlite3_stmt* s) { starts.push_back(columnText(s, 0)); });
+         [&starts](sqlite3_stmt* s) { starts.push_back({ columnText(s, 0), columnText(s, 1) }); });
     return starts;
 }

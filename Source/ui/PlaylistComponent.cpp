@@ -38,6 +38,7 @@ PlaylistComponent::PlaylistComponent(Playlist& pl, MusicLibrary& lib)
 
 PlaylistComponent::~PlaylistComponent() {
     stopTimer();
+    dragAutoScroller.stopTimer();
 }
 
 void PlaylistComponent::lookAndFeelChanged() {
@@ -470,17 +471,48 @@ bool PlaylistComponent::isInterestedInDragSource(const SourceDetails& dragSource
     return desc.startsWith("track_list_") || desc.startsWith("playlist_drag_");
 }
 
-void PlaylistComponent::itemDragEnter(const SourceDetails&) {
+void PlaylistComponent::itemDragEnter(const SourceDetails& dragSourceDetails) {
     insertionIndex = -1;
+    dragPosition = dragSourceDetails.localPosition;
+    dragHovering = true;
+    dragAutoScroller.startTimer(autoScrollIntervalMs);
     repaint();
 }
 
 void PlaylistComponent::itemDragMove(const SourceDetails& dragSourceDetails) {
-    auto pos = dragSourceDetails.localPosition - table.getPosition();
+    dragPosition = dragSourceDetails.localPosition;
+    updateInsertionAt(dragPosition);
+}
+
+void PlaylistComponent::autoScrollWhileDragging() {
+    auto* viewport = table.getViewport();
+    if (!dragHovering || viewport == nullptr) {
+        dragAutoScroller.stopTimer();
+        return;
+    }
+    // Solo sobre la tabla (la cabecera cuenta como borde de arriba); sobre "Siguiente" o el
+    // título del panel no se desplaza nada.
+    if (dragPosition.x < table.getX() || dragPosition.x >= table.getRight()
+        || dragPosition.y < table.getY() || dragPosition.y >= table.getBottom())
+        return;
+    const auto inViewport = viewport->getLocalPoint(this, dragPosition);
+    if (viewport->autoScroll(viewport->getWidth() / 2, inViewport.y, autoScrollBorder, autoScrollMaxStep))
+        updateInsertionAt(dragPosition);
+}
+
+void PlaylistComponent::stopDragHover() {
+    dragHovering = false;
+    dragAutoScroller.stopTimer();
+}
+
+void PlaylistComponent::updateInsertionAt(juce::Point<int> position) {
+    auto pos = position - table.getPosition();
 
     int rowH = table.getRowHeight();
     if (rowH == 0) rowH = UiStyle::rowHeight;
     const int headerH = table.getHeader().getHeight();
+    // Sobre la cabecera (que desplaza la cola hacia arriba): la primera fila que se ve.
+    if (pos.x >= 0 && pos.x < table.getWidth() && pos.y >= 0 && pos.y < headerH) pos.y = headerH;
     const int uiRow = table.getRowContainingPosition(pos.x, pos.y);
     const int numRows = getNumRows();
 
@@ -500,11 +532,13 @@ void PlaylistComponent::itemDragMove(const SourceDetails& dragSourceDetails) {
 }
 
 void PlaylistComponent::itemDragExit(const SourceDetails&) {
+    stopDragHover();
     insertionIndex = -1;
     table.repaint();
 }
 
 void PlaylistComponent::itemDropped(const SourceDetails& dragSourceDetails) {
+    stopDragHover();
     int targetIndex = insertionIndex;
     insertionIndex = -1;
     if (targetIndex < 0 || targetIndex > (int)trackCache.size()) targetIndex = (int)trackCache.size();

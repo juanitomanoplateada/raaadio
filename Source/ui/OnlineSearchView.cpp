@@ -373,7 +373,11 @@ juce::String OnlineSearchView::problemText(SongDownload::Problem problem, const 
     switch (problem) {
         case P::RateLimited:   return TRANS("online_problem_rate_limited");
         case P::BotCheck:      return TRANS("online_problem_bot_check");
-        case P::Unavailable:   return TRANS("online_problem_unavailable");
+        case P::Unavailable:
+        case P::LoginRequired:  // lo de las redes (enlaces de Temporales) no llega aquí
+        case P::NoAudio:
+        case P::Unsupported:
+        case P::Live:          return TRANS("online_problem_unavailable");
         case P::AgeRestricted: return TRANS("online_problem_age");
         case P::Region:        return TRANS("online_problem_region");
         case P::Network:       return TRANS("online_problem_network");
@@ -418,7 +422,7 @@ void OnlineSearchView::refreshDownloads() {
     if (downloader == nullptr) return;
     auto& t = ThemeManager::getInstance();
     const auto s = downloader->getStatus();
-    const auto jobs = downloader->getJobs();
+    const auto jobs = downloader->getJobs(SongDownloader::Kind::Song);  // los enlaces de Temporales tienen su pestaña
     const auto now = juce::Time::getCurrentTime();
 
     const SongDownloader::Job* active = nullptr;

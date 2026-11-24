@@ -486,10 +486,22 @@ TrackInfo Database::getTrackById(int id) {
     }));
 }
 
-TrackInfo Database::findTrackByHash(const std::string& fileHash) {
+TrackInfo Database::findTrackByHash(const std::string& fileHash, int excludingCategory) {
     if (fileHash.empty()) return firstOrNotFound({});
-    return firstOrNotFound(queryTracks("WHERE t.file_hash = ?1 LIMIT 1", [&](sqlite3_stmt* stmt) {
+    return firstOrNotFound(queryTracks("WHERE t.file_hash = ?1 AND t.id NOT IN "
+                                       "(SELECT track_id FROM track_categories WHERE category_id = ?2) LIMIT 1",
+                                       [&](sqlite3_stmt* stmt) {
         sqlite3_bind_text(stmt, 1, fileHash.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, excludingCategory);
+    }));
+}
+
+TrackInfo Database::findTrackByHashInCategory(const std::string& fileHash, int categoryId) {
+    if (fileHash.empty() || categoryId < 0) return firstOrNotFound({});
+    return firstOrNotFound(queryTracks("JOIN track_categories tc ON tc.track_id = t.id "
+                                       "WHERE t.file_hash = ?1 AND tc.category_id = ?2 LIMIT 1", [&](sqlite3_stmt* stmt) {
+        sqlite3_bind_text(stmt, 1, fileHash.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, categoryId);
     }));
 }
 
@@ -533,6 +545,33 @@ std::vector<int> Database::getTrackIdsNeedingAnalysis(int currentVersion) {
         ids.push_back(sqlite3_column_int(stmt, 0));
     sqlite3_finalize(stmt);
     return ids;
+}
+
+int Database::recomputeNormalizationGains(const std::function<double(double, double)>& gainFor) {
+    struct Change { int id; double gain; };
+    std::vector<Change> changes;
+    const bool read = each("SELECT id, loudness_lufs, true_peak_db, normalization_gain FROM tracks "
+                           "WHERE analysis_version >= 1;", {},
+                           [&](sqlite3_stmt* s) {
+        const double gain = gainFor(sqlite3_column_double(s, 1), sqlite3_column_double(s, 2));
+        if (std::abs(gain - sqlite3_column_double(s, 3)) > 1.0e-9)
+            changes.push_back({ sqlite3_column_int(s, 0), gain });
+    });
+    if (!read) return -1;
+    if (changes.empty()) return 0;
+
+    if (!execute("BEGIN IMMEDIATE;")) return -1;
+    bool ok = true;
+    for (const auto& change : changes)
+        ok = ok && run("UPDATE tracks SET normalization_gain = ?1 WHERE id = ?2;", [&change](sqlite3_stmt* s) {
+            sqlite3_bind_double(s, 1, change.gain);
+            sqlite3_bind_int(s, 2, change.id);
+        });
+    if (!ok || !execute("COMMIT;")) {
+        execute("ROLLBACK;");
+        return -1;
+    }
+    return (int) changes.size();
 }
 
 bool Database::run(const char* sql, const std::function<void(sqlite3_stmt*)>& bind) {
@@ -609,12 +648,18 @@ namespace {
         const char* name;        // nombre guardado (en pantalla se traduce)
         int folderFormat;        // 0 = carpetas por fecha, 1 = por artista
         const char* legacyName;  // cómo se llamaba en versiones anteriores
+        // Si una categoría del usuario con ese nombre se adopta. Nunca para los temporales:
+        // sus pistas se ocultarían de la biblioteca y se podrían borrar con "Vaciar".
+        bool adoptByName = true;
     };
 
     const SystemCategory systemCategories[] = {
-        { CategoryRole::StationIds, "IDENTIFICACIONES", 1, nullptr },
-        { CategoryRole::Spots,      "CUÑAS",            0, "ANUNCIOS" },
-        { CategoryRole::Sweepers,   "SEPARADORES",      1, "PROMOCIONES" },
+        { CategoryRole::StationIds,  "IDENTIFICACIONES", 1, nullptr },
+        { CategoryRole::Spots,       "CUÑAS",            0, "ANUNCIOS" },
+        { CategoryRole::Sweepers,    "SEPARADORES",      1, "PROMOCIONES" },
+        // En minúsculas y con "_" (como _Entrada y _Descartadas): un nombre que el usuario no
+        // puede crear (las categorías se escriben en mayúsculas). Carpetas por fecha.
+        { CategoryRole::Temporaries, "_Temporales",      0, nullptr, false },
     };
 
     // Lo que sembraban las versiones anteriores al crear la base de datos: EMERGENCIA y
@@ -649,7 +694,7 @@ void Database::ensureSystemCategories() {
 
         // Si ya hay una con ese nombre, o con el de versiones anteriores, se adopta.
         for (const char* name : { sc.name, sc.legacyName }) {
-            if (id != -1 || name == nullptr) continue;
+            if (id != -1 || name == nullptr || !sc.adoptByName) continue;
             id = categoryIdByName(name);
             if (id != -1) {
                 run("UPDATE categories SET system_role = ?1, name = ?2 WHERE id = ?3;", [&](sqlite3_stmt* s) {

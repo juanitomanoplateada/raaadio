@@ -45,6 +45,18 @@ void MusicLibrary::initialise(const juce::File& dbFile) {
     TrackNaming::setDisplayUppercase(db.getSetting("library.displayUppercase") == "1");
     db.ensureSearchIndex();
 
+    // La ganancia guardada lleva cada pista al objetivo de sonoridad con que se calculó. Si
+    // el objetivo cambió (o la base es de antes de anotarlo, cuando era -16 LUFS), se
+    // recalcula con la sonoridad y el pico ya medidos, sin volver a decodificar nada.
+    const auto loudnessTarget = juce::String(TrackAnalyzer::targetLufs, 1).toStdString();
+    if (db.getSetting("library.normalizationTarget") != loudnessTarget) {
+        const int updated = db.recomputeNormalizationGains(TrackAnalyzer::gainFor);
+        if (updated >= 0) db.setSetting("library.normalizationTarget", loudnessTarget);
+        juce::Logger::writeToLog("MusicLibrary: loudness target " + juce::String(loudnessTarget) + " LUFS, "
+                                 + (updated >= 0 ? juce::String(updated) + " track gains recalculated"
+                                                 : juce::String("gain update failed, will retry on next start")));
+    }
+
     libraryFolder = PersistenceManager::getLibraryFolder();
     
     if (!libraryFolder.exists()) {
@@ -117,6 +129,76 @@ MusicLibrary::DownloadImport MusicLibrary::importDownloaded(const juce::File& fi
         }
     }
     return result;
+}
+
+//==============================================================================
+// Audios temporales
+
+void MusicLibrary::importTemporaries(const juce::Array<juce::File>& files) {
+    importFiles(files, juce::String::fromUTF8(getSystemCategory(CategoryRole::Temporaries).name.c_str()));
+}
+
+MusicLibrary::DownloadImport MusicLibrary::importTemporaryDownload(const juce::File& file, const juce::String& title,
+                                                                   const juce::String& author) {
+    const juce::ScopedLock il(importLock);
+    DownloadImport result;
+    const auto category = juce::String::fromUTF8(getSystemCategory(CategoryRole::Temporaries).name.c_str());
+    result.result = processAndAddTrack(file, category, 0, &result.trackId);
+    // El título que dio la red social (las etiquetas del MP3 ya lo traen; esto cubre un
+    // archivo sin etiquetas). Si ya estaba, se queda con el nombre que el operador le dio.
+    if (result.result == ImportResult::Added && result.trackId != -1 && title.trim().isNotEmpty())
+        renameTemporary(result.trackId, title, author);
+    return result;
+}
+
+std::vector<TrackInfo> MusicLibrary::getTemporaries() {
+    auto tracks = getTracksWithRole(CategoryRole::Temporaries);
+    // Lo último que llegó, arriba (las fechas son "AAAA-MM-DD HH:MM:SS": se ordenan como texto).
+    std::stable_sort(tracks.begin(), tracks.end(), [](const TrackInfo& a, const TrackInfo& b) {
+        return a.createdAt != b.createdAt ? a.createdAt > b.createdAt : a.id > b.id;
+    });
+    return tracks;
+}
+
+bool MusicLibrary::isTemporary(int trackId) {
+    const juce::ScopedLock sl(dbLock);
+    const int temporaries = db.getSystemCategory(CategoryRole::Temporaries).id;
+    const auto categories = db.getTrackCategories(trackId);
+    return temporaries != -1 && std::find(categories.begin(), categories.end(), temporaries) != categories.end();
+}
+
+bool MusicLibrary::deleteTemporary(int trackId) {
+    if (!isTemporary(trackId)) return false;  // nunca una canción, una cuña ni un separador
+    const auto track = getTrackById(trackId);
+    if (track.id == -1) return false;
+
+    // Primero el archivo: si algo lo tiene abierto no se puede borrar, y el registro se queda
+    // (un temporal sin su archivo no le sirve a nadie).
+    const juce::File file(juce::String::fromUTF8(track.path.c_str()));
+    if (file.existsAsFile()) {
+        if (!file.deleteFile()) {
+            juce::Logger::writeToLog("Temporaries: could not delete " + file.getFullPathName() + " (in use?)");
+            return false;
+        }
+        if (isInsideLibrary(file)) removeEmptyFolders(file.getParentDirectory());
+    }
+
+    bool ok;
+    {
+        const juce::ScopedLock sl(dbLock);
+        ok = db.deleteTrack(trackId);
+    }
+    juce::Logger::writeToLog("Temporaries: deleted " + juce::String((int) trackId) + " " + file.getFileName());
+    ++catalogVersion;
+    return ok;
+}
+
+bool MusicLibrary::renameTemporary(int trackId, const juce::String& title, const juce::String& author) {
+    if (!isTemporary(trackId) || title.trim().isEmpty()) return false;
+    TrackNaming::Proposal values;
+    values.title = title.trim();
+    values.artist = author.trim();
+    return confirmTrack(trackId, values).ok;  // un temporal es del sistema: solo los nombres
 }
 
 void MusicLibrary::cancelImport() {
@@ -322,8 +404,10 @@ static juce::File freeFileIn(const juce::File& folder, const juce::String& baseN
     return file;
 }
 
-MusicLibrary::ImportResult MusicLibrary::processAndAddTrack(const juce::File& sourceFile, const juce::String& targetCategory, int batch) {
+MusicLibrary::ImportResult MusicLibrary::processAndAddTrack(const juce::File& sourceFile, const juce::String& targetCategory, int batch,
+                                                           int* trackIdOut) {
     juce::Logger::writeToLog("Processing: " + sourceFile.getFileName());
+    if (trackIdOut != nullptr) *trackIdOut = -1;
 
     // Lo que se guarda: el archivo tal cual (recodificar un MP3 a otro formato con pérdida lo
     // degrada) o, si JUCE no lo decodifica por su cuenta, un FLAC, que no pierde nada. Lo que
@@ -393,7 +477,15 @@ MusicLibrary::ImportResult MusicLibrary::processAndAddTrack(const juce::File& so
         const juce::ScopedLock sl(dbLock);
         category = findCategory(targetCategory);
     }
-    {
+    const bool temporary = category.role == CategoryRole::Temporaries;
+    if (temporary) {
+        // Un saludo o una nota de voz no tiene "Artista - Título": el título de sus etiquetas o
+        // el nombre del archivo, tal cual.
+        proposal.title = tags.title.trim();
+        proposal.artist = tags.artist.trim();
+        if (proposal.title.isEmpty()) proposal.title = TrackNaming::cleanFileName(source.fileName).trim();
+        if (proposal.title.isEmpty()) proposal.title = source.fileName;
+    } else {
         // Un artista que ya está en la biblioteca dice cómo leer el nombre ("Volveré - Wilfrido Vargas").
         const auto own = importContext == nullptr ? makeNamingContext({}) : TrackNaming::Context();
         const auto& context = importContext != nullptr ? *importContext : own;
@@ -413,10 +505,16 @@ MusicLibrary::ImportResult MusicLibrary::processAndAddTrack(const juce::File& so
     // título, duración parecida) aunque venga con otra codificación. Las cuñas,
     // identificaciones y separadores tienen duraciones fijas y nombres que se repiten (la
     // cuña de este mes se llama igual que la del anterior): ahí solo cuenta el mismo archivo.
+    // Los temporales solo se comparan entre sí: borrar uno nunca debe llevarse una cuña o una
+    // canción que sonaba igual.
     {
         const juce::ScopedLock sl(dbLock);
-        auto existing = db.findTrackByHash(hash);
-        if (existing.id == -1 && sourceHash != hash) existing = db.findTrackByHash(sourceHash);
+        const int temporaries = db.getSystemCategory(CategoryRole::Temporaries).id;
+        auto findSame = [&](const std::string& h) {
+            return temporary ? db.findTrackByHashInCategory(h, category.id) : db.findTrackByHash(h, temporaries);
+        };
+        auto existing = findSame(hash);
+        if (existing.id == -1 && sourceHash != hash) existing = findSame(sourceHash);
         if (existing.id == -1 && music && proposal.artist.isNotEmpty())
             existing = db.findDuplicate(proposal.key().toStdString(), duration, duplicateToleranceSeconds, -1);
         if (existing.id != -1) {
@@ -424,6 +522,7 @@ MusicLibrary::ImportResult MusicLibrary::processAndAddTrack(const juce::File& so
             if (category.id != -1) db.addTrackCategory(existing.id, category.id);
             juce::Logger::writeToLog("Import: duplicate of track " + juce::String(existing.id) + ", skipped: "
                                      + sourceFile.getFileName());
+            if (trackIdOut != nullptr) *trackIdOut = existing.id;
             return ImportResult::Duplicate;
         }
     }
@@ -483,6 +582,7 @@ MusicLibrary::ImportResult MusicLibrary::processAndAddTrack(const juce::File& so
     }
 
     const auto inserted = db.getTrackByPath(t.path);
+    if (trackIdOut != nullptr) *trackIdOut = inserted.id;
     if (inserted.id != -1) {
         if (category.id != -1) db.setTrackCategories(inserted.id, { category.id });
         if (music) {
@@ -644,8 +744,16 @@ void MusicLibrary::runBackgroundAnalysis(juce::Thread& thread) {
 }
 
 std::vector<TrackInfo> MusicLibrary::search(const juce::String& query, const juce::String& categoryFilter) {
-    const juce::ScopedLock sl(dbLock);
-    return db.searchTracks(query.toStdString(), categoryFilter.toStdString());
+    std::vector<TrackInfo> tracks;
+    {
+        const juce::ScopedLock sl(dbLock);
+        tracks = db.searchTracks(query.toStdString(), categoryFilter.toStdString());
+    }
+    // Los temporales tienen su pestaña: ni la biblioteca ni el generador los ven.
+    tracks.erase(std::remove_if(tracks.begin(), tracks.end(),
+                                [](const TrackInfo& t) { return t.systemRole == CategoryRole::Temporaries; }),
+                 tracks.end());
+    return tracks;
 }
 
 TrackInfo MusicLibrary::getTrackByPath(const juce::String& path) {
@@ -670,8 +778,15 @@ bool MusicLibrary::deleteCategory(const juce::String& name) {
 }
 
 std::vector<Category> MusicLibrary::getCategories() {
-    const juce::ScopedLock sl(dbLock);
-    return db.getCategories();
+    std::vector<Category> categories;
+    {
+        const juce::ScopedLock sl(dbLock);
+        categories = db.getCategories();
+    }
+    categories.erase(std::remove_if(categories.begin(), categories.end(),
+                                    [](const Category& c) { return c.role == CategoryRole::Temporaries; }),
+                     categories.end());
+    return categories;
 }
 
 Category MusicLibrary::getSystemCategory(CategoryRole role) {
@@ -691,6 +806,7 @@ juce::String MusicLibrary::getDisplayName(const Category& category) {
         case CategoryRole::StationIds: return TRANS("cat_station_ids");
         case CategoryRole::Spots:      return TRANS("cat_spots");
         case CategoryRole::Sweepers:   return TRANS("cat_sweepers");
+        case CategoryRole::Temporaries: return TRANS("cat_temporaries");
         default:                       return juce::String(category.name);
     }
 }

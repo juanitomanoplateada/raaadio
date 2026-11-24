@@ -596,10 +596,17 @@ void RaaadioLookAndFeel::drawTableHeaderColumn(Graphics& g, TableHeaderComponent
 }
 
 //==============================================================================
-// Pestañas: texto con subrayado de acento en la activa.
+// Pestañas: texto con subrayado de acento en la activa. Con la propiedad "compact" (si no caben
+// todas), solo el icono; el nombre queda en la ayuda emergente.
+
+static bool isCompactTab(TabBarButton& button)
+{
+    return (bool) button.getProperties()["compact"] && button.getProperties()["icon"].toString().isNotEmpty();
+}
 
 int RaaadioLookAndFeel::getTabButtonBestWidth(TabBarButton& button, int tabDepth)
 {
+    if (isCompactTab(button)) return 48;
     const float textWidth = GlyphArrangement::getStringWidth(getTabButtonFont(button, (float) tabDepth),
                                                              button.getButtonText().trim());
     const bool hasIcon = button.getProperties()["icon"].toString().isNotEmpty();
@@ -620,7 +627,8 @@ void RaaadioLookAndFeel::drawTabButton(TabBarButton& button, Graphics& g, bool i
                         : (isMouseOver ? t.getPrimaryTextColour().withAlpha(0.85f) : t.getSecondaryTextColour());
 
     drawIconAndText(g, area.reduced(12.0f, 0.0f), button.getProperties()["icon"].toString(),
-                    button.getButtonText().trim(), getTabButtonFont(button, area.getHeight()), colour);
+                    isCompactTab(button) ? String() : button.getButtonText().trim(),
+                    getTabButtonFont(button, area.getHeight()), colour);
 
     if (front)
     {

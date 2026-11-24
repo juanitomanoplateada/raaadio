@@ -74,16 +74,25 @@ bool AudioConverter::isOggOpus(const juce::File& file) {
     return packet + 8 <= size && memcmp(data + packet, "OpusHead", 8) == 0;
 }
 
-juce::StringArray AudioConverter::arguments(const juce::File& ffmpeg, const juce::File& source, const juce::File& target) {
-    return { ffmpeg.getFullPathName(), "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+juce::StringArray AudioConverter::arguments(const juce::File& ffmpeg, const juce::File& source, const juce::File& target,
+                                            Format format) {
+    juce::StringArray args { ffmpeg.getFullPathName(), "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
              // "file:": un nombre con ":" o que empiece con "-" no se toma por otra cosa.
              "-i", "file:" + source.getFullPathName(),
-             // Las etiquetas del archivo y las del audio (las de un Opus van en el audio).
-             "-map", "0:a:0", "-map_metadata", "0", "-map_metadata", "0:s:a:0",
-             // FFmpeg elige el formato más cercano: un 5.1 queda en estéreo, 8 kHz en 44,1.
-             "-af", "aformat=sample_fmts=s16:channel_layouts=mono|stereo:sample_rates=44100|48000",
-             "-c:a", "flac", "-fflags", "+bitexact", "-flags:a", "+bitexact",
-             "-f", "flac", "file:" + target.getFullPathName() };
+             // Las etiquetas del archivo y las del audio (las de un Opus van en el audio). Solo
+             // el primer audio: de un video no queda la imagen.
+             "-map", "0:a:0", "-map_metadata", "0", "-map_metadata", "0:s:a:0" };
+    if (format == Format::Mp3) {
+        args.addArray({ "-af", "aformat=channel_layouts=mono|stereo:sample_rates=44100|48000",
+                        "-c:a", "libmp3lame", "-q:a", "0", "-id3v2_version", "3",
+                        "-fflags", "+bitexact", "-flags:a", "+bitexact", "-f", "mp3" });
+    } else {
+        // FFmpeg elige el formato más cercano: un 5.1 queda en estéreo, 8 kHz en 44,1.
+        args.addArray({ "-af", "aformat=sample_fmts=s16:channel_layouts=mono|stereo:sample_rates=44100|48000",
+                        "-c:a", "flac", "-fflags", "+bitexact", "-flags:a", "+bitexact", "-f", "flac" });
+    }
+    args.add("file:" + target.getFullPathName());
+    return args;
 }
 
 bool AudioConverter::isAvailable() const {
@@ -92,11 +101,21 @@ bool AudioConverter::isAvailable() const {
 
 AudioConverter::Result AudioConverter::toFlac(const juce::File& source, const juce::File& target,
                                               const ProcessRunner::StopCheck& shouldStop) const {
+    return convert(source, target, Format::Flac, shouldStop);
+}
+
+AudioConverter::Result AudioConverter::toMp3(const juce::File& source, const juce::File& target,
+                                             const ProcessRunner::StopCheck& shouldStop) const {
+    return convert(source, target, Format::Mp3, shouldStop);
+}
+
+AudioConverter::Result AudioConverter::convert(const juce::File& source, const juce::File& target, Format format,
+                                               const ProcessRunner::StopCheck& shouldStop) const {
     const auto ffmpeg = services.findFfmpeg();
     if (!ffmpeg.existsAsFile()) return Result::Unavailable;
 
     juce::StringArray output;  // las últimas líneas, para el registro si falla
-    const int code = services.run(arguments(ffmpeg, source, target), [&output](const juce::String& line) {
+    const int code = services.run(arguments(ffmpeg, source, target, format), [&output](const juce::String& line) {
         output.add(line);
         if (output.size() > 20) output.remove(0);
     }, shouldStop);

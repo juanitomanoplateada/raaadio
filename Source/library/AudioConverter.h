@@ -36,14 +36,20 @@ public:
     // FFmpeg: el primer audio de source (no la carátula) a FLAC de 16 bits, mono o estéreo, a
     // 44,1 o 48 kHz, con sus etiquetas. Sin la versión de FFmpeg en el archivo: el mismo
     // original da siempre el mismo FLAC, y así se reconoce si se importa otra vez.
-    static juce::StringArray arguments(const juce::File& ffmpeg, const juce::File& source, const juce::File& target);
+    // Mp3: lo mismo a MP3 de calidad variable máxima (V0), para el audio de un video bajado de
+    // una red social (ya venía con pérdida: un FLAC solo ocuparía más).
+    enum class Format { Flac, Mp3 };
+    static juce::StringArray arguments(const juce::File& ffmpeg, const juce::File& source, const juce::File& target,
+                                       Format format = Format::Flac);
 
     bool isAvailable() const;
 
     enum class Result { Converted, Unavailable, Failed, Cancelled };
-    // Convierte source a FLAC en target (quien lo pide lo borra). Bloquea mientras FFmpeg trabaja.
+    // Convierte source a FLAC o MP3 en target (quien lo pide lo borra). Bloquea mientras FFmpeg trabaja.
     Result toFlac(const juce::File& source, const juce::File& target, const ProcessRunner::StopCheck& shouldStop) const;
+    Result toMp3(const juce::File& source, const juce::File& target, const ProcessRunner::StopCheck& shouldStop) const;
 
 private:
     Services services;
+    Result convert(const juce::File& source, const juce::File& target, Format format, const ProcessRunner::StopCheck& shouldStop) const;
 };

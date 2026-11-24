@@ -20,14 +20,36 @@ public:
     // revisión los confirma y la ordena en Library/Musica. Las cuñas, identificaciones y
     // separadores entran directo a la carpeta de su categoría.
     // NeedsFfmpeg: el archivo se puede importar convirtiéndolo, pero FFmpeg no está instalado.
+    // trackId: la pista que quedó (la nueva, o la que ya estaba si era un duplicado).
     enum class ImportResult { Added, Duplicate, Failed, NeedsFfmpeg };
-    ImportResult processAndAddTrack(const juce::File& sourceFile, const juce::String& targetCategory = "", int batch = 0);
+    ImportResult processAndAddTrack(const juce::File& sourceFile, const juce::String& targetCategory = "", int batch = 0,
+                                    int* trackId = nullptr);
     void importFiles(const juce::Array<juce::File>& files, const juce::String& targetCategory = "");
     // Una canción descargada (búsqueda en internet): entra por revisar como la música importada,
     // en un lote propio que se puede deshacer, y guarda su ISRC. Si hay una importación en curso
     // espera a que termine (se llama desde otro hilo).
     struct DownloadImport { ImportResult result = ImportResult::Failed; int trackId = -1; };
     DownloadImport importDownloaded(const juce::File& file, const juce::String& batchSource, const juce::String& isrc);
+
+    //==========================================================================
+    // Audios temporales (CategoryRole::Temporaries): un saludo, un mensaje, una nota de voz, un
+    // audio de redes que hay que pasar una o varias veces. Se analizan y normalizan como todo,
+    // entran directo (sin revisión) a Library/_Temporales/<fecha>, no aparecen entre las
+    // categorías ni en la búsqueda de la biblioteca, y AutoDJ y el generador no los usan. Solo
+    // se comparan entre sí: el mismo audio importado como cuña es otro archivo.
+    void importTemporaries(const juce::Array<juce::File>& files);  // en su hilo, como importFiles
+    // Un audio bajado de un enlace (ya en MP3): entra con ese título y ese autor. Desde otro
+    // hilo; si hay una importación en curso, espera a que termine.
+    DownloadImport importTemporaryDownload(const juce::File& file, const juce::String& title, const juce::String& author);
+    std::vector<TrackInfo> getTemporaries();  // el más reciente primero
+    bool isTemporary(int trackId);
+    // Borra de verdad un temporal: el archivo y su registro (el registro de emisión conserva
+    // lo que salió al aire). Solo si es un temporal; false si el archivo no se pudo borrar
+    // (por ejemplo, porque algo lo tiene abierto), y entonces no se borra nada.
+    bool deleteTemporary(int trackId);
+    // Cambia el título y el autor que se muestran (el archivo no se mueve).
+    bool renameTemporary(int trackId, const juce::String& title, const juce::String& author);
+
     void cancelImport();
     // "*.mp3;*.wav;..." con los formatos que la biblioteca sabe leer o convertir (para elegir archivos).
     juce::String getSupportedFileWildcard() const;
@@ -73,6 +95,7 @@ public:
     TrackInfo ensureAnalysed(const TrackInfo& track, const std::function<bool()>& shouldAbort = {});
 
     //==========================================================================
+    // La biblioteca, sin los audios temporales (que tienen su pestaña).
     std::vector<TrackInfo> search(const juce::String& query, const juce::String& categoryFilter = "");
     TrackInfo getTrackByPath(const juce::String& path);
     TrackInfo getTrackById(int id);
@@ -152,8 +175,9 @@ public:
     bool addCategory(const juce::String& name);
     bool renameCategory(const juce::String& oldName, const juce::String& newName);
     bool deleteCategory(const juce::String& name);
+    // Las categorías para elegir, filtrar y programar: todas menos la de los temporales.
     std::vector<Category> getCategories();
-    // Categorías del sistema (identificaciones, cuñas, separadores): se buscan por rol.
+    // Categorías del sistema (identificaciones, cuñas, separadores, temporales): se buscan por rol.
     Category getSystemCategory(CategoryRole role);  // id -1 si no existe
     std::vector<TrackInfo> getTracksWithRole(CategoryRole role);
     // Nombre para mostrar: las del sistema, traducido; las demás, tal como se crearon.

@@ -261,7 +261,16 @@ bool MainComponent::isOnAir() {
     return deckOnAir(audioEngine.getDeck(0)) || deckOnAir(audioEngine.getDeck(1)) || recording;
 }
 
+void MainComponent::dragOperationStarted(const juce::DragAndDropTarget::SourceDetails& details) {
+    wheelRouter.begin(details.sourceComponent.get());
+}
+
+void MainComponent::dragOperationEnded(const juce::DragAndDropTarget::SourceDetails&) {
+    wheelRouter.end();
+}
+
 MainComponent::~MainComponent() {
+    wheelRouter.end();
     // La interfaz se destruye antes que los servicios que observa (grabación, decks, AutoDJ).
     statusBar = nullptr;
     libraryComp = nullptr;

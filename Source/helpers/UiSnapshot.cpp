@@ -9,6 +9,7 @@
 #include "../ui/AdsListView.h"
 #include "../ui/ImportReviewView.h"
 #include "../ui/OnlineSearchView.h"
+#include "../ui/TemporariesView.h"
 #include "UiStyle.h"
 
 //==============================================================================
@@ -223,6 +224,7 @@ UiSnapshotRunner::UiSnapshotRunner(const Options& o) : options(o)
     // Las vistas ya estaban creadas antes de los datos de demostración.
     if (auto* libraryView = findFirstChild<LibraryView>(main.get())) libraryView->refresh();
     if (auto* adsList = findFirstChild<AdsListView>(main.get())) adsList->refreshList();
+    if (auto* temporaries = findFirstChild<TemporariesView>(main.get())) temporaries->refresh();
 
     target = createView();
 
@@ -241,6 +243,7 @@ UiSnapshotRunner::~UiSnapshotRunner()
 {
     stopTimer();
     dialogView = nullptr;
+    if (main != nullptr && main->libraryComp != nullptr) main->libraryComp->setSongDownloader(nullptr);  // la pestaña Temporales lo escucha
     demoDownloader = nullptr;
     main = nullptr;
 }
@@ -352,6 +355,38 @@ void UiSnapshotRunner::populateDemoState()
         main->cartPlayer->assign(i == 2 ? 4 : i, addTrack(j.artist, j.title, j.duration, j.category, file.getFullPathName()));
     }
 
+    // Temporales: saludos y mensajes de la semana (uno en la cola y otro en la botonera, para
+    // ver sus marcas), con audio de verdad para la preescucha.
+    std::vector<TrackInfo> temporaries;
+    {
+        struct Temporary { const char* title; const char* author; double duration; int plays; };
+        const Temporary demo[] = {
+            { "Nota de voz: reporte del tráfico", "", 31, 0 },
+            { "Audio de la alcaldía: jornada de vacunación", "Alcaldía", 58, 3 },
+            { "Mensaje de la Junta de Acción Comunal", "JAC barrio El Prado", 75, 1 },
+            { "Saludo de cumpleaños para doña Rosa", "Familia Pérez", 42, 2 },
+        };
+        const int temporaryCategory = library.getSystemCategory(CategoryRole::Temporaries).id;
+        for (int i = 0; i < 4; ++i) {
+            const auto& d = demo[i];
+            const auto file = writeDemoAudio(PersistenceManager::getLibraryFolder().getChildFile("_Temporales/demo_" + juce::String(i) + ".wav"),
+                                             d.duration, 40 + i);
+            TrackInfo t;
+            t.path = file.getFullPathName().toStdString();
+            t.title = juce::String::fromUTF8(d.title).toStdString();
+            t.artist = juce::String::fromUTF8(d.author).toStdString();
+            t.duration = d.duration;
+            t.normalizationGain = 1.0;
+            db.addTrack(t);
+            auto stored = db.getTrackByPath(t.path);
+            if (stored.id == -1) continue;
+            library.setTrackCategories(stored.id, { temporaryCategory });
+            for (int p = 0; p < d.plays; ++p) db.incrementPlayCount(stored.id);
+            temporaries.push_back(library.getTrackById(stored.id));
+        }
+        if (temporaries.size() == 4) main->cartPlayer->assign(5, temporaries[1]);
+    }
+
     // Revisión: un lote de merengue con los nombres tal como llegan ("TÍTULO - ARTISTA
     // (compositores) año"), con un duplicado y un artista mal escrito.
     if (options.view.startsWith("review"))
@@ -458,6 +493,7 @@ void UiSnapshotRunner::populateDemoState()
     // Cola de reproducción con una identificación intercalada.
     std::vector<TrackInfo> queue(added.begin(), added.begin() + 22);
     queue.insert(queue.begin() + 4, station1);
+    if (temporaries.size() == 4) queue.insert(queue.begin() + 7, temporaries[2]);  // un mensaje programado
     main->playlist.insertTracks(queue, 0);
 
     // Historial reciente.
@@ -510,6 +546,53 @@ juce::Component* UiSnapshotRunner::createView()
         if (view != "main")
             if (auto* tabs = findFirstChild<juce::TabbedComponent>(main->libraryComp.get()))
                 tabs->setCurrentTabIndex(view == "history" ? 1 : view == "ads" ? 2 : 3);
+        return main.get();
+    }
+
+    // Temporales: la lista con uno elegido; con "-link", además un enlace de Instagram bajándose
+    // (yt-dlp de mentira que llega al 62 % y espera); con "-empty", vacía.
+    if (view == "temporaries" || view == "temporaries-link" || view == "temporaries-empty")
+    {
+        if (view == "temporaries-empty")
+        {
+            main->cartPlayer->clear(5);
+            for (const auto& t : main->library.getTemporaries())
+            {
+                if (const int queued = main->playlist.findIndexForId(t.id); queued >= 0)
+                    main->playlist.removeTrack(queued);
+                main->library.deleteTemporary(t.id);
+            }
+        }
+        if (view == "temporaries-link")
+        {
+            const auto lab = PersistenceManager::getLibraryFolder().getParentDirectory();
+            SongDownloader::Services services;
+            services.toolsFolder = lab.getChildFile("DemoTools");
+            services.toolsFolder.getChildFile("yt-dlp.exe").create();
+            services.toolsFolder.getChildFile("ffmpeg/ffmpeg.exe").create();
+            services.workFolder = lab.getChildFile("DemoDownloads");
+            services.pathVariable = juce::String();
+            services.minGapSeconds = 0;
+            services.maxJitterSeconds = 0;
+            services.run = [](const juce::StringArray& command, const ProcessRunner::LineCallback& onLine, const ProcessRunner::StopCheck& shouldStop) {
+                if (command.contains("-U")) return 0;
+                onLine(juce::String::fromUTF8("[raaadio-title] \"Saludo de la Banda Municipal desde el parque\""));
+                onLine("[raaadio-author] \"bandamunicipal\"");
+                onLine("[raaadio]  23.0%");
+                onLine("[raaadio]  62.0%");
+                while (!shouldStop()) juce::Thread::sleep(20);
+                return (int) ProcessRunner::stopped;
+            };
+            demoDownloader = std::make_unique<SongDownloader>(main->library, services);
+            demoDownloader->acknowledge(true);
+            demoDownloader->enqueueLink("https://www.instagram.com/reel/C0aBcDeFgHi/");
+            main->libraryComp->setSongDownloader(demoDownloader.get());
+        }
+        if (auto* tabs = findFirstChild<juce::TabbedComponent>(main->libraryComp.get()))
+            tabs->setCurrentTabIndex(4);
+        if (auto* temporaries = findFirstChild<TemporariesView>(main.get()))
+            if (auto* table = findFirstChild<juce::TableListBox>(temporaries))
+                table->selectRow(0);
         return main.get();
     }
 

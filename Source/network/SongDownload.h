@@ -40,7 +40,12 @@ enum class Problem {
     Region,         // no disponible en el país
     Network,        // sin conexión, tiempo agotado
     Tools,          // falta FFmpeg u otro programa
-    Other
+    Other,
+    // Enlaces de redes sociales (LinkDownload):
+    LoginRequired,  // privado o pide iniciar sesión (RAAADIO no usa la sesión del navegador)
+    NoAudio,        // la publicación no tiene video ni audio (una foto, un texto)
+    Unsupported,    // yt-dlp no conoce ese sitio
+    Live            // una transmisión en vivo: no termina nunca
 };
 Problem classify(const juce::String& output);
 // Cuánto esperar antes de volver a pedirle algo a YouTube después de ese problema (0: no hace

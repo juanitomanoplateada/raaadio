@@ -69,13 +69,30 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
   como `.mp3`, tal cual y sin FFmpeg. Un archivo de un formato conocido que JUCE no lee (un
   WAV con MP2 adentro) se intenta con FFmpeg. Si falta FFmpeg, al terminar la importación se
   ofrece instalar solo FFmpeg y esos archivos se importan solos después.
+- **Audios temporales** (pestaña *Temporales*, `TemporariesView`, `TemporaryAudio`,
+  `LinkDownload`): saludos, mensajes, notas de voz y audios de redes que se pasan una o varias
+  veces. *Importar temporal* (junto a *Importar cuñas* e *Importar*) o soltar archivos sobre la
+  lista; entran sin revisión a `Library/_Temporales/<fecha>`, analizados y normalizados como todo.
+  Una categoría fija nueva (`CategoryRole::Temporaries`, guardada como `_Temporales`) los separa:
+  no aparecen en la biblioteca, entre las categorías ni en la revisión, y AutoDJ, el generador y la
+  protección contra silencio no los usan; solo se comparan entre sí al buscar duplicados (una cuña
+  igual es otra pista). Desde la lista se preescuchan por Cue, salen al aire, se cargan en un
+  deck, van a la cola o a la botonera (también arrastrándolos) y se renombran; cada fila muestra
+  las veces al aire y si está en un deck, en la cola o en la botonera. *Quitar* y *Vaciar* borran
+  de verdad archivo y registro, con confirmación y nunca lo que está en un deck, sonando o en la
+  cola. **Enlaces de redes**: se pega el enlace de Facebook, Instagram, X, TikTok, YouTube u otro
+  sitio que entienda yt-dlp y se baja solo el audio, que FFmpeg (`AudioConverter`, ahora también a
+  MP3) convierte a MP3; va en la fila de `SongDownloader`, con su pausa entre descargas y su
+  cancelación, pero el tope por hora y las pausas de YouTube ya no frenan a los demás sitios. Sin
+  cookies ni sesión del navegador: lo privado o lo que pide iniciar sesión da un error claro
+  (`SongDownload::Problem::LoginRequired`, `NoAudio`, `Unsupported`, `Live`).
 - **Búsqueda FTS5** sin mayúsculas ni tildes, por partes de palabras, créditos y nombre
   original. **Separación de artistas por intérprete** en el generador (con invitados).
 - **Mostrar en MAYÚSCULAS** (*Configuración → Biblioteca y datos*): los nombres se guardan
   bien escritos y se ven en mayúsculas si la emisora lo prefiere. Una biblioteca que ya
   existía queda así al migrar. La búsqueda no distingue tildes.
 - **Análisis de audio al importar** (`TrackAnalyzer`): sonoridad integrada EBU R 128
-  con libebur128, pico real con sobremuestreo 4×, normalización a −16 LUFS y puntos
+  con libebur128, pico real con sobremuestreo 4×, normalización a −14 LUFS y puntos
   de entrada y salida guardados en la base de datos. Las pistas de versiones anteriores
   se analizan en segundo plano.
 - **Etiquetas** ID3v1/v2, comentarios Vorbis e INFO de WAV (`TagReader`); detección de
@@ -133,6 +150,13 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
 
 ### Cambiado
 
+- **Fila de pestañas del panel derecho**: con la pestaña *Temporales* y el botón *Importar
+  temporal*, si no cabe todo, primero los botones y después las pestañas cerradas quedan solo con
+  su icono (el nombre sigue en la ayuda emergente); la pestaña abierta siempre muestra su nombre.
+- **Sonoridad objetivo de −16 a −14 LUFS**, como Spotify y YouTube: la música suena unos
+  2 dB más fuerte. Al abrir, las ganancias de lo ya analizado se recalculan con la sonoridad
+  y el pico guardados, sin volver a analizar la biblioteca; el objetivo aplicado queda
+  anotado en la base (`library.normalizationTarget`).
 - **Artista y título ya no se guardan en mayúsculas**, y un nombre sin etiquetas ya no se
   parte en cualquier guion: solo en `" - "`, con el formato de su carpeta. La música deja de
   ordenarse en la carpeta de su categoría (una canción puede estar en varias); las cuñas,
@@ -187,6 +211,15 @@ calidad de audio, pauta publicitaria, datos y organización del repositorio.
 
 ### Corregido
 
+- Al arrastrar una pista de la biblioteca (o de las cuñas o los temporales) a la cola, la rueda
+  del mouse movía la biblioteca y no la cola: JUCE se la manda a la lista donde empezó el
+  arrastre. Ahora se desplaza la lista que está bajo el puntero (`WheelRouter`), y la cola además
+  se desplaza sola al arrastrar cerca de su borde de arriba (o de la cabecera) o de abajo, con la
+  marca de inserción siguiendo el desplazamiento.
+- La prueba de interfaz *Mover la emisora… copia completa* fallaba a veces: contestaba la
+  primera ventana modal que aparecía, y si la copia seguía en curso esa era la ventana de
+  avance, que al cerrarse cancela la copia. Ahora espera el aviso del final. Para repetir una
+  prueba sin correr toda la suite, `RAAADIO_TESTS=<parte del nombre>` corre solo esas clases.
 - Mover filas de la cola con las flechas podía cerrar la aplicación: al deseleccionar, la
   tabla borraba el control de la fila mientras su botón todavía se estaba pulsando.
 - "Reproducir ahora" cortaba el aire: detenía el deck B y reemplazaba el A sin preguntar.

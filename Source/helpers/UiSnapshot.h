@@ -17,7 +17,8 @@ class StreamEncoder;
 //   RAAADIO.exe --ui-snapshot salida.png [--size 1920x1080] [--theme dark|light]
 //               [--lang es|en] [--view main|empty|history|ads|settings|settings-library|
 //                                     settings-broadcast|settings-broadcast-2|settings-language|settings-about|
-//                                     cartwall|generator|generator-advanced|track|import|library-online|online-search]
+//                                     cartwall|generator|generator-advanced|track|import|library-online|online-search|
+//                                     temporaries|temporaries-link|temporaries-empty]
 class UiSnapshotRunner : private juce::Timer
 {
 public:

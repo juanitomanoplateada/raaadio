@@ -173,6 +173,8 @@ target_sources(RAAADIO PRIVATE
     Source/ui/CartwallView.h
     Source/ui/CartwallView.cpp
     Source/ui/DragFormats.h
+    Source/ui/DragScroll.h
+    Source/ui/DragScroll.cpp
     Source/ui/WaveformComponent.h
     Source/ui/WaveformComponent.cpp
     Source/ui/PlaylistComponent.h
@@ -229,6 +231,8 @@ target_sources(RAAADIO PRIVATE
     Source/network/SongDownload.cpp
     Source/network/SongDownloader.h
     Source/network/SongDownloader.cpp
+    Source/network/LinkDownload.h
+    Source/network/LinkDownload.cpp
     Source/helpers/ProcessRunner.h
     Source/helpers/ProcessRunner.cpp
     Source/library/TagWriter.h
@@ -236,6 +240,8 @@ target_sources(RAAADIO PRIVATE
     Source/library/MusicLibrary.h
     Source/library/AudioConverter.h
     Source/library/AudioConverter.cpp
+    Source/library/TemporaryAudio.h
+    Source/library/TemporaryAudio.cpp
     Source/library/MusicLibrary.cpp
     Source/library/TagReader.h
     Source/library/TagReader.cpp
@@ -290,6 +296,8 @@ target_sources(RAAADIO PRIVATE
     Source/ui/ArtistsView.cpp
     Source/ui/OnlineSearchView.h
     Source/ui/OnlineSearchView.cpp
+    Source/ui/TemporariesView.h
+    Source/ui/TemporariesView.cpp
 )
 
 target_compile_features(RAAADIO PRIVATE cxx_std_17)
@@ -373,6 +381,7 @@ if(RAAADIO_BUILD_TESTS)
         Source/database/Catalog.cpp
         Source/library/MusicLibrary.cpp
         Source/library/AudioConverter.cpp
+        Source/library/TemporaryAudio.cpp
         Source/library/Playlist.cpp
         Source/library/PlaylistStore.cpp
         Source/library/HistoryManager.cpp
@@ -411,6 +420,7 @@ if(RAAADIO_BUILD_TESTS)
         Source/network/DownloadTools.cpp
         Source/network/SongDownload.cpp
         Source/network/SongDownloader.cpp
+        Source/network/LinkDownload.cpp
         Source/helpers/ProcessRunner.cpp
         Source/library/TagWriter.cpp
         Source/helpers/StationSettings.cpp
@@ -435,6 +445,7 @@ if(RAAADIO_BUILD_TESTS)
         Source/ui/CategorySidebarComponent.cpp
         Source/ui/CreditsEditor.cpp
         Source/ui/DeckComponent.cpp
+        Source/ui/DragScroll.cpp
         Source/ui/HistoryView.cpp
         Source/ui/ImportReviewView.cpp
         Source/ui/LibraryComponent.cpp
@@ -446,6 +457,7 @@ if(RAAADIO_BUILD_TESTS)
         Source/ui/RecordingPanel.cpp
         Source/ui/ScheduleView.cpp
         Source/ui/StatusBar.cpp
+        Source/ui/TemporariesView.cpp
         Source/ui/TrackDetailsDialog.cpp
         Source/ui/WaveformComponent.cpp
     )

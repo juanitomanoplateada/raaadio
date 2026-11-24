@@ -93,5 +93,21 @@ private:
 
     int insertionIndex = -1;
 
+    // Arrastrar una pista cerca del borde de arriba (o de la cabecera) o del de abajo de la
+    // cola la desplaza sola, más rápido cuanto más cerca del borde: así se llega a cualquier
+    // fila de una cola larga. La marca de inserción sigue al desplazamiento.
+    static constexpr int autoScrollBorder = 40, autoScrollMaxStep = 16, autoScrollIntervalMs = 40;
+    struct DragAutoScroller : public juce::Timer {
+        explicit DragAutoScroller(PlaylistComponent& o) : owner(o) {}
+        void timerCallback() override { owner.autoScrollWhileDragging(); }
+        PlaylistComponent& owner;
+    };
+    DragAutoScroller dragAutoScroller { *this };
+    juce::Point<int> dragPosition;  // el último punto del arrastre, en coordenadas de la cola
+    bool dragHovering = false;
+    void updateInsertionAt(juce::Point<int> position);
+    void autoScrollWhileDragging();
+    void stopDragHover();
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PlaylistComponent)
 };

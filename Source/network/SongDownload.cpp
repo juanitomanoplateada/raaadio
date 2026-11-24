@@ -84,13 +84,18 @@ juce::String problemKey(Problem problem) {
         case Problem::Network:       return "network";
         case Problem::Tools:         return "tools";
         case Problem::Other:         return "other";
+        case Problem::LoginRequired: return "login_required";
+        case Problem::NoAudio:       return "no_audio";
+        case Problem::Unsupported:   return "unsupported";
+        case Problem::Live:          return "live";
     }
     return "other";
 }
 
 Problem problemFromKey(const juce::String& key) {
     for (auto p : { Problem::RateLimited, Problem::BotCheck, Problem::Unavailable, Problem::AgeRestricted,
-                    Problem::Region, Problem::Network, Problem::Tools, Problem::Other })
+                    Problem::Region, Problem::Network, Problem::Tools, Problem::Other,
+                    Problem::LoginRequired, Problem::NoAudio, Problem::Unsupported, Problem::Live })
         if (problemKey(p) == key) return p;
     return Problem::None;
 }
